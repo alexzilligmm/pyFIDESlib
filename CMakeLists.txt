@@ -49,8 +49,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
-set(CMAKE_C_COMPILER "clang")
-set(CMAKE_CXX_COMPILER "clang++")
+# Compiler: default to the system/environment compiler.
+# Pass -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ to use Clang explicitly.
 
 ############### CUDA Configuration ###################
 
@@ -112,8 +112,41 @@ find_library(nccl_FOUND NAMES nccl HINTS  /usr/local/cuda/lib64 /usr/lib /usr/lo
 if (nccl_FOUND)
   message(STATUS "Found NCCL: ${nccl_FOUND}")
   add_compile_definitions(MULTI_GPU NCCL RCCL)
+  # Locate nccl.h: look one level up from the lib dir (e.g. .../nvidia/nccl/include)
+  get_filename_component(_nccl_lib_dir "${nccl_FOUND}" DIRECTORY)
+  link_directories("${_nccl_lib_dir}")
+  find_path(NCCL_INCLUDE_DIR nccl.h
+      HINTS "${_nccl_lib_dir}/../include" /usr/local/cuda/include /usr/include
+      NO_DEFAULT_PATH)
+  if (NCCL_INCLUDE_DIR)
+      message(STATUS "Found nccl.h at: ${NCCL_INCLUDE_DIR}")
+      include_directories(${NCCL_INCLUDE_DIR})
+  else()
+      message(WARNING "nccl.h not found next to NCCL library — add its directory to CMAKE_INCLUDE_PATH")
+  endif()
 else()
   message(STATUS "NCCL not found: building without NCCL support")
+endif()
+
+# Locate nvtx3.hpp (C++ header-only NVTX3 API).
+# The CUDA toolkit ships it under nsight-compute and nsight-systems with a
+# versioned sub-path, so we use file(GLOB) to avoid hardcoding the version.
+if (NOT DEFINED NVTX3_INCLUDE)
+  file(GLOB _nvtx3_candidates
+      "${CUDA_PATH}/opt/nvidia/nsight-compute/*/host/target-linux-x64/nvtx/include"
+      "${CUDA_PATH}/opt/nvidia/nsight-systems/*/target-linux-x64/nvtx/include")
+  foreach(_dir IN LISTS _nvtx3_candidates)
+    if(EXISTS "${_dir}/nvtx3/nvtx3.hpp")
+      set(NVTX3_INCLUDE "${_dir}")
+      break()
+    endif()
+  endforeach()
+endif()
+if (NVTX3_INCLUDE)
+  message(STATUS "Found nvtx3.hpp at: ${NVTX3_INCLUDE}")
+  include_directories("${NVTX3_INCLUDE}")
+else()
+  message(WARNING "nvtx3/nvtx3.hpp not found — pass -DNVTX3_INCLUDE=<dir> or add its parent to CMAKE_INCLUDE_PATH")
 endif()
 
 ############### OpenFHE Configuration ###################
@@ -146,8 +179,15 @@ include_directories(${OpenFHE_INCLUDE}/core)
 include_directories(${OpenFHE_INCLUDE}/pke)
 include_directories(${OpenFHE_INCLUDE}/binfhe)
 
-# Use Clang's OpenMP implementation.
-set (FIX_OMP_FLAGS "-fopenmp=libomp")
+# OpenMP: use -fopenmp=libomp for Clang, -fopenmp for GCC/other.
+# Can be overridden: -DFIX_OMP_FLAGS="-fopenmp"
+if (NOT DEFINED FIX_OMP_FLAGS)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set (FIX_OMP_FLAGS "-fopenmp=libomp")
+    else()
+        set (FIX_OMP_FLAGS "-fopenmp")
+    endif()
+endif()
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FIX_OMP_FLAGS}")
 set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler ${FIX_OMP_FLAGS}")
 
@@ -376,6 +416,13 @@ endif()
 
 
 ############### Benchmark ###################
+
+############### Python Bindings ###################
+
+option(FIDESLIB_COMPILE_PYTHON_BINDINGS "Build _pyfideslib pybind11 module" OFF)
+if (FIDESLIB_COMPILE_PYTHON_BINDINGS)
+    add_subdirectory(bindings)
+endif()
 
 if (FIDESLIB_COMPILE_BENCHMARKS)
 
