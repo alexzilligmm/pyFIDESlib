@@ -197,10 +197,10 @@ namespace FIDESlib::CKKS {
      */
     void dropToLevel(const int level);
 
-    //void addPt(const Plaintext& b);
-    //void multPt(const Plaintext& b, bool rescale = false);
-    // void multPtPt(const Plaintext& b, const Plaintext& c, bool rescale);
-    // void addMultPt(const Plaintext& b, const Plaintext& c, bool rescale = false);
+    void addPt(const Plaintext& b);
+    void multPt(const Plaintext& b, bool rescale = false);
+    void multPtPt(const Plaintext& b, const Plaintext& c, bool rescale);
+    void addMultPt(const Plaintext& b, const Plaintext& c, bool rescale = false);
 };
 
 }  // namespace FIDESlib::CKKS

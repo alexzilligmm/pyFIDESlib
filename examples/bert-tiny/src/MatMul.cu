@@ -141,7 +141,7 @@ void PCMM_GPU(std::vector<std::vector<FIDESlib::CKKS::Ciphertext>>& matrix1,
             if (mask_row.NoiseLevel > 1) {
                 mask_row.rescale();
             }
-            bias_masked.multPt(bias_masked, mask_row, true);
+            bias_masked.multPt(mask_row, true);
 
             dotProd.addPt(bias_masked);
             for (size_t k = 1; k < matrix2.size(); k++) {

@@ -87,7 +87,17 @@ find_package(pybind11 REQUIRED)
 # ---- Module definition ----
 # NOTE: CMAKE_INTERPROCEDURAL_OPTIMIZATION must already be OFF before this call.
 
-pybind11_add_module(_pyfideslib pyfideslib_bindings.cpp)
+set(BERT_TINY_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../examples/bert-tiny/src")
+
+pybind11_add_module(_pyfideslib
+    pyfideslib_bindings.cpp
+    matmul_bindings.cu
+    ${BERT_TINY_SRC}/MatMul.cu
+    ${BERT_TINY_SRC}/MatMul.cpp
+)
+
+# bert-tiny headers: MatMul.cuh, MatMul.h, PolyApprox.cuh, Transpose.cuh, Inputs.cuh
+target_include_directories(_pyfideslib PRIVATE "${BERT_TINY_SRC}")
 
 # Link against fideslib (provides both the library and the API include dirs)
 if(PYFIDESLIB_BINDINGS_STANDALONE)
@@ -97,6 +107,8 @@ else()
     # Parent project already has 'fideslib' target and API_DIR variable
     target_link_libraries(_pyfideslib PRIVATE fideslib)
     target_include_directories(_pyfideslib PRIVATE "${API_DIR}")
+    # MatMul.cu/MatMul.cuh include <CKKS/Context.cuh> etc. from the source tree
+    target_include_directories(_pyfideslib PRIVATE "${SOURCE_DIR}")
 endif()
 
 # Disable LTO at target level too (belt-and-suspenders)
