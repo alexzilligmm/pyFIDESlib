@@ -82,7 +82,7 @@ void PCMMSquare_GPU(FIDESlib::CKKS::Ciphertext& cMat1, const FIDESlib::CKKS::Pla
     assert(pMat2.c0.getLevel() - pMat2.NoiseLevel + 1 >= 2);
     assert(precomp.pts_1[0]->c0.getLevel() >= cMat1.c0.getLevel() - cMat1.NoiseLevel + 1);
     assert(precomp.pts_3_1[0]->c0.getLevel() >= cMat1.c0.getLevel() - cMat1.NoiseLevel);
-    linearTransform1.copy(cMat1);
+    // linearTransform1.copy(cMat1);
     LinearTransform(linearTransform1, 2 * rowSize - 1, precomp.bStep, precomp.pts_1, 1, -(int)rowSize + 1);
 
     // Steps 2 and 3: Initial computation
