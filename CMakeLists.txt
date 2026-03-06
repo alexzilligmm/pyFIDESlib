@@ -153,8 +153,13 @@ endif()
 
 # Default runs will not update nor install OpenFHE. Specify manually to install.
 if (FIDESLIB_INSTALL_OPENFHE)
-	execute_process(COMMAND ./build.sh ${OPENFHE_INSTALL_PREFIX}
-					WORKING_DIRECTORY "../deps" 
+	set(FIDESLIB_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+	set(FIDESLIB_OPENFHE_BUILD_SCRIPT "${FIDESLIB_DEPS_DIR}/build.sh")
+	if (NOT EXISTS "${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
+		message(FATAL_ERROR "OpenFHE build script not found at ${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
+	endif()
+	execute_process(COMMAND "${FIDESLIB_OPENFHE_BUILD_SCRIPT}" "${OPENFHE_INSTALL_PREFIX}"
+					WORKING_DIRECTORY "${FIDESLIB_DEPS_DIR}"
 					COMMAND_ERROR_IS_FATAL ANY)
 endif()
 
