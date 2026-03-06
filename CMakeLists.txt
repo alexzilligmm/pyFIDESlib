@@ -270,7 +270,7 @@ target_link_libraries(fideslib
 
 if (nccl_FOUND)
   message(STATUS "FIDESlib linked against NCCL")
-  target_link_libraries(fideslib PRIVATE nccl)
+  target_link_libraries(fideslib PRIVATE "${nccl_FOUND}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNCCL")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -DNCCL")
 endif()
