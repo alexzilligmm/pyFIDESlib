@@ -38,8 +38,13 @@ using SKPtr = PrivateKey<DCRTPoly>;
 using KP    = KeyPair<DCRTPoly>;
 using Params = CCParams<CryptoContextCKKSRNS>; // we support only ckks
 
+// Opaque wrapper around the shared_ptr<void> returned by EvalFastRotationPrecompute
+struct FastRotDigits { std::shared_ptr<void> data; };
+
 PYBIND11_MODULE(_pyfideslib, m) {
     m.doc() = "Python bindings for pyFIDESlib (fideslib 2.0 CPU+GPU CKKS API)";
+
+    py::class_<FastRotDigits>(m, "FastRotDigits");
 
     py::enum_<PKESchemeFeature>(m, "PKESchemeFeature", py::arithmetic())
         .value("PKE",          PKE)
@@ -281,6 +286,16 @@ PYBIND11_MODULE(_pyfideslib, m) {
         .def("eval_rotate",
              [](CC& cc, CTPtr ct, int32_t index) { return cc.EvalRotate(ct, index); },
              py::arg("ct"), py::arg("index"))
+        .def("eval_fast_rotation_precompute",
+             [](CC& cc, CTPtr ct) {
+                 return FastRotDigits{cc.EvalFastRotationPrecompute(ct)};
+             },
+             py::arg("ct"))
+        .def("eval_fast_rotate",
+             [](CC& cc, CTPtr ct, int32_t index, uint32_t m, const FastRotDigits& digits) {
+                 return cc.EvalFastRotation(ct, index, m, digits.data);
+             },
+             py::arg("ct"), py::arg("index"), py::arg("m"), py::arg("digits"))
         .def("rescale",
              [](CC& cc, CTPtr ct) { return cc.Rescale(ct); },
              py::arg("ct"))
