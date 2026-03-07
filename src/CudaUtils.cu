@@ -8,7 +8,7 @@
 #include "CudaUtils.cuh"
 
 #include <iostream>
-#include <nvtx3/nvtx3.hpp>
+#include <cub/detail/nvtx3.hpp>
 
 //#include "driver_types.h"
 #include "CKKS/Context.cuh"
