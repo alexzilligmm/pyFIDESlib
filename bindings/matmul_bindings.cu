@@ -7,6 +7,7 @@
 #include <fideslib.hpp>
 
 #include "MatMul.cuh"
+#include "matmul_bindings.h"
 
 namespace py = pybind11;
 

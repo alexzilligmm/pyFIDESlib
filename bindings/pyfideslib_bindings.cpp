@@ -20,15 +20,11 @@
 
 #include <fideslib.hpp>
 
+#include "matmul_bindings.h"
+
 namespace py = pybind11;
 using namespace fideslib;
 
-// Defined in matmul_bindings.cu — GPU matrix multiplication bindings.
-void init_matmul_bindings(py::module_& m);
-
-// ---------------------------------------------------------------------------
-// Type aliases for readability
-// ---------------------------------------------------------------------------
 using CC    = CryptoContextImpl<DCRTPoly>;
 using CCPtr = CryptoContext<DCRTPoly>;
 using CT    = CiphertextImpl<DCRTPoly>;
@@ -40,7 +36,7 @@ using PKPtr = PublicKey<DCRTPoly>;
 using SK    = PrivateKeyImpl<DCRTPoly>;
 using SKPtr = PrivateKey<DCRTPoly>;
 using KP    = KeyPair<DCRTPoly>;
-using Params = CCParams<CryptoContextCKKSRNS>;
+using Params = CCParams<CryptoContextCKKSRNS>; // we support only ckks
 
 PYBIND11_MODULE(_pyfideslib, m) {
     m.doc() = "Python bindings for pyFIDESlib (fideslib 2.0 CPU+GPU CKKS API)";
@@ -57,10 +53,10 @@ PYBIND11_MODULE(_pyfideslib, m) {
         .export_values();
 
     py::enum_<ScalingTechnique>(m, "ScalingTechnique")
-        .value("FIXEDMANUAL",     FIXEDMANUAL)
-        .value("FIXEDAUTO",       FIXEDAUTO)
-        .value("FLEXIBLEAUTO",    FLEXIBLEAUTO)
-        .value("FLEXIBLEAUTOEXT", FLEXIBLEAUTOEXT)
+        .value("FIXEDMANUAL",            FIXEDMANUAL)
+        .value("FIXEDAUTO",              FIXEDAUTO)
+        .value("FLEXIBLEAUTO",           FLEXIBLEAUTO)
+        .value("FLEXIBLEAUTOEXT",        FLEXIBLEAUTOEXT)
         .export_values();
 
     py::enum_<KeySwitchTechnique>(m, "KeySwitchTechnique")
@@ -101,11 +97,29 @@ PYBIND11_MODULE(_pyfideslib, m) {
         .def("set_scaling_mod_size",     &Params::SetScalingModSize,      py::arg("size"))
         .def("set_batch_size",           &Params::SetBatchSize,           py::arg("size"))
         .def("set_ring_dim",             &Params::SetRingDim,             py::arg("dim"))
-        .def("set_scaling_technique",    &Params::SetScalingTechnique,    py::arg("tech"))
+        .def("set_scaling_technique", &Params::SetScalingTechnique,
+             "Controls how the scale factor (Delta) is managed after ciphertext multiplication.\n\n"
+             "  FIXEDMANUAL:     Scale is fixed. User must call rescale() explicitly after each multiplication.\n"
+             "  FIXEDAUTO:       Scale is fixed. Rescaling is inserted automatically by the library.\n"
+             "  FLEXIBLEAUTO:    Scale adapts dynamically to actual values. Rescaling is automatic.\n"
+             "  FLEXIBLEAUTOEXT:        Like FLEXIBLEAUTO but uses an extra level to improve precision.\n"
+             "                          Costs one additional multiplicative level.\n",
+             py::arg("tech"))
         .def("set_first_mod_size",       &Params::SetFirstModSize,        py::arg("size"))
         .def("set_num_large_digits",     &Params::SetNumLargeDigits,      py::arg("num_digits"))
-        .def("set_digit_size",           &Params::SetDigitSize,           py::arg("size"))
-        .def("set_key_switch_technique", &Params::SetKeySwitchTechnique,  py::arg("tech"))
+        .def("set_digit_size", &Params::SetDigitSize,
+             "Relevant only with HYBRID key-switching. Controls the size of each digit used\n"
+             "when decomposing the ciphertext modulus during key-switching.\n\n"
+             "  Larger digit -> fewer digits -> faster key-switching, more noise.\n"
+             "  Smaller digit -> more digits -> slower key-switching, less noise.\n"
+             "  0 (default): OpenFHE chooses automatically based on multiplicative depth.",
+             py::arg("size"))
+        .def("set_key_switch_technique", &Params::SetKeySwitchTechnique,
+             "Selects the key-switching algorithm used for rotations and relinearization.\n\n"
+             "  HYBRID: Combines RNS and gadget decomposition.\n"
+             "  Splits the ciphertext modulus into digits before\n"
+             "  key-switching, trading noise for speed.",
+             py::arg("tech"))
         .def("set_secret_key_dist",      &Params::SetSecretKeyDist,       py::arg("dist"))
         .def("set_security_level",       &Params::SetSecurityLevel,       py::arg("level"))
         .def("set_devices", [](Params& p, std::vector<int> devices) {
@@ -152,7 +166,17 @@ PYBIND11_MODULE(_pyfideslib, m) {
         .def_readonly("loaded",    &CT::loaded);
 
     py::class_<CC, CCPtr>(m, "CryptoContext")
-        .def("enable", py::overload_cast<PKESchemeFeature>(&CC::Enable), py::arg("feature"))
+        .def("enable", py::overload_cast<PKESchemeFeature>(&CC::Enable),
+             "Enable a scheme feature. Must be called before any operations that require it.\n\n"
+             "  PKE:          Basic public-key encryption/decryption.\n"
+             "  KEYSWITCH:    Key-switching (required for rotations and relinearization).\n"
+             "  LEVELEDSHE:   Leveled homomorphic operations: EvalAdd, EvalMult, EvalSub.\n"
+             "  ADVANCEDSHE:  Advanced operations: EvalSquare, EvalInnerProduct, EvalMerge.\n"
+             "  FHE:          Bootstrapping (EvalBootstrap).\n"
+             "  PRE:          Proxy re-encryption.\n"
+             "  MULTIPARTY:   Threshold/multiparty protocols.\n"
+             "  SCHEMESWITCH: Cross-scheme switching (CKKS <-> FHEW).",
+             py::arg("feature"))
         .def("enable_mask", py::overload_cast<uint32_t>(&CC::Enable),   py::arg("mask"))
 
         .def("get_ring_dimension",  &CC::GetRingDimension)
