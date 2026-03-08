@@ -128,25 +128,37 @@ else()
   message(STATUS "NCCL not found: building without NCCL support")
 endif()
 
-# Locate nvtx3.hpp (C++ header-only NVTX3 API).
-# The CUDA toolkit ships it under nsight-compute and nsight-systems with a
-# versioned sub-path, so we use file(GLOB) to avoid hardcoding the version.
+############### NVTX v3 Configuration (Header-Only) ###################
+
+# Locate nvtx3.hpp (C++ header-only NVTX3 API, shipped with CUDA in cub/detail directory).
+# The CUDA toolkit ships NVTX3 v3 headers in the CUB library; we search in multiple standard locations.
 if (NOT DEFINED NVTX3_INCLUDE)
-  file(GLOB _nvtx3_candidates
+  # Search in CUDA toolkit targets directory (primary location in CUDA 11.5+)
+  file(GLOB _nvtx3_from_cuda
+      "${CUDA_PATH}/targets/*/include"
+      "${CUDA_PATH}/targets/x86_64-linux/include")
+  
+  # Search in nsight-compute and nsight-systems directories (alternative locations)
+  file(GLOB _nvtx3_from_nsight
       "${CUDA_PATH}/opt/nvidia/nsight-compute/*/host/target-linux-x64/nvtx/include"
       "${CUDA_PATH}/opt/nvidia/nsight-systems/*/target-linux-x64/nvtx/include")
-  foreach(_dir IN LISTS _nvtx3_candidates)
-    if(EXISTS "${_dir}/nvtx3/nvtx3.hpp")
+  
+  foreach(_dir IN LISTS _nvtx3_from_cuda _nvtx3_from_nsight)
+    # Check for cub/detail/nvtx3.hpp (standard location in CUDA 11.5+)
+    if(EXISTS "${_dir}/cub/detail/nvtx3.hpp")
       set(NVTX3_INCLUDE "${_dir}")
       break()
     endif()
   endforeach()
 endif()
+
 if (NVTX3_INCLUDE)
-  message(STATUS "Found nvtx3.hpp at: ${NVTX3_INCLUDE}")
+  message(STATUS "Found NVTX v3 header-only API (cub/detail/nvtx3.hpp) at: ${NVTX3_INCLUDE}")
   include_directories("${NVTX3_INCLUDE}")
+  add_compile_definitions(ENABLE_NVTX)
+  message(STATUS "FIDESlib compiled with NVTX v3 profiling support (header-only, no linking required)")
 else()
-  message(WARNING "nvtx3/nvtx3.hpp not found — pass -DNVTX3_INCLUDE=<dir> or add its parent to CMAKE_INCLUDE_PATH")
+  message(FATAL_ERROR "NVTX v3 header (cub/detail/nvtx3.hpp) not found. Pass -DNVTX3_INCLUDE=<dir> to specify the include path. For example: cmake ... -DNVTX3_INCLUDE=/usr/local/cuda/targets/x86_64-linux/include")
 endif()
 
 ############### OpenFHE Configuration ###################
