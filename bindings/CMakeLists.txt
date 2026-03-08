@@ -94,6 +94,8 @@ pybind11_add_module(_pyfideslib
     matmul_bindings.cu
     ${BERT_TINY_SRC}/MatMul.cu
     ${BERT_TINY_SRC}/MatMul.cpp
+    ${BERT_TINY_SRC}/Inputs.cu
+    ${BERT_TINY_SRC}/Transpose.cu
 )
 
 # bert-tiny headers: MatMul.cuh, MatMul.h, PolyApprox.cuh, Transpose.cuh, Inputs.cuh

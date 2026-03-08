@@ -7,7 +7,22 @@
 #include <fideslib.hpp>
 
 #include "MatMul.cuh"
+#include "Inputs.cuh"
+#include "Transpose.cuh"
 #include "matmul_bindings.h"
+
+// Inlined from Transformer.cu 
+namespace FIDESlib::CKKS {
+static void dropMatrixLevel(std::vector<std::vector<FIDESlib::CKKS::Ciphertext>>& in, int level) {
+    for (auto& row : in)
+        for (auto& ct : row) {
+            if (ct.NoiseLevel == 2) ct.rescale();
+            if (ct.getLevel() > level) {
+                ct.dropToLevel(level);
+            }
+        }
+}
+} // namespace FIDESlib::CKKS
 
 namespace py = pybind11;
 
@@ -16,6 +31,7 @@ using FidelCCPtr = fideslib::CryptoContext<fideslib::DCRTPoly>;
 using FidelCT    = fideslib::CiphertextImpl<fideslib::DCRTPoly>;
 using FidelCTPtr = fideslib::Ciphertext<fideslib::DCRTPoly>;
 using FidelPTPtr = fideslib::Plaintext;
+using FidelPKPtr = fideslib::PublicKey<fideslib::DCRTPoly>;
 
 
 struct CiphertextMatrixGPU {
@@ -47,6 +63,10 @@ inline lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cpu_ctx(const FidelCCPtr& cc
     return std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(cc->cpu);
 }
 
+inline lbcrypto::PublicKey<lbcrypto::DCRTPoly>& cpu_pk(const FidelPKPtr& pk) {
+    return std::any_cast<lbcrypto::PublicKey<lbcrypto::DCRTPoly>&>(pk->pimpl);
+}
+
 inline FIDESlib::CKKS::Ciphertext& raw_gct(const FidelCCPtr& cc, const FidelCTPtr& ct) {
     return *static_cast<FIDESlib::CKKS::Ciphertext*>(
         cc->GetDeviceCiphertext(ct->gpu).get());
@@ -66,10 +86,77 @@ CiphertextMatrixGPU wrap_product(
     return out;
 }
 
-} 
+}
+
+PlaintextMatrixGPU encodeMatrixGPU_fromMatrix(
+        const std::vector<std::vector<double>>& inputs,
+        FidelPKPtr pk,
+        FidelCCPtr cc,
+        int numSlots, int blockSize,
+        int level, bool if_repeat, int colSize = 0)
+{
+    if (colSize == 0) colSize = blockSize;
+
+    FIDESlib::CKKS::Context& gctx = gpu_ctx(cc);
+    auto& context = cpu_ctx(cc);
+
+    auto inputs_temp = FIDESlib::CKKS::extractAndLinearizeMatrix(
+            inputs, numSlots, blockSize, colSize);
+
+    if (!if_repeat) {
+        for (auto& i : inputs_temp)
+            for (auto& j : i)
+                j = FIDESlib::CKKS::getPCMM_bMatrix(j, blockSize);
+    }
+
+    auto pt_inputs = FIDESlib::CKKS::EncodeMatrix(
+            inputs_temp, cpu_pk(pk), gctx->L - level);
+
+    PlaintextMatrixGPU result;
+    result.data.resize(pt_inputs.size());
+    for (size_t i = 0; i < pt_inputs.size(); ++i) {
+        result.data[i].reserve(pt_inputs[0].size());
+        for (size_t j = 0; j < pt_inputs[0].size(); ++j) {
+            auto raw_pt = FIDESlib::CKKS::GetRawPlainText(context, pt_inputs[i][j]);
+            result.data[i].emplace_back(gctx, raw_pt);
+        }
+    }
+    return result;
+}
 
 void init_matmul_bindings(py::module_& m) {
-    using GPrecomp = FIDESlib::CKKS::MatrixMatrixProductPrecomputations_GPU;
+    using GPrecomp  = FIDESlib::CKKS::MatrixMatrixProductPrecomputations_GPU;
+    using TPrecomp  = FIDESlib::CKKS::TransposePrecomputations_GPU;
+
+    m.def("encode_matrix_gpu",
+      [](FidelCCPtr cc, FidelPKPtr pk, const std::vector<std::vector<double>>& mat,
+         int numSlots, int blockSize, int level, bool if_repeat, int colSize) {
+          return encodeMatrixGPU_fromMatrix(mat, pk, cc, numSlots, blockSize,
+                                           level, if_repeat, colSize);
+      },
+      py::arg("cc"), py::arg("pk"), py::arg("mat"), py::arg("num_slots"),
+      py::arg("block_size"), py::arg("level"),
+      py::arg("if_repeat") = false, py::arg("col_size") = 0,
+      py::return_value_policy::move);
+
+    py::class_<TPrecomp>(m, "TransposePrecompGPU")
+        .def_readonly("row_size", &TPrecomp::rowSize)
+        .def_readonly("bstep",    &TPrecomp::bStep);
+
+    py::class_<FIDESlib::CKKS::PtMasks_GPU>(m, "PtMasksGPU")
+        .def("get_row_mask", [](FIDESlib::CKKS::PtMasks_GPU& masks, FidelCCPtr cc, size_t i) -> FidelPTPtr {
+            FIDESlib::CKKS::Context& gctx = gpu_ctx(cc);
+            auto sp = std::make_shared<FIDESlib::CKKS::Plaintext>(gctx);
+            sp->copy(masks.row_masks.at(i));
+            uint32_t handle = cc->RegisterDevicePlaintext(std::static_pointer_cast<void>(std::move(sp)));
+            auto wrapper = std::make_shared<fideslib::PlaintextImpl>();
+            wrapper->gpu    = handle;
+            wrapper->loaded = true;
+            return FidelPTPtr(wrapper);
+        }, py::arg("cc"), py::arg("i"))
+        .def("__len__", [](const FIDESlib::CKKS::PtMasks_GPU& masks) {
+            return masks.row_masks.size();
+        });
 
     py::class_<GPrecomp>(m, "MatMulPrecompGPU")
         .def_readonly("row_size", &GPrecomp::rowSize)
@@ -144,6 +231,67 @@ void init_matmul_bindings(py::module_& m) {
             return self.data.size();
         });
 
+
+    m.def("generate_transpose_rotation_indices_gpu",
+          [](int row_size, int bstep) {
+              return FIDESlib::CKKS::GenerateTransposeRotationIndices_GPU(row_size, bstep);
+          },
+          py::arg("row_size"), py::arg("bstep"));
+
+    m.def("get_transpose_precomp_gpu",
+          [](FidelCCPtr cc, int row_size, int bstep, int level) -> TPrecomp {
+              return FIDESlib::CKKS::getMatrixTransposePrecomputations_GPU(
+                  gpu_ctx(cc), cpu_ctx(cc), row_size, bstep, level);
+          },
+          py::arg("cc"), py::arg("row_size"), py::arg("bstep"), py::arg("level"),
+          py::return_value_policy::move);
+
+    m.def("matrix_transpose_gpu",
+          [](FidelCCPtr cc, CiphertextMatrixGPU& mat, int row_size,
+             const TPrecomp& precomp) -> CiphertextMatrixGPU {
+              CiphertextMatrixGPU out;
+              out.tmpl_cpu = mat.tmpl_cpu;
+              out.data = FIDESlib::CKKS::MatrixTranspose_GPU(
+                  std::move(mat.data), (uint32_t)row_size, precomp);
+              return out;
+          },
+          py::arg("cc"), py::arg("mat"), py::arg("row_size"), py::arg("precomp"),
+          py::return_value_policy::move);
+
+    m.def("drop_matrix_level",
+          [](CiphertextMatrixGPU& mat, int level) {
+              FIDESlib::CKKS::dropMatrixLevel(mat.data, level);
+          },
+          py::arg("mat"), py::arg("level"));
+
+    m.def("get_pt_masks_gpu",
+          [](FidelCCPtr cc, int num_slots, int block_size, int level) -> FIDESlib::CKKS::PtMasks_GPU {
+              return FIDESlib::CKKS::GetPtMasks_GPU(gpu_ctx(cc), cpu_ctx(cc), num_slots, block_size, level);
+          },
+          py::arg("cc"),
+          py::arg("num_slots"),
+          py::arg("block_size"),
+          py::arg("level") = 1,
+          py::return_value_policy::move);
+
+    m.def("extract_and_linearize_matrix",
+          [](const std::vector<std::vector<double>>& matrix,
+             size_t num_slots,
+             size_t row_size,
+             size_t col_size) {
+              return FIDESlib::CKKS::extractAndLinearizeMatrix(matrix, num_slots, row_size, col_size);
+          },
+          py::arg("matrix"),
+          py::arg("num_slots"),
+          py::arg("row_size"),
+          py::arg("col_size") = 0);
+
+    m.def("get_pcmm_b_matrix",
+          [](const std::vector<double>& weights, int row_size) {
+              return FIDESlib::CKKS::getPCMM_bMatrix(weights, row_size);
+          },
+          py::arg("weights"),
+          py::arg("row_size"));
 
     m.def("generate_matmul_rotation_indices_gpu",
           [](int row_size, int bstep, int col_size) {
