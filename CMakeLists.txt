@@ -145,7 +145,7 @@ include_directories(${OpenFHE_INCLUDE}/pke)
 include_directories(${OpenFHE_INCLUDE}/binfhe)
 
 # Use Clang's OpenMP implementation.
-set (FIX_OMP_FLAGS "-fopenmp=libomp")
+set (FIX_OMP_FLAGS "-fopenmp")
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FIX_OMP_FLAGS}")
 set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler ${FIX_OMP_FLAGS}")
 
@@ -178,6 +178,11 @@ set(API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api")
 
 file(GLOB_RECURSE SOURCE_FILES_CUDA ${SOURCE_DIR}/*.cu)
 file(GLOB_RECURSE SOURCE_FILES_CXX ${SOURCE_DIR}/*.cpp)
+# MGPU sources require NCCL; exclude them when building without multi-GPU support
+if (NOT nccl_FOUND)
+    list(FILTER SOURCE_FILES_CUDA EXCLUDE REGEX ".*MGPU.*")
+    list(FILTER SOURCE_FILES_CXX  EXCLUDE REGEX ".*MGPU.*")
+endif()
 file(GLOB_RECURSE HEADER_FILES_CUDA ${SOURCE_DIR}/*.cuh)
 file(GLOB_RECURSE HEADER_FILES_CXX ${SOURCE_DIR}/*.hpp ${SOURCE_DIR}/*.h ${SOURCE_DIR}/*.inc)
 set_source_files_properties(${SOURCE_FILES_CUDA} ${HEADER_FILES_CUDA} PROPERTIES LANGUAGE CUDA)
