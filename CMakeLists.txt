@@ -133,6 +133,8 @@ endif()
 if (NVTX3_INCLUDE)
     message(STATUS "Found nvtx3/nvtx3.hpp at: ${NVTX3_INCLUDE}")
     include_directories("${NVTX3_INCLUDE}")
+    # nvcc needs the path explicitly via -I, include_directories() alone is not enough
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -I${NVTX3_INCLUDE}")
     add_compile_definitions(ENABLE_NVTX)
 else()
     message(FATAL_ERROR "nvtx3/nvtx3.hpp not found. Pass -DNVTX3_INCLUDE=<dir>.")
