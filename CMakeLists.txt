@@ -118,8 +118,9 @@ endif()
 
 # Default runs will not update nor install OpenFHE. Specify manually to install.
 if (FIDESLIB_INSTALL_OPENFHE)
-	execute_process(COMMAND ./build.sh ${OPENFHE_INSTALL_PREFIX}
-					WORKING_DIRECTORY "../deps" 
+	set(FIDESLIB_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+	execute_process(COMMAND "${FIDESLIB_DEPS_DIR}/build.sh" "${OPENFHE_INSTALL_PREFIX}"
+					WORKING_DIRECTORY "${FIDESLIB_DEPS_DIR}"
 					COMMAND_ERROR_IS_FATAL ANY)
 endif()
 
@@ -144,8 +145,15 @@ include_directories(${OpenFHE_INCLUDE}/core)
 include_directories(${OpenFHE_INCLUDE}/pke)
 include_directories(${OpenFHE_INCLUDE}/binfhe)
 
-# Use Clang's OpenMP implementation.
-set (FIX_OMP_FLAGS "-fopenmp")
+# OpenMP: use -fopenmp=libomp for Clang, -fopenmp for GCC/other.
+# Can be overridden: -DFIX_OMP_FLAGS="-fopenmp"
+if (NOT DEFINED FIX_OMP_FLAGS)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set (FIX_OMP_FLAGS "-fopenmp=libomp")
+    else()
+        set (FIX_OMP_FLAGS "-fopenmp")
+    endif()
+endif()
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FIX_OMP_FLAGS}")
 set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler ${FIX_OMP_FLAGS}")
 
