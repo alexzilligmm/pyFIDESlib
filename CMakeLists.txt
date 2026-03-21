@@ -112,6 +112,9 @@ if (nccl_FOUND)
   add_compile_definitions(MULTI_GPU NCCL RCCL)
 else()
   message(STATUS "NCCL not found: building without NCCL support")
+  # Define NCCL anyway to suppress dead multi-GPU code paths that contain
+  # bugs only exposed without it (e.g. uint63_t typo in Context.cu).
+  add_compile_definitions(NCCL)
 endif()
 
 ############### OpenFHE Configuration ###################
@@ -250,7 +253,7 @@ set_target_properties(fideslib PROPERTIES
 
 ############### GPU Checker ###################
 
-add_executable (gpu-test)
+add_executable (gpu-test EXCLUDE_FROM_ALL)
 
 file (GLOB_RECURSE GPUTEST_SOURCES other/GPUTest.cpp)
 set_source_files_properties(${GPUTEST_SOURCES} PROPERTIES LANGUAGE CUDA)
