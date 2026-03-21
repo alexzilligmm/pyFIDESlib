@@ -115,6 +115,29 @@ else()
   # bugs only exposed without it (e.g. uint63_t typo in Context.cu).
 endif()
 
+############### NVTX v3 Configuration ###################
+
+# Locate nvtx3/nvtx3.hpp — shipped with CUDA in targets/x86_64-linux/include.
+# Can be overridden: -DNVTX3_INCLUDE=<dir>
+if (NOT DEFINED NVTX3_INCLUDE)
+    file(GLOB _nvtx3_dirs
+        "${CUDA_PATH}/targets/x86_64-linux/include"
+        "${CUDA_PATH}/targets/*/include")
+    foreach(_dir IN LISTS _nvtx3_dirs)
+        if (EXISTS "${_dir}/nvtx3/nvtx3.hpp")
+            set(NVTX3_INCLUDE "${_dir}")
+            break()
+        endif()
+    endforeach()
+endif()
+if (NVTX3_INCLUDE)
+    message(STATUS "Found nvtx3/nvtx3.hpp at: ${NVTX3_INCLUDE}")
+    include_directories("${NVTX3_INCLUDE}")
+    add_compile_definitions(ENABLE_NVTX)
+else()
+    message(FATAL_ERROR "nvtx3/nvtx3.hpp not found. Pass -DNVTX3_INCLUDE=<dir>.")
+endif()
+
 ############### OpenFHE Configuration ###################
 
 # Default runs will not update nor install OpenFHE. Specify manually to install.
