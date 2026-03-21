@@ -57,7 +57,11 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     }
 #endif
     */
-    uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
+    int32_t correctionSigned = static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor) - deg;
+    if (correctionSigned < 0) {
+        OPENFHE_THROW("Bootstrap correction factor is smaller than computed degree; cannot proceed safely.");
+    }
+    uint32_t correction = static_cast<uint32_t>(correctionSigned);
     if constexpr (PRINT)
         std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
     double post = std::pow(2, static_cast<double>(deg));
@@ -150,7 +154,7 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         ctxt.add(aux);
     }
 
-    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
+    uint64_t corFactor = (uint64_t)1 << std::llround(correctionSigned);
     multIntScalar(ctxt, corFactor);
     if constexpr (PRINT) {
         cudaDeviceSynchronize();
@@ -201,7 +205,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     }
 #endif
     */
-    uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
+    int32_t correctionSigned = static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor) - deg;
+    if (correctionSigned < 0) {
+        OPENFHE_THROW("Bootstrap correction factor is smaller than computed degree; cannot proceed safely.");
+    }
+    uint32_t correction = static_cast<uint32_t>(correctionSigned);
     if constexpr (PRINT)
         std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
     double post = std::pow(2, static_cast<double>(deg));
@@ -301,7 +309,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         ctxt.add(aux);
     }
 
-    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
+    uint64_t corFactor = (uint64_t)1 << std::llround(correctionSigned);
     multIntScalar(ctxt, corFactor);
     if constexpr (PRINT) {
         cudaDeviceSynchronize();

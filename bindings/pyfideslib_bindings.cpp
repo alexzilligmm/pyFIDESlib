@@ -21,6 +21,7 @@
 #include <fideslib.hpp>
 
 #include "matmul_bindings.h"
+#include "cachemir_packing_native.h"
 
 namespace py = pybind11;
 using namespace fideslib;
@@ -45,6 +46,66 @@ PYBIND11_MODULE(_pyfideslib, m) {
     m.doc() = "Python bindings for pyFIDESlib (fideslib 2.0 CPU+GPU CKKS API)";
 
     py::class_<FastRotDigits>(m, "FastRotDigits");
+
+        py::class_<CachemirPackingPlanNative>(m, "CachemirPackingPlan")
+           .def_readonly("max_slots", &CachemirPackingPlanNative::max_slots)
+           .def_readonly("hid_dim", &CachemirPackingPlanNative::hid_dim)
+           .def_readonly("exp_dim", &CachemirPackingPlanNative::exp_dim)
+           .def_readonly("num_heads", &CachemirPackingPlanNative::num_heads)
+           .def_readonly("seq_len", &CachemirPackingPlanNative::seq_len)
+           .def_readonly("in_rot", &CachemirPackingPlanNative::in_rot)
+           .def_readonly("out_rot", &CachemirPackingPlanNative::out_rot)
+           .def_readonly("in_rot_expand", &CachemirPackingPlanNative::in_rot_expand)
+           .def_readonly("out_rot_expand", &CachemirPackingPlanNative::out_rot_expand)
+           .def_readonly("int_rot", &CachemirPackingPlanNative::int_rot)
+           .def_readonly("int_idx", &CachemirPackingPlanNative::int_idx)
+           .def_readonly("mid_idx", &CachemirPackingPlanNative::mid_idx)
+           .def_readonly("rotation_candidates", &CachemirPackingPlanNative::rotation_candidates);
+
+        py::class_<CachemirCachePositionNative>(m, "CachemirCachePosition")
+           .def_readonly("int_rot", &CachemirCachePositionNative::int_rot)
+           .def_readonly("int_idx", &CachemirCachePositionNative::int_idx)
+           .def_readonly("mid_idx", &CachemirCachePositionNative::mid_idx);
+
+        py::class_<CachemirPackingLayoutNative>(m, "CachemirPackingLayout")
+           .def_readonly("max_slots", &CachemirPackingLayoutNative::max_slots)
+           .def_readonly("hid_dim", &CachemirPackingLayoutNative::hid_dim)
+           .def_readonly("exp_dim", &CachemirPackingLayoutNative::exp_dim)
+           .def_readonly("num_heads", &CachemirPackingLayoutNative::num_heads)
+           .def_readonly("seq_len", &CachemirPackingLayoutNative::seq_len)
+           .def_readonly("token_slot_stride", &CachemirPackingLayoutNative::token_slot_stride);
+
+        py::class_<CachemirPackingEngineNative>(m, "CachemirPackingEngine")
+           .def(py::init<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),
+               py::arg("max_slots"),
+               py::arg("hid_dim"),
+               py::arg("exp_dim"),
+               py::arg("num_heads"),
+               py::arg("seq_len"))
+           .def("layout", &CachemirPackingEngineNative::Layout)
+           .def("token_slot_stride", &CachemirPackingEngineNative::TokenSlotStride)
+           .def("compute_plan",
+               &CachemirPackingEngineNative::ComputePlan,
+               py::arg("rotation_step") = 5,
+               py::arg("auto_sign_check") = true)
+           .def("build_rotation_indices",
+               &CachemirPackingEngineNative::BuildRotationIndices,
+               py::arg("rotation_step") = 5,
+               py::arg("auto_sign_check") = true,
+               py::arg("include_stride") = true)
+           .def("cache_position", &CachemirPackingEngineNative::CachePosition, py::arg("seq_len"))
+           .def("pack_single_token_feature_major",
+               &CachemirPackingEngineNative::PackSingleTokenFeatureMajor,
+               py::arg("input_values"),
+               py::arg("token_index") = 0)
+           .def("pack_k_cache_token_feature_major",
+               &CachemirPackingEngineNative::PackKCacheTokenFeatureMajor,
+               py::arg("input_values"),
+               py::arg("seq_len"))
+           .def("pack_v_cache_token_feature_major",
+               &CachemirPackingEngineNative::PackVCacheTokenFeatureMajor,
+               py::arg("input_values"),
+               py::arg("seq_len"));
 
     py::enum_<PKESchemeFeature>(m, "PKESchemeFeature", py::arithmetic())
         .value("PKE",          PKE)
@@ -340,6 +401,118 @@ PYBIND11_MODULE(_pyfideslib, m) {
 
     m.def("gen_crypto_context", &GenCryptoContext, py::arg("params"),
           "Create a CryptoContext from CCParams.");
+
+    m.def("cachemir_packing_plan",
+          [](uint32_t max_slots,
+             uint32_t hid_dim,
+             uint32_t exp_dim,
+             uint32_t num_heads,
+             uint32_t seq_len,
+             int32_t rotation_step,
+             bool auto_sign_check) {
+              return ComputeCachemirPackingPlan(
+                  max_slots,
+                  hid_dim,
+                  exp_dim,
+                  num_heads,
+                  seq_len,
+                  rotation_step,
+                  auto_sign_check);
+          },
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          py::arg("exp_dim"),
+          py::arg("num_heads"),
+          py::arg("seq_len"),
+          py::arg("rotation_step") = 5,
+          py::arg("auto_sign_check") = true,
+          "Compute Cachemir-style packing/rotation plan from dimensions.");
+
+    m.def("cachemir_token_slot_stride",
+          [](uint32_t max_slots, uint32_t hid_dim) {
+              return ComputeCachemirTokenSlotStride(max_slots, hid_dim);
+          },
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          "Compute Cachemir token slot stride: max_slots / hid_dim (clamped to >=1).");
+
+    m.def("cachemir_pack_single_token_feature_major",
+          [](const std::vector<double>& input_values,
+             uint32_t max_slots,
+             uint32_t hid_dim,
+             uint32_t token_index) {
+              return PackSingleTokenFeatureMajor(input_values, max_slots, hid_dim, token_index);
+          },
+          py::arg("input_values"),
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          py::arg("token_index") = 0,
+          "Pack one token in Cachemir feature-major strided layout into CKKS slots.");
+
+    m.def("cachemir_cache_position",
+          [](uint32_t max_slots, uint32_t hid_dim, uint32_t seq_len) {
+              return ComputeCachemirCachePosition(max_slots, hid_dim, seq_len);
+          },
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          py::arg("seq_len"),
+          "Compute Cachemir cache position indices (int_rot, int_idx, mid_idx)."
+    );
+
+        m.def("cachemir_rotation_indices",
+            [](uint32_t max_slots,
+             uint32_t hid_dim,
+             uint32_t exp_dim,
+             uint32_t num_heads,
+             uint32_t seq_len,
+             int32_t rotation_step,
+             bool auto_sign_check,
+             bool include_stride) {
+              return ComputeCachemirRotationIndices(
+                max_slots,
+                hid_dim,
+                exp_dim,
+                num_heads,
+                seq_len,
+                rotation_step,
+                auto_sign_check,
+                include_stride);
+            },
+            py::arg("max_slots"),
+            py::arg("hid_dim"),
+            py::arg("exp_dim"),
+            py::arg("num_heads"),
+            py::arg("seq_len"),
+            py::arg("rotation_step") = 5,
+            py::arg("auto_sign_check") = true,
+            py::arg("include_stride") = true,
+            "Compute deterministic Cachemir rotation indices for key generation.");
+
+    m.def("cachemir_pack_k_cache_token_feature_major",
+          [](const std::vector<double>& input_values,
+             uint32_t max_slots,
+             uint32_t hid_dim,
+             uint32_t seq_len) {
+              return PackKCacheTokenFeatureMajor(input_values, max_slots, hid_dim, seq_len);
+          },
+          py::arg("input_values"),
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          py::arg("seq_len"),
+          "Pack one K-cache token according to Cachemir cache-position logic.");
+
+    m.def("cachemir_pack_v_cache_token_feature_major",
+          [](const std::vector<double>& input_values,
+             uint32_t max_slots,
+             uint32_t hid_dim,
+             uint32_t seq_len) {
+              return PackVCacheTokenFeatureMajor(input_values, max_slots, hid_dim, seq_len);
+          },
+          py::arg("input_values"),
+          py::arg("max_slots"),
+          py::arg("hid_dim"),
+          py::arg("seq_len"),
+          "Pack one V-cache token according to Cachemir cache-position logic.");
 
     init_matmul_bindings(m);
 

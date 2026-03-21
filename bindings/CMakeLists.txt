@@ -91,6 +91,7 @@ set(BERT_TINY_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../examples/bert-tiny/src")
 
 pybind11_add_module(_pyfideslib
     pyfideslib_bindings.cpp
+    cachemir_packing_native.cpp
     matmul_bindings.cu
     ${BERT_TINY_SRC}/MatMul.cu
     ${BERT_TINY_SRC}/MatMul.cpp
