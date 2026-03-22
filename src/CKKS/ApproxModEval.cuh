@@ -15,6 +15,8 @@ namespace FIDESlib::CKKS {
 void evalChebyshevSeries(Ciphertext& ctxt, std::vector<double>& coefficients, double lower_bound = -1.0,
                          double upper_bound = 1.0);
 
+void evalHornerSeries(Ciphertext& ctxt, const std::vector<double>& coefficients);
+
 void approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEncI, const KeySwitchingKey& keySwitchingKey,
                         uint64_t post);
 

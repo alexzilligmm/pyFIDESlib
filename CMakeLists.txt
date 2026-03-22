@@ -49,6 +49,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
+# Compiler: default to the system/environment compiler.
+# Pass -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ to use Clang explicitly.
 
 ############### CUDA Configuration ###################
 
@@ -110,34 +112,53 @@ find_library(nccl_FOUND NAMES nccl HINTS  /usr/local/cuda/lib64 /usr/lib /usr/lo
 if (nccl_FOUND)
   message(STATUS "Found NCCL: ${nccl_FOUND}")
   add_compile_definitions(MULTI_GPU NCCL RCCL)
+  # Locate nccl.h: look one level up from the lib dir (e.g. .../nvidia/nccl/include)
+  get_filename_component(_nccl_lib_dir "${nccl_FOUND}" DIRECTORY)
+  link_directories("${_nccl_lib_dir}")
+  find_path(NCCL_INCLUDE_DIR nccl.h
+      HINTS "${_nccl_lib_dir}/../include" /usr/local/cuda/include /usr/include
+      NO_DEFAULT_PATH)
+  if (NCCL_INCLUDE_DIR)
+      message(STATUS "Found nccl.h at: ${NCCL_INCLUDE_DIR}")
+      include_directories(${NCCL_INCLUDE_DIR})
+  else()
+      message(WARNING "nccl.h not found next to NCCL library — add its directory to CMAKE_INCLUDE_PATH")
+  endif()
 else()
   message(STATUS "NCCL not found: building without NCCL support")
-  # bugs only exposed without it (e.g. uint63_t typo in Context.cu).
 endif()
 
-############### NVTX v3 Configuration ###################
+############### NVTX v3 Configuration (Header-Only) ###################
 
-# Locate nvtx3/nvtx3.hpp — shipped with CUDA in targets/x86_64-linux/include.
-# Can be overridden: -DNVTX3_INCLUDE=<dir>
+# Locate nvtx3.hpp (C++ header-only NVTX3 API, shipped with CUDA in cub/detail directory).
+# The CUDA toolkit ships NVTX3 v3 headers in the CUB library; we search in multiple standard locations.
 if (NOT DEFINED NVTX3_INCLUDE)
-    file(GLOB _nvtx3_dirs
-        "${CUDA_PATH}/targets/x86_64-linux/include"
-        "${CUDA_PATH}/targets/*/include")
-    foreach(_dir IN LISTS _nvtx3_dirs)
-        if (EXISTS "${_dir}/nvtx3/nvtx3.hpp")
-            set(NVTX3_INCLUDE "${_dir}")
-            break()
-        endif()
-    endforeach()
+  # Search in CUDA toolkit targets directory (primary location in CUDA 11.5+)
+  file(GLOB _nvtx3_from_cuda
+      "${CUDA_PATH}/targets/*/include"
+      "${CUDA_PATH}/targets/x86_64-linux/include")
+  
+  # Search in nsight-compute and nsight-systems directories (alternative locations)
+  file(GLOB _nvtx3_from_nsight
+      "${CUDA_PATH}/opt/nvidia/nsight-compute/*/host/target-linux-x64/nvtx/include"
+      "${CUDA_PATH}/opt/nvidia/nsight-systems/*/target-linux-x64/nvtx/include")
+  
+  foreach(_dir IN LISTS _nvtx3_from_cuda _nvtx3_from_nsight)
+    # Check for cub/detail/nvtx3.hpp (standard location in CUDA 11.5+)
+    if(EXISTS "${_dir}/cub/detail/nvtx3.hpp")
+      set(NVTX3_INCLUDE "${_dir}")
+      break()
+    endif()
+  endforeach()
 endif()
+
 if (NVTX3_INCLUDE)
-    message(STATUS "Found nvtx3/nvtx3.hpp at: ${NVTX3_INCLUDE}")
-    include_directories("${NVTX3_INCLUDE}")
-    # nvcc needs the path explicitly via -I, include_directories() alone is not enough
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -I${NVTX3_INCLUDE}")
-    add_compile_definitions(ENABLE_NVTX)
+  message(STATUS "Found NVTX v3 header-only API (cub/detail/nvtx3.hpp) at: ${NVTX3_INCLUDE}")
+  include_directories("${NVTX3_INCLUDE}")
+  add_compile_definitions(ENABLE_NVTX)
+  message(STATUS "FIDESlib compiled with NVTX v3 profiling support (header-only, no linking required)")
 else()
-    message(FATAL_ERROR "nvtx3/nvtx3.hpp not found. Pass -DNVTX3_INCLUDE=<dir>.")
+  message(FATAL_ERROR "NVTX v3 header (cub/detail/nvtx3.hpp) not found. Pass -DNVTX3_INCLUDE=<dir> to specify the include path. For example: cmake ... -DNVTX3_INCLUDE=/usr/local/cuda/targets/x86_64-linux/include")
 endif()
 
 ############### OpenFHE Configuration ###################
@@ -145,7 +166,11 @@ endif()
 # Default runs will not update nor install OpenFHE. Specify manually to install.
 if (FIDESLIB_INSTALL_OPENFHE)
 	set(FIDESLIB_DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
-	execute_process(COMMAND "${FIDESLIB_DEPS_DIR}/build.sh" "${OPENFHE_INSTALL_PREFIX}"
+	set(FIDESLIB_OPENFHE_BUILD_SCRIPT "${FIDESLIB_DEPS_DIR}/build.sh")
+	if (NOT EXISTS "${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
+		message(FATAL_ERROR "OpenFHE build script not found at ${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
+	endif()
+	execute_process(COMMAND "${FIDESLIB_OPENFHE_BUILD_SCRIPT}" "${OPENFHE_INSTALL_PREFIX}"
 					WORKING_DIRECTORY "${FIDESLIB_DEPS_DIR}"
 					COMMAND_ERROR_IS_FATAL ANY)
 endif()
@@ -212,11 +237,6 @@ set(API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api")
 
 file(GLOB_RECURSE SOURCE_FILES_CUDA ${SOURCE_DIR}/*.cu)
 file(GLOB_RECURSE SOURCE_FILES_CXX ${SOURCE_DIR}/*.cpp)
-# MGPU sources require NCCL; exclude them when building without multi-GPU support
-if (NOT nccl_FOUND)
-    list(FILTER SOURCE_FILES_CUDA EXCLUDE REGEX ".*MGPU.*")
-    list(FILTER SOURCE_FILES_CXX  EXCLUDE REGEX ".*MGPU.*")
-endif()
 file(GLOB_RECURSE HEADER_FILES_CUDA ${SOURCE_DIR}/*.cuh)
 file(GLOB_RECURSE HEADER_FILES_CXX ${SOURCE_DIR}/*.hpp ${SOURCE_DIR}/*.h ${SOURCE_DIR}/*.inc)
 set_source_files_properties(${SOURCE_FILES_CUDA} ${HEADER_FILES_CUDA} PROPERTIES LANGUAGE CUDA)
@@ -227,6 +247,12 @@ file(GLOB_RECURSE HEADER_FILES_PUBLIC ${API_DIR}/*.hpp)
 set_source_files_properties(${HEADER_FILES_PUBLIC} ${SOURCE_FILES_API} PROPERTIES LANGUAGE CXX)
 
 add_library(fideslib STATIC)
+
+# MGPU sources require NCCL; exclude them when building without multi-GPU support
+if (NOT nccl_FOUND)
+    list(FILTER SOURCE_FILES_CUDA EXCLUDE REGEX ".*MGPU.*")
+    list(FILTER SOURCE_FILES_CXX  EXCLUDE REGEX ".*MGPU.*")
+endif()
 
 target_sources(fideslib PRIVATE ${SOURCE_FILES_CXX} ${SOURCE_FILES_CUDA} ${SOURCE_FILES_API})
 target_sources (fideslib PRIVATE 
@@ -262,7 +288,7 @@ target_link_libraries(fideslib
 
 if (nccl_FOUND)
   message(STATUS "FIDESlib linked against NCCL")
-  target_link_libraries(fideslib PRIVATE nccl)
+  target_link_libraries(fideslib PRIVATE "${nccl_FOUND}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNCCL")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -DNCCL")
 endif()
@@ -413,6 +439,13 @@ endif()
 
 
 ############### Benchmark ###################
+
+############### Python Bindings ###################
+
+option(FIDESLIB_COMPILE_PYTHON_BINDINGS "Build _pyfideslib pybind11 module" OFF)
+if (FIDESLIB_COMPILE_PYTHON_BINDINGS)
+    add_subdirectory(bindings)
+endif()
 
 if (FIDESLIB_COMPILE_BENCHMARKS)
 

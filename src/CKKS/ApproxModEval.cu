@@ -707,6 +707,43 @@ const std::vector<double>& coefficients, double a, double b) const {
 		cudaDeviceSynchronize();
 }
 
+void FIDESlib::CKKS::evalHornerSeries(Ciphertext& ctxt, const std::vector<double>& coefficients) {
+	FIDESlib::CudaNvtxRange r(std::string{ sc::current().function_name() });
+
+	int n = (int)coefficients.size() - 1;
+	if (n < 0) return;
+
+	FIDESlib::CKKS::Context& cc_ = ctxt.cc_;
+	ContextData& cc				 = ctxt.cc;
+
+	if (n == 0) {
+		ctxt.multScalar(0.0);
+		ctxt.addScalar(coefficients[0]);
+		return;
+	}
+
+	// acc = c_n * x + c_{n-1}  (scalar ops, 0 levels consumed)
+	Ciphertext acc(cc_);
+	acc.copy(ctxt);
+	if (acc.NoiseLevel == 2) acc.rescale();
+	acc.multScalar(coefficients[n]);
+	acc.addScalar(coefficients[n - 1]);
+
+	// acc = acc * x + c_i  (1 ctxt-ctxt mult per step)
+	for (int i = n - 2; i >= 0; i--) {
+		Ciphertext x_tmp(cc_);
+		x_tmp.copy(ctxt);
+		acc.adjustForMult(x_tmp);
+		x_tmp.adjustForMult(acc);
+		acc.mult(acc, x_tmp, false);
+		if (cc.rescaleTechnique == FIXEDMANUAL && acc.NoiseLevel == 2)
+			acc.rescale();
+		acc.addScalar(coefficients[i]);
+	}
+
+	ctxt.copy(acc);
+}
+
 void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval) {
 	FIDESlib::CudaNvtxRange r_(std::string{ sc::current().function_name() });
 	ContextData& cc = ctxt.cc;
