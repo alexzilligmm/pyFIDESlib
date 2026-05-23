@@ -70,12 +70,18 @@ class Limb {
     template <typename Q>
     void load(const std::vector<Q>& dat_);
 
+    template <typename Q>
+    void load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream);
+
     void load(const VectorGPU<T>& dat);
 
     void store(std::vector<T>& dat) const;
 
     template <typename Q>
     void load_convert(const std::vector<Q>& dat_raw);
+
+    template <typename Q>
+    void load_convert_with_stream(const std::vector<Q>& dat_raw, cudaStream_t stream);
 
     template <typename Q>
     void store_convert(std::vector<Q>& dat_raw);

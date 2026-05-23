@@ -88,6 +88,16 @@ void Plaintext::load(const RawPlainText& raw) {
     slots = raw.slots;
 }
 
+void Plaintext::load(const RawPlainText& raw, cudaStream_t stream_override) {
+    CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
+    CKKS::SetCurrentContext(cc_);
+    c0.loadConstant(raw.sub_0, raw.moduli, stream_override);
+
+    NoiseFactor = raw.Noise;
+    NoiseLevel = raw.NoiseLevel;
+    slots = raw.slots;
+}
+
 void Plaintext::store(RawPlainText& raw) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc_);

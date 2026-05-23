@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "CCParams.hpp"
 #include "Ciphertext.hpp"
 #include "Definitions.hpp"
@@ -61,6 +63,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @brief Load a plaintext to the devices.
 	/// @param pt Plaintext to load.
 	void LoadPlaintext(Plaintext& pt);
+	/// @brief Load a plaintext to the devices using a custom CUDA stream.
+	/// @param pt Plaintext to load.
+	/// @param stream CUDA stream for async H2D copies (single-GPU contexts only).
+	void LoadPlaintext(Plaintext& pt, cudaStream_t stream);
 	/// @brief Load a ciphertext to the devices.
 	/// @param ct Ciphertext to load.
 	void LoadCiphertext(Ciphertext<DCRTPoly>& ct);
@@ -95,6 +101,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	MakeCKKSPackedPlaintext(const std::vector<std::complex<double>>& value, size_t noiseScaleDeg = 1, uint32_t level = 0, std::shared_ptr<void> params = nullptr, uint32_t slots = 0);
 	Plaintext
 	MakeCKKSPackedPlaintext(const std::vector<double>& value, size_t noiseScaleDeg = 1, uint32_t level = 0, std::shared_ptr<void> params = nullptr, uint32_t slots = 0);
+	Plaintext
+	MakeCKKSPackedPlaintext(const std::vector<std::complex<double>>& value, size_t noiseScaleDeg, uint32_t level,
+	                        std::shared_ptr<void> params, uint32_t slots, cudaStream_t stream);
+	Plaintext
+	MakeCKKSPackedPlaintext(const std::vector<double>& value, size_t noiseScaleDeg, uint32_t level,
+	                        std::shared_ptr<void> params, uint32_t slots, cudaStream_t stream);
 
 	// ---- Encryption ----
 

@@ -101,6 +101,7 @@ namespace FIDESlib::CKKS {
      *       ensure the factor is stored in the same floating‑point precision as the rest of the CKKS pipeline.
      */
     void load(const RawPlainText& raw);
+    void load(const RawPlainText& raw, cudaStream_t stream);
     /**
      * @brief Store this plaintext into a raw representation.
      *

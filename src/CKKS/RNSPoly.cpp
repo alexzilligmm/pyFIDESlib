@@ -852,6 +852,53 @@ void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const
     }
 }
 
+void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli,
+                           cudaStream_t stream_override) {
+    if (stream_override == nullptr || cc.GPUid.size() > 1) {
+        // Stream override is only supported for single-GPU contexts.
+        loadConstant(data, moduli);
+        return;
+    }
+
+    int limbsize = 0;
+    int Slimbsize = 0;
+    for (int i = 0; i < (int)data.size(); ++i) {
+        if (i <= cc.L && moduli[i] == cc.prime.at(i).p) {
+            limbsize++;
+        } else {
+            Slimbsize++;
+        }
+    }
+
+    assert(limbsize <= cc.L + 1);
+    if (level < limbsize - 1) {
+        grow(limbsize - 1, false, true);
+    } else {
+        dropToLevel(limbsize - 1);
+    }
+    assert(level == limbsize - 1);
+    for (int i = 0; i < limbsize; ++i) {
+        assert(moduli[i] == cc.prime.at(i).p);
+        cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
+        SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y], load_convert_with_stream(data[i], stream_override));
+    }
+
+    if ((int)data.size() > limbsize) {
+        generatePartialSpecialLimbs();
+        this->SetModUp(true);
+    }
+    for (size_t i = limbsize; i < data.size(); ++i) {
+        for (size_t j = 0; j < GPU.size(); ++j) {
+            for (size_t k = 0; k < cc.splitSpecialMeta.at(j).size(); ++k) {
+                if (cc.specialPrime.at(cc.splitSpecialMeta.at(j).at(k).id - cc.L - 1).p == moduli[i]) {
+                    cudaSetDevice(GPU[j].device);
+                    SWITCH(GPU[j].SPECIALlimb[k], load_convert_with_stream(data[i], stream_override));
+                }
+            }
+        }
+    }
+}
+
 void RNSPoly::broadcastLimb0() {
     if (cc.GPUid.size() == 1) {
         for (size_t i = 0; i < cc.GPUid.size(); ++i) {

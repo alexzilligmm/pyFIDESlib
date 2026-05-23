@@ -113,6 +113,23 @@ void Limb<T>::load(const std::vector<Q>& dat_) {
     //cudaHostUnregister((void *) dat.data());
 }
 
+template <typename T>
+template <typename Q>
+void Limb<T>::load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream_override) {
+    assert(dat_.size() <= v.size);
+    std::vector<T> dat;
+    if constexpr (!std::is_same<T, Q>().value) {
+        dat.assign(v.size, 0);
+        for (size_t i = 0; i < dat.size(); ++i) {
+            dat[i] = dat_[i];
+        }
+    } else {
+        dat = dat_;
+    }
+
+    cudaMemcpyAsync(v.data, dat.data(), dat.size() * sizeof(T), cudaMemcpyHostToDevice, stream_override);
+}
+
 template void Limb<uint32_t>::load<uint32_t>(const std::vector<uint32_t>& dat_);
 
 template void Limb<uint32_t>::load<uint64_t>(const std::vector<uint64_t>& dat_);
@@ -120,6 +137,14 @@ template void Limb<uint32_t>::load<uint64_t>(const std::vector<uint64_t>& dat_);
 template void Limb<uint64_t>::load<uint32_t>(const std::vector<uint32_t>& dat_);
 
 template void Limb<uint64_t>::load<uint64_t>(const std::vector<uint64_t>& dat_);
+
+template void Limb<uint32_t>::load_with_stream<uint32_t>(const std::vector<uint32_t>& dat_, cudaStream_t stream_override);
+
+template void Limb<uint32_t>::load_with_stream<uint64_t>(const std::vector<uint64_t>& dat_, cudaStream_t stream_override);
+
+template void Limb<uint64_t>::load_with_stream<uint32_t>(const std::vector<uint32_t>& dat_, cudaStream_t stream_override);
+
+template void Limb<uint64_t>::load_with_stream<uint64_t>(const std::vector<uint64_t>& dat_, cudaStream_t stream_override);
 
 template <typename T>
 void Limb<T>::load(const VectorGPU<T>& dat) {
@@ -138,9 +163,27 @@ void Limb<T>::load_convert(const std::vector<Q>& dat_raw) {
     load(dat);
 }
 
+template <typename T>
+template <typename Q>
+void Limb<T>::load_convert_with_stream(const std::vector<Q>& dat_raw, cudaStream_t stream_override) {
+    assert(dat_raw.size() <= v.size);
+    std::vector<T> dat(dat_raw.size());
+
+    for (size_t i = 0; i < dat.size(); ++i)
+        dat[i] = static_cast<T>(dat_raw[i]);
+
+    load_with_stream(dat, stream_override);
+}
+
 template void Limb<uint32_t>::load_convert<uint64_t>(const std::vector<uint64_t>& dat_raw);
 
 template void Limb<uint64_t>::load_convert<uint64_t>(const std::vector<uint64_t>& dat_raw);
+
+template void Limb<uint32_t>::load_convert_with_stream<uint64_t>(const std::vector<uint64_t>& dat_raw,
+                                                                 cudaStream_t stream_override);
+
+template void Limb<uint64_t>::load_convert_with_stream<uint64_t>(const std::vector<uint64_t>& dat_raw,
+                                                                 cudaStream_t stream_override);
 
 template <typename T>
 template <typename Q>

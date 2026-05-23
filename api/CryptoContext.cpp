@@ -239,10 +239,33 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt) {
 	auto& context									  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& ptImpl								  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw_pt				  = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
-	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu, raw_pt);
+	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
 	uint32_t handle									  = this->RegisterDevicePlaintext(std::move(gpu_pt));
 	pt->gpu											  = handle;
 	pt->loaded										  = true;
+}
+
+void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stream_override) {
+	if (pt->loaded || this->devices.empty())
+		return;
+
+	if (!this->loaded) {
+		OPENFHE_THROW("CryptoContext not loaded to any device");
+	}
+
+	auto& context_gpu					  = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	auto& context						  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	const auto& ptImpl					  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
+	FIDESlib::CKKS::RawPlainText raw_pt				  = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
+	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu, raw_pt);
+	if (stream_override != nullptr) {
+		gpu_pt->load(raw_pt, stream_override);
+	} else {
+		gpu_pt->load(raw_pt);
+	}
+	uint32_t handle			      = this->RegisterDevicePlaintext(std::move(gpu_pt));
+	pt->gpu						  = handle;
+	pt->loaded					  = true;
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadCiphertext(Ciphertext<DCRTPoly>& ct) {
@@ -494,6 +517,29 @@ Plaintext CryptoContextImpl<DCRTPoly>::MakeCKKSPackedPlaintext(const std::vector
 	return plaintext;
 }
 
+Plaintext CryptoContextImpl<DCRTPoly>::MakeCKKSPackedPlaintext(const std::vector<std::complex<double>>& value,
+  size_t noiseScaleDeg,
+  uint32_t level,
+  const std::shared_ptr<void> params,
+  uint32_t slots,
+  cudaStream_t stream_override) {
+
+	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	auto pt       = context->MakeCKKSPackedPlaintext(value, noiseScaleDeg, level, nullptr, slots);
+
+	Plaintext plaintext = std::make_shared<PlaintextImpl>(this->self_reference.lock());
+	plaintext->cpu      = std::make_any<lbcrypto::Plaintext>(pt);
+	plaintext->loaded   = false;
+
+	if (this->devices.empty() || !this->auto_load_plaintexts) {
+		return plaintext;
+	}
+
+	this->LoadPlaintext(plaintext, stream_override);
+
+	return plaintext;
+}
+
 Plaintext
 CryptoContextImpl<DCRTPoly>::MakeCKKSPackedPlaintext(const std::vector<double>& value, size_t noiseScaleDeg, uint32_t level, const std::shared_ptr<void> params, uint32_t slots) {
 
@@ -509,6 +555,27 @@ CryptoContextImpl<DCRTPoly>::MakeCKKSPackedPlaintext(const std::vector<double>& 
 	}
 
 	this->LoadPlaintext(plaintext);
+
+	return plaintext;
+}
+
+Plaintext
+CryptoContextImpl<DCRTPoly>::MakeCKKSPackedPlaintext(const std::vector<double>& value, size_t noiseScaleDeg,
+                                                     uint32_t level, const std::shared_ptr<void> params,
+                                                     uint32_t slots, cudaStream_t stream_override) {
+
+	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	auto pt       = context->MakeCKKSPackedPlaintext(value, noiseScaleDeg, level, nullptr, slots);
+
+	Plaintext plaintext = std::make_shared<PlaintextImpl>(this->self_reference.lock());
+	plaintext->cpu      = std::make_any<lbcrypto::Plaintext>(pt);
+	plaintext->loaded   = false;
+
+	if (this->devices.empty() || !this->auto_load_plaintexts) {
+		return plaintext;
+	}
+
+	this->LoadPlaintext(plaintext, stream_override);
 
 	return plaintext;
 }
