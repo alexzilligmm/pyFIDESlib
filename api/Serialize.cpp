@@ -119,6 +119,7 @@ bool DeserializeFromFile(const std::string& filename, fideslib::CryptoContext<fi
 	gpu_context.multiplicative_depth	 = context->GetCryptoParameters()->GetElementParams()->GetParams().size() - 1;
 	gpu_context.device_plaintexts_mutex	 = std::make_unique<std::shared_mutex>();
 	gpu_context.device_ciphertexts_mutex = std::make_unique<std::shared_mutex>();
+	gpu_context.plaintext_ready_events_mutex = std::make_unique<std::shared_mutex>();
 	auto ptr							 = std::make_shared<CryptoContextImpl<DCRTPoly>>(std::move(gpu_context));
 	ptr->self_reference					 = std::weak_ptr<CryptoContextImpl<DCRTPoly>>(ptr);
 	obj									 = ptr;

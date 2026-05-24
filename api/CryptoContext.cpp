@@ -117,6 +117,16 @@ static std::unordered_map<PKESchemeFeature, lbcrypto::PKESchemeFeature> PKESchem
 };
 
 CryptoContextImpl<DCRTPoly>::~CryptoContextImpl() {
+	if (plaintext_ready_events_mutex) {
+		plaintext_ready_events_mutex->lock();
+		for (auto& kv : plaintext_ready_events) {
+			if (kv.second != nullptr) {
+				cudaEventDestroy(kv.second);
+			}
+		}
+		plaintext_ready_events.clear();
+		plaintext_ready_events_mutex->unlock();
+	}
 	lbcrypto::CryptoContextImpl<lbcrypto::DCRTPolyImpl<bigintdyn::mubintvec<bigintdyn::ubint<unsigned long>>>>::ClearEvalMultKeys();
 	lbcrypto::CryptoContextImpl<lbcrypto::DCRTPolyImpl<bigintdyn::mubintvec<bigintdyn::ubint<unsigned long>>>>::ClearEvalAutomorphismKeys();
 }
@@ -169,6 +179,18 @@ void CryptoContextImpl<DCRTPoly>::SetDevices(const std::vector<int>& devices) {
 	}
 
 	this->devices = devices;
+}
+
+void CryptoContextImpl<DCRTPoly>::SetPlaintextStreams(cudaStream_t load_stream, cudaStream_t compute_stream) {
+	this->plaintext_load_stream = load_stream;
+	this->plaintext_compute_stream = compute_stream;
+	this->plaintext_streams_enabled = (load_stream != nullptr || compute_stream != nullptr);
+}
+
+void CryptoContextImpl<DCRTPoly>::ClearPlaintextStreams() {
+	this->plaintext_load_stream = nullptr;
+	this->plaintext_compute_stream = nullptr;
+	this->plaintext_streams_enabled = false;
 }
 
 // ---- Load to devices ----
@@ -240,9 +262,16 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt) {
 	const auto& ptImpl								  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw_pt				  = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
 	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
-	uint32_t handle									  = this->RegisterDevicePlaintext(std::move(gpu_pt));
-	pt->gpu											  = handle;
-	pt->loaded										  = true;
+	const cudaStream_t load_stream = ResolvePlaintextLoadStream(nullptr);
+	if (load_stream != nullptr) {
+		gpu_pt->load(raw_pt, load_stream);
+	} else {
+		gpu_pt->load(raw_pt);
+	}
+	uint32_t handle					  = this->RegisterDevicePlaintext(std::move(gpu_pt));
+	pt->gpu						  = handle;
+	pt->loaded					  = true;
+	RecordPlaintextReady(handle, load_stream);
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stream_override) {
@@ -257,15 +286,17 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 	auto& context						  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& ptImpl					  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw_pt				  = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
-	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu, raw_pt);
-	if (stream_override != nullptr) {
-		gpu_pt->load(raw_pt, stream_override);
+	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
+	const cudaStream_t load_stream = ResolvePlaintextLoadStream(stream_override);
+	if (load_stream != nullptr) {
+		gpu_pt->load(raw_pt, load_stream);
 	} else {
 		gpu_pt->load(raw_pt);
 	}
 	uint32_t handle			      = this->RegisterDevicePlaintext(std::move(gpu_pt));
-	pt->gpu						  = handle;
-	pt->loaded					  = true;
+	pt->gpu					  = handle;
+	pt->loaded				  = true;
+	RecordPlaintextReady(handle, load_stream);
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadCiphertext(Ciphertext<DCRTPoly>& ct) {
@@ -775,6 +806,8 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalAdd(const Ciphertext<DCRTP
 	// GPU path.
 	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
 	this->LoadPlaintext(pt);
+	this->WaitPlaintextReady(pt->gpu);
+	this->WaitPlaintextReady(pt->gpu);
 
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
 	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
@@ -850,6 +883,7 @@ void CryptoContextImpl<DCRTPoly>::EvalAddInPlace(Ciphertext<DCRTPoly>& ct1, Plai
 	// GPU path.
 	this->LoadCiphertext(ct1);
 	this->LoadPlaintext(pt);
+	this->WaitPlaintextReady(pt->gpu);
 
 	auto res_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct1->gpu));
 	auto pt_gpu	 = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu));
@@ -1023,6 +1057,7 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalSub(const Ciphertext<DCRTP
 	// GPU path.
 	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
 	this->LoadPlaintext(pt);
+	this->WaitPlaintextReady(pt->gpu);
 
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct);
 	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
@@ -1225,6 +1260,7 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(const Ciphertext<DCRT
 	// GPU path.
 	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct1));
 	this->LoadPlaintext(pt);
+	this->WaitPlaintextReady(pt->gpu);
 
 	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ct1);
 	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
@@ -1280,6 +1316,7 @@ void CryptoContextImpl<DCRTPoly>::EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, Pla
 	// GPU path.
 	this->LoadCiphertext(ct1);
 	this->LoadPlaintext(pt);
+	this->WaitPlaintextReady(pt->gpu);
 
 	auto res_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct1->gpu));
 	auto pt_gpu	 = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu));
@@ -1785,6 +1822,7 @@ void CryptoContextImpl<DCRTPoly>::ConvolutionTransformInPlace(Ciphertext<DCRTPol
 	pts_gpu.reserve(pts.size());
 	for (const auto& pt : pts) {
 		this->LoadPlaintext(const_cast<Plaintext&>(pt));
+		this->WaitPlaintextReady(pt->gpu);
 		auto pt_gpu = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu));
 		pts_gpu.push_back(pt_gpu.get());
 	}
@@ -1817,12 +1855,14 @@ void CryptoContextImpl<DCRTPoly>::SpecialConvolutionTransformInPlace(Ciphertext<
 	pts_gpu.reserve(pts.size());
 	for (const auto& pt : pts) {
 		this->LoadPlaintext(const_cast<Plaintext&>(pt));
+		this->WaitPlaintextReady(pt->gpu);
 		auto pt_gpu = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu));
 		pts_gpu.push_back(pt_gpu.get());
 	}
 
 	// Load mask
 	this->LoadPlaintext(mask);
+	this->WaitPlaintextReady(mask->gpu);
 	auto mask_gpu = std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(mask->gpu));
 
 	if (rowSize == 0) {
@@ -1886,6 +1926,7 @@ std::shared_ptr<void>& CryptoContextImpl<DCRTPoly>::GetDeviceCiphertext(uint32_t
 }
 
 bool CryptoContextImpl<DCRTPoly>::EvictDevicePlaintext(uint32_t handle) {
+	ClearPlaintextReady(handle);
 	device_plaintexts_mutex->lock();
 	auto result = device_plaintexts.erase(handle) > 0;
 	device_plaintexts_mutex->unlock();
@@ -1908,6 +1949,82 @@ void CryptoContextImpl<DCRTPoly>::Synchronize() const {
 		cudaDeviceSynchronize();
 		CudaCheckErrorModNoSync;
 	}
+}
+
+cudaStream_t CryptoContextImpl<DCRTPoly>::ResolvePlaintextLoadStream(cudaStream_t stream_override) const {
+	if (stream_override != nullptr) {
+		return stream_override;
+	}
+	if (!plaintext_streams_enabled) {
+		return nullptr;
+	}
+	return plaintext_load_stream;
+}
+
+cudaStream_t CryptoContextImpl<DCRTPoly>::ResolvePlaintextComputeStream() const {
+	if (!plaintext_streams_enabled) {
+		return nullptr;
+	}
+	if (plaintext_compute_stream != nullptr) {
+		return plaintext_compute_stream;
+	}
+	return 0;
+}
+
+void CryptoContextImpl<DCRTPoly>::RecordPlaintextReady(uint32_t handle, cudaStream_t stream) {
+	if (!plaintext_streams_enabled || stream == nullptr) {
+		return;
+	}
+	if (!plaintext_ready_events_mutex) {
+		return;
+	}
+	plaintext_ready_events_mutex->lock();
+	auto it = plaintext_ready_events.find(handle);
+	if (it == plaintext_ready_events.end()) {
+		cudaEvent_t ev = nullptr;
+		cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+		plaintext_ready_events.emplace(handle, ev);
+		it = plaintext_ready_events.find(handle);
+	}
+	cudaEventRecord(it->second, stream);
+	plaintext_ready_events_mutex->unlock();
+}
+
+void CryptoContextImpl<DCRTPoly>::WaitPlaintextReady(uint32_t handle) {
+	if (!plaintext_streams_enabled) {
+		return;
+	}
+	if (!plaintext_ready_events_mutex) {
+		return;
+	}
+	const cudaStream_t compute_stream = ResolvePlaintextComputeStream();
+	if (compute_stream == nullptr) {
+		return;
+	}
+	plaintext_ready_events_mutex->lock_shared();
+	auto it = plaintext_ready_events.find(handle);
+	if (it == plaintext_ready_events.end()) {
+		plaintext_ready_events_mutex->unlock_shared();
+		return;
+	}
+	cudaEvent_t ev = it->second;
+	plaintext_ready_events_mutex->unlock_shared();
+	cudaStreamWaitEvent(compute_stream, ev, 0);
+}
+
+void CryptoContextImpl<DCRTPoly>::ClearPlaintextReady(uint32_t handle) {
+	if (!plaintext_ready_events_mutex) {
+		return;
+	}
+	plaintext_ready_events_mutex->lock();
+	auto it = plaintext_ready_events.find(handle);
+	if (it != plaintext_ready_events.end()) {
+		if (it->second != nullptr) {
+			cudaEventDestroy(it->second);
+		}
+		plaintext_ready_events.erase(it);
+	}
+	plaintext_ready_events_mutex->unlock();
 }
 
 std::vector<int> CryptoContextImpl<DCRTPoly>::GetConvolutionTransformRotationIndices(int rowSize, int bStep, int stride, uint32_t gStep) {

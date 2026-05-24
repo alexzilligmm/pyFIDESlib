@@ -55,6 +55,8 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	void SetAutoLoadPlaintexts(bool autoload);
 	void SetAutoLoadCiphertexts(bool autoload);
 	void SetDevices(const std::vector<int>& devices);
+	void SetPlaintextStreams(cudaStream_t load_stream, cudaStream_t compute_stream);
+	void ClearPlaintextStreams();
 
 	// ---- Load to devices ----
 
@@ -220,6 +222,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	bool auto_load_plaintexts = false;
 	/// @brief Whether ciphertexts should be automatically loaded to the device upon creation.
 	bool auto_load_ciphertexts = true;
+	/// @brief Optional async streams for plaintext load/compute coordination.
+	cudaStream_t plaintext_load_stream = nullptr;
+	cudaStream_t plaintext_compute_stream = nullptr;
+	bool plaintext_streams_enabled = false;
 	/// @brief Self reference to enable shared_from_this-like behavior.
 	std::weak_ptr<CryptoContextImpl<DCRTPoly>> self_reference;
 	/// @brief Multiplicative depth of the context.
@@ -238,6 +244,9 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @brief  Registry of plaintexts stored on the GPU (opaque types).
 	std::unordered_map<uint32_t, std::shared_ptr<void>> device_plaintexts;
 	std::unique_ptr<std::shared_mutex> device_plaintexts_mutex;
+	/// @brief  Registry of plaintext readiness events by GPU handle.
+	std::unordered_map<uint32_t, cudaEvent_t> plaintext_ready_events;
+	std::unique_ptr<std::shared_mutex> plaintext_ready_events_mutex;
 	/// @brief  Registry of ciphertexts stored on the GPU (opaque types).
 	std::unordered_map<uint32_t, std::shared_ptr<void>> device_ciphertexts;
 	std::unique_ptr<std::shared_mutex> device_ciphertexts_mutex;
@@ -250,6 +259,11 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	std::shared_ptr<void>& GetDeviceCiphertext(uint32_t handle);
 	bool EvictDevicePlaintext(uint32_t handle);
 	bool EvictDeviceCiphertext(uint32_t handle);
+	cudaStream_t ResolvePlaintextLoadStream(cudaStream_t stream_override) const;
+	cudaStream_t ResolvePlaintextComputeStream() const;
+	void RecordPlaintextReady(uint32_t handle, cudaStream_t stream);
+	void WaitPlaintextReady(uint32_t handle);
+	void ClearPlaintextReady(uint32_t handle);
 
 	void Synchronize() const;
 
