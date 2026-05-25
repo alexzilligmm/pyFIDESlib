@@ -231,10 +231,16 @@ void Ciphertext::addPt(const Plaintext& b) {
 			this->rescale();
 		}
 
-		if (b.c0.getLevel() != this->getLevel()) {
+		if (b.c0.getLevel() != this->getLevel() || b.NoiseLevel != this->NoiseLevel) {
 			Plaintext b_(cc_);
 			if (!b_.adjustPlaintextToCiphertext(b, *this)) {
-				assert(false);
+				// In release builds, avoid silent no-op when adjustment fails.
+				if (b.c0.getLevel() < this->getLevel()) {
+					this->dropToLevel(b.c0.getLevel());
+					addPt(b);
+					return;
+				}
+				OPENFHE_THROW("Ciphertext::addPt failed to align plaintext and ciphertext");
 			} else {
 				addPt(b_);
 			}
@@ -257,12 +263,17 @@ void Ciphertext::subPt(const Plaintext& b) {
 			this->rescale();
 		}
 
-		if (b.c0.getLevel() != this->getLevel()) {
+		if (b.c0.getLevel() != this->getLevel() || b.NoiseLevel != this->NoiseLevel) {
 			Plaintext b_(cc_);
 			if (!b_.adjustPlaintextToCiphertext(b, *this)) {
-				assert(false);
+				if (b.c0.getLevel() < this->getLevel()) {
+					this->dropToLevel(b.c0.getLevel());
+					subPt(b);
+					return;
+				}
+				OPENFHE_THROW("Ciphertext::subPt failed to align plaintext and ciphertext");
 			} else {
-				addPt(b_);
+				subPt(b_);
 			}
 			return;
 		}
