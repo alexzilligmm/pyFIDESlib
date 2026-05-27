@@ -70,8 +70,16 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @param stream CUDA stream for async H2D copies (single-GPU contexts only).
 	void LoadPlaintext(Plaintext& pt, cudaStream_t stream);
 	/// @brief Load a ciphertext to the devices.
-	/// @param ct Ciphertext to load.
+	/// @param ct Ciphertext to load. Handles both an OpenFHE-backed ct->cpu and
+	/// a ct->cpu previously stashed by StoreDeviceCiphertext (RawCipherText).
 	void LoadCiphertext(Ciphertext<DCRTPoly>& ct);
+
+	/// @brief Offload a device ciphertext to host: download its GPU-computed data
+	/// into ct->cpu (as a RawCipherText) and free the device copy. Inverse of
+	/// LoadCiphertext. Unlike EvictDeviceCiphertext — which only frees device
+	/// memory and leaves ct->cpu stale — this preserves the computed value, so a
+	/// later LoadCiphertext restores it exactly. Returns false if not loaded.
+	bool StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct);
 
 	// ---- Key Generation ----
 
@@ -250,6 +258,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @brief  Registry of ciphertexts stored on the GPU (opaque types).
 	std::unordered_map<uint32_t, std::shared_ptr<void>> device_ciphertexts;
 	std::unique_ptr<std::shared_mutex> device_ciphertexts_mutex;
+	/// @brief Host-resident store for ciphertexts offloaded by StoreDeviceCiphertext,
+	/// keyed by the (now-freed, monotonic) device handle. The value boxes a
+	/// FIDESlib::CKKS::RawCipherText in std::any so this public header stays free of
+	/// CUDA/internal types. ct->cpu is left as its original OpenFHE shell so any
+	/// cpu-reading op still sees a valid ciphertext while offloaded.
+	std::unordered_map<uint32_t, std::any> offloaded_ciphertexts;
 	/// @brief Next available handle for GPU objects. Zero is reserved as a null handle.
 	uint32_t next_gpu_handle = 1;
 

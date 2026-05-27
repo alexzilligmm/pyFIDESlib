@@ -307,15 +307,60 @@ void CryptoContextImpl<DCRTPoly>::LoadCiphertext(Ciphertext<DCRTPoly>& ct) {
 		OPENFHE_THROW("CryptoContext not loaded to any device");
 	}
 
-	auto& context_gpu								   = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
-	auto& context									   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
-	const auto& ctImpl								   = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
-	FIDESlib::CKKS::RawCipherText raw_ct			   = FIDESlib::CKKS::GetRawCipherText(context, ctImpl);
-	std::shared_ptr<FIDESlib::CKKS::Ciphertext> gpu_ct = std::make_shared<FIDESlib::CKKS::Ciphertext>(context_gpu, raw_ct);
-	uint32_t handle									   = this->RegisterDeviceCiphertext(std::move(gpu_ct));
-	ct->gpu											   = handle;
-	ct->loaded										   = true;
-	ct->original_level								   = this->multiplicative_depth - ct->GetLevel();
+	auto& context_gpu = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	std::shared_ptr<FIDESlib::CKKS::Ciphertext> gpu_ct;
+	auto off = this->offloaded_ciphertexts.find(ct->gpu);
+	if (off != this->offloaded_ciphertexts.end()) {
+		// Re-upload a ciphertext previously offloaded by StoreDeviceCiphertext.
+		// store()/load() are the device-native pair (no bit-reversal, unlike the
+		// OpenFHE import path), so this round-trips exactly. ct->cpu is untouched.
+		auto& raw_ct = std::any_cast<FIDESlib::CKKS::RawCipherText&>(off->second);
+		gpu_ct		 = std::make_shared<FIDESlib::CKKS::Ciphertext>(context_gpu, raw_ct);
+		this->offloaded_ciphertexts.erase(off);
+	} else {
+		auto& context						 = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		const auto& ctImpl					 = std::any_cast<const lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ct->cpu);
+		FIDESlib::CKKS::RawCipherText raw_ct = FIDESlib::CKKS::GetRawCipherText(context, ctImpl);
+		gpu_ct								 = std::make_shared<FIDESlib::CKKS::Ciphertext>(context_gpu, raw_ct);
+	}
+	uint32_t handle	   = this->RegisterDeviceCiphertext(std::move(gpu_ct));
+	ct->gpu			   = handle;
+	ct->loaded		   = true;
+	ct->original_level = this->multiplicative_depth - ct->GetLevel();
+}
+
+bool CryptoContextImpl<DCRTPoly>::StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct) {
+	if (!ct->loaded)
+		return false;
+	if (this->devices.empty() || !this->loaded) {
+		OPENFHE_THROW("CryptoContext not loaded to any device");
+	}
+
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+	FIDESlib::CKKS::RawCipherText raw_ct;
+	ct_gpu->store(raw_ct);	// device -> host: numRes / sub_0 / sub_1 / NoiseLevel / Noise / keyid / slots
+
+	// store() omits the per-limb moduli (only the OpenFHE import path fills them),
+	// but load() needs them — fill from the context modulus chain. A ct at numRes
+	// residues uses the first numRes ciphertext (Q) primes.
+	auto& context	  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	const auto& chain = context->GetCryptoParameters()->GetElementParams()->GetParams();
+	raw_ct.moduli.clear();
+	raw_ct.moduli.reserve(raw_ct.numRes);
+	for (int i = 0; i < raw_ct.numRes; ++i)
+		raw_ct.moduli.push_back(chain[i]->GetModulus().ConvertToInt());
+
+	// Stash host-side keyed by the (monotonic, never-reused) handle, free device,
+	// and KEEP ct->gpu as that key + ct->cpu as its original OpenFHE shell — so a
+	// cpu-reading op (clone/metadata) still sees a valid ct while offloaded, and
+	// LoadCiphertext reconstructs from offloaded_ciphertexts[ct->gpu].
+	const uint32_t key = ct->gpu;
+	if (!this->EvictDeviceCiphertext(key)) {
+		OPENFHE_THROW("StoreDeviceCiphertext: could not evict ciphertext from device");
+	}
+	this->offloaded_ciphertexts[key] = std::move(raw_ct);
+	ct->loaded = false;
+	return true;
 }
 
 // ---- Key Generation ----
