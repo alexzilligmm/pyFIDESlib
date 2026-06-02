@@ -62,6 +62,16 @@ template <> class CryptoContextImpl<DCRTPoly> {
 
 	/// @brief Load the context to the devices.
 	void LoadContext(const PublicKey<DCRTPoly>& publicKey);
+	/// @brief Free a set of (already-loaded) rotation keys to reclaim GPU memory.
+	/// Bootstrap DFT rotation indexes are protected (never removed). Intended for
+	/// auxiliary rotation keys that are no longer needed after a phase (e.g. prefill
+	/// filling-packing keys before decode). Returns the number of keys actually freed.
+	size_t FreeRotationKeys(const std::vector<int>& steps, const PublicKey<DCRTPoly>& publicKey);
+	/// @brief GPU-load a set of rotation keys that were deferred at LoadContext time
+	/// (their OpenFHE eval keys already exist; this is the device transfer only).
+	/// Dedups against already-resident keys. Used to lazily bring in the decode
+	/// (cachemir) keys after prefill so they don't occupy the device during prefill.
+	void LoadRotationKeys(const std::vector<int>& steps, const PublicKey<DCRTPoly>& publicKey);
 	/// @brief Load a plaintext to the devices.
 	/// @param pt Plaintext to load.
 	void LoadPlaintext(Plaintext& pt);
@@ -240,6 +250,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	uint32_t multiplicative_depth = 0;
 	/// @brief Rotation indexes for which rotation keys are available.
 	std::vector<int32_t> rotation_indexes;
+	/// @brief Rotation indexes whose GPU load is deferred at LoadContext time (set
+	/// before LoadContext). Their OpenFHE eval keys are still generated; only the
+	/// device transfer is skipped until a later LoadRotationKeys() call.
+	std::vector<int32_t> deferred_rotation_indexes;
 	/// @brief Secret key distribution.
 	SecretKeyDist keyDist = UNIFORM_TERNARY;
 

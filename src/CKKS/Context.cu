@@ -627,6 +627,14 @@ bool ContextData::HasRotationKey(int index, const KeyHash& keyID) {
         precom.keys[keyID] = Precomputations::KeyPrecomputations{};
     return precom.keys.at(keyID).rot_keys.contains(index);
 }
+bool ContextData::RemoveRotationKey(int index, const KeyHash& keyID) {
+    while (index < 0)
+        index += this->N / 2;
+    auto it = precom.keys.find(keyID);
+    if (it == precom.keys.end())
+        return false;
+    return it->second.rot_keys.erase(index) > 0;   // dtor frees the GPU limbs
+}
 
 void ContextData::AddEvalKey(KeySwitchingKey&& ksk) {
     if (!precom.keys.contains(ksk.keyID))

@@ -33,6 +33,7 @@
 #include <scheme/ckksrns/ckksrns-ser.h>
 
 #include <memory>
+#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -226,8 +227,12 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 		eval_ksk.Initialize(raw_eval_ksk);
 		c->AddEvalKey(std::move(eval_ksk));
 	}
-	// Rotational key switching keys.
+	// Rotational key switching keys. Steps in deferred_rotation_indexes are skipped
+	// here (their OpenFHE eval keys still exist) and GPU-loaded later via
+	// LoadRotationKeys() — used to keep decode keys off the device during prefill.
+	std::set<int> deferred(this->deferred_rotation_indexes.begin(), this->deferred_rotation_indexes.end());
 	for (const auto& step : this->rotation_indexes) {
+		if (deferred.count(step)) continue;
 		auto raw_rot_ksk = FIDESlib::CKKS::GetRotationKeySwitchKey(pkImpl, step);
 		FIDESlib::CKKS::KeySwitchingKey rot_ksk(c);
 		rot_ksk.Initialize(raw_rot_ksk);
@@ -247,6 +252,51 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 
 	this->gpu	 = std::make_any<FIDESlib::CKKS::Context>(std::move(c));
 	this->loaded = true;
+}
+
+size_t CryptoContextImpl<DCRTPoly>::FreeRotationKeys(const std::vector<int>& steps,
+                                                     const PublicKey<DCRTPoly>& publicKey) {
+	if (!this->loaded || this->devices.empty())
+		return 0;
+
+	auto& c      = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	auto& pkImpl = std::any_cast<const lbcrypto::PublicKey<lbcrypto::DCRTPoly>&>(publicKey->pimpl);
+	const std::string keyID = pkImpl->GetKeyTag();
+	const int half = c->N / 2;
+	auto norm = [half](int i) { i %= half; if (i < 0) i += half; return i; };
+
+	// Protect the bootstrap DFT rotation keys: they share the rot_keys map, so
+	// removing one would break Bootstrap(). Gather every bootstrap automorphism
+	// index for every set-up slot count.
+	std::set<int> protect;
+	auto cpu_cc = pkImpl->GetCryptoContext();
+	auto fhe    = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(cpu_cc->GetScheme()->m_FHE);
+	if (fhe) {
+		for (const auto& [slots, _] : fhe->m_bootPrecomMap)
+			for (int b : FIDESlib::CKKS::GetBootstrapIndexes(cpu_cc, static_cast<int>(slots), nullptr))
+				protect.insert(norm(b));
+	}
+
+	size_t freed = 0;
+	for (int s : steps) {
+		const int n = norm(s);
+		if (n == 0 || protect.count(n))
+			continue;
+		if (c->RemoveRotationKey(s, keyID))
+			++freed;
+	}
+	return freed;
+}
+
+void CryptoContextImpl<DCRTPoly>::LoadRotationKeys(const std::vector<int>& steps,
+                                                   const PublicKey<DCRTPoly>& publicKey) {
+	if (!this->loaded || this->devices.empty() || steps.empty())
+		return;
+	auto& c      = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	auto& pkImpl = std::any_cast<const lbcrypto::PublicKey<lbcrypto::DCRTPoly>&>(publicKey->pimpl);
+	// AddRotationKeys dedups against already-resident keys (HasRotationKey) and only
+	// transfers the missing ones; the OpenFHE eval keys were generated at setup.
+	FIDESlib::CKKS::AddRotationKeys(pkImpl, c, steps);
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt) {

@@ -158,6 +158,9 @@ class ContextData {
     void AddRotationKey(int index, KeySwitchingKey&& ksk);
     KeySwitchingKey& GetRotationKey(int index, const KeyHash& keyID, int slots = -1);
     bool HasRotationKey(int index, const KeyHash& keyID);
+    // Erase a single rotation key (frees its GPU limbs via the KeySwitchingKey dtor).
+    // Returns true if a key was present and removed. Index is normalized as in AddRotationKey.
+    bool RemoveRotationKey(int index, const KeyHash& keyID);
     void AddEvalKey(KeySwitchingKey&& ksk);
     KeySwitchingKey& GetEvalKey(const KeyHash& keyID);
     int GetBootK();
