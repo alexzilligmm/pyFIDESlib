@@ -249,14 +249,13 @@ void Plaintext::copy(const Plaintext& p) {
 void Plaintext::multScalar(double c, bool rescale) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc_);
-    /*
-    if (cc.rescaleTechnique == Context::FLEXIBLEAUTO || cc.rescaleTechnique == Context::FLEXIBLEAUTOEXT ||
-        cc.rescaleTechnique == Context::FIXEDAUTO) {
+    if (cc.rescaleTechnique == RESCALE_TECHNIQUE::FLEXIBLEAUTO ||
+        cc.rescaleTechnique == RESCALE_TECHNIQUE::FLEXIBLEAUTOEXT ||
+        cc.rescaleTechnique == RESCALE_TECHNIQUE::FIXEDAUTO) {
         if (NoiseLevel == 2)
             this->rescale();
     }
     assert(this->NoiseLevel == 1);
-    */
     auto elem = cc.ElemForEvalMult(c0.getLevel(), c);
     /*
     for (int i = 0; i < elem.size(); i++) {
