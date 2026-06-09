@@ -207,6 +207,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> Rescale(const Ciphertext<DCRTPoly>& ciphertext);
 	void RescaleInPlace(Ciphertext<DCRTPoly>& ciphertext);
 
+	/// @brief Value-preserving drop to a higher (fewer-limbs) target level via the same
+	/// tower-drop used to align add/sub operands. No-op if already at/below target.
+	void DropToLevel(Ciphertext<DCRTPoly>& ciphertext, uint32_t level);
+
 	static void SetLevel(Ciphertext<DCRTPoly>& ct, size_t level);
 
 	Ciphertext<DCRTPoly> EvalBootstrap(const Ciphertext<DCRTPoly>& ciphertext, uint32_t numIterations = 1, uint32_t precision = 0, bool prescaled = false);

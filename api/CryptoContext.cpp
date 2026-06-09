@@ -1795,6 +1795,27 @@ void CryptoContextImpl<DCRTPoly>::RescaleInPlace(Ciphertext<DCRTPoly>& ciphertex
 	res_gpu->rescale();
 }
 
+void CryptoContextImpl<DCRTPoly>::DropToLevel(Ciphertext<DCRTPoly>& ciphertext, uint32_t level) {
+
+	// Fall back to CPU (OpenFHE LevelReduce: value-preserving tower drop).
+	if (this->devices.empty()) {
+		auto& context	   = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+		auto& ctImpl	   = std::any_cast<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>&>(ciphertext->cpu);
+		const uint32_t cur = ctImpl->GetLevel();
+		if (level > cur) {
+			auto ct			= context->LevelReduce(ctImpl, nullptr, level - cur);
+			ciphertext->cpu = std::make_any<lbcrypto::Ciphertext<lbcrypto::DCRTPoly>>(ct);
+		}
+		return;
+	}
+
+	// GPU path: same tower-drop FLEXIBLEAUTO uses to align operands. The device level is
+	// REMAINING depth (device=mult_depth-host_level), so convert the OpenFHE target level.
+	this->LoadCiphertext(ciphertext);
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ciphertext->gpu));
+	ct_gpu->dropToLevel(static_cast<int>(this->multiplicative_depth) - static_cast<int>(level));
+}
+
 void CryptoContextImpl<DCRTPoly>::SetLevel(Ciphertext<DCRTPoly>& ct, size_t level) {
 	ct->SetLevel(level);
 }
