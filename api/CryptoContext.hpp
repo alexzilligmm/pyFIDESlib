@@ -193,6 +193,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalRotate(const Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 	void EvalRotateInPlace(Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 
+	// Complex conjugation (automorphism 2N-1), slot-wise conj of the packed values.
+	// (ct + conj(ct)) annihilates the imaginary noise component exactly — used to
+	// keep persistent accumulators below the CKKS Decode approximation-error bound.
+	// Requires the conjugation key (resident whenever bootstrap precomp is loaded).
+	Ciphertext<DCRTPoly> EvalConjugate(const Ciphertext<DCRTPoly>& ciphertext);
+
 	std::shared_ptr<void> EvalFastRotationPrecompute(const Ciphertext<DCRTPoly>& ct);
 	Ciphertext<DCRTPoly> EvalFastRotation(const Ciphertext<DCRTPoly>& ct, int32_t index, uint32_t m, const std::shared_ptr<void>& precomp);
 	Ciphertext<DCRTPoly> EvalFastRotationExt(const Ciphertext<DCRTPoly>& ct, int32_t index, const std::shared_ptr<void>& digits, bool addFirst);

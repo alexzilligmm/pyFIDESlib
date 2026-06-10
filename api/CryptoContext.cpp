@@ -1556,6 +1556,22 @@ void CryptoContextImpl<DCRTPoly>::EvalRotateInPlace(Ciphertext<DCRTPoly>& cipher
 	ct_gpu->rotate(index);
 }
 
+Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalConjugate(const Ciphertext<DCRTPoly>& ciphertext) {
+
+	if (this->devices.empty()) {
+		OPENFHE_THROW("EvalConjugate: CPU fallback not implemented (GPU contexts only)");
+	}
+
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ciphertext));
+
+	Ciphertext<DCRTPoly> result = std::make_shared<CiphertextImpl<DCRTPoly>>(*ciphertext);
+	auto res_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));
+	auto src_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ciphertext->gpu));
+	res_gpu->conjugate(*src_gpu);
+
+	return result;
+}
+
 std::shared_ptr<void> CryptoContextImpl<DCRTPoly>::EvalFastRotationPrecompute(const Ciphertext<DCRTPoly>& ct) {
 
 	// Fall back to CPU.
