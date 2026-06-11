@@ -49,14 +49,17 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         std::cout << "p: " << p << std::endl;
     }
     int32_t deg = std::round(std::log2(qDouble / powP));
-    /*
-#if NATIVEINT != 128
-    if (deg > static_cast<int32_t>(m_correctionFactor)) {
-        OPENFHE_THROW("Degree [" + std::to_string(deg) + "] must be less than or equal to the correction factor [" +
-                      std::to_string(m_correctionFactor) + "].");
+    // Guard restored (was commented out upstream): deg = q0_bits - scale_bits
+    // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
+    // subtraction below underflows and corFactor = 1 << garbage poisons every
+    // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
+    if (deg > static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor)) {
+        throw std::runtime_error(
+            "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
+            " exceeds correctionFactor=" +
+            std::to_string(cc.GetBootPrecomputation(slots).correctionFactor) +
+            " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-#endif
-    */
     uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
     if constexpr (PRINT)
         std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
@@ -193,14 +196,17 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         std::cout << "p: " << p << std::endl;
     }
     int32_t deg = std::round(std::log2(qDouble / powP));
-    /*
-#if NATIVEINT != 128
-    if (deg > static_cast<int32_t>(m_correctionFactor)) {
-        OPENFHE_THROW("Degree [" + std::to_string(deg) + "] must be less than or equal to the correction factor [" +
-                      std::to_string(m_correctionFactor) + "].");
+    // Guard restored (was commented out upstream): deg = q0_bits - scale_bits
+    // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
+    // subtraction below underflows and corFactor = 1 << garbage poisons every
+    // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
+    if (deg > static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor)) {
+        throw std::runtime_error(
+            "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
+            " exceeds correctionFactor=" +
+            std::to_string(cc.GetBootPrecomputation(slots).correctionFactor) +
+            " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-#endif
-    */
     uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
     if constexpr (PRINT)
         std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
@@ -444,6 +450,11 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         adjustmentFactor *= pow;
         if constexpr (PRINT)
             std::cout << adjustmentFactor << std::endl;
+        if (std::getenv("BTS_SF_DEBUG"))
+            printf("[bts_sf] towers=%u log2(targetSF)=%.4f log2(sourceSF)=%.4f "
+                   "log2(modToDrop)=%.4f corr=%u log2(adj)=%.4f\n",
+                   numTowers, log2(targetSF), log2(sourceSF), log2(modToDrop),
+                   correction, log2(adjustmentFactor));
 
         if (!prescaled) {
             if constexpr (PRINT) {
