@@ -2,6 +2,8 @@
 // Created by carlosad on 8/06/25.
 //
 
+#include <stdexcept>
+#include <string>
 #include "CKKS/Context.cuh"
 #include "CKKS/Conv.cuh"
 #include "CKKS/ElemenwiseBatchKernels.cuh"
@@ -503,6 +505,11 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
                 }
 
                 //h_digits[offset_c1 + i] = src.DIGITlimbptr.at(i).data;
+                // banded keys (rotation-key limb pruning) must not be used above their band
+                if (ksk_a[k]->key_q_band >= 0 && limbsize > ksk_a[k]->key_q_band + 1)
+                    throw std::runtime_error("hoistedRotateDotKSK: banded key (band " +
+                                             std::to_string(ksk_a[k]->key_q_band) + ") used at limbsize " +
+                                             std::to_string(limbsize));
                 h_digits[k * cc.dnum * 6 + i + cc.dnum] = ksk_a[k]->DIGITlimbptr.at(i).data;
                 h_digits[k * cc.dnum * 6 + i + 2 * cc.dnum] = ksk_b[k]->DIGITlimbptr.at(i).data;
                 //h_digits[offset_c1 + i + 3 * cc.dnum] = src_c1.limbptr.data;

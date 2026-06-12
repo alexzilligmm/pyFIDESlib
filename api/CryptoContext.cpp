@@ -242,12 +242,23 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 	// AddRotationKeys skips already-present indexes, so any index the bootstrap
 	// needs must stay FULL here.
 	std::set<int> full_keep;
+	// rotation indexes are stored normalized to [0, N/2); negative model steps
+	// (e.g. -k) land on the SAME slots as bootstrap indexes N/2-k, so the
+	// exclusion lookup must compare in normalized space
+	const int half_ring = static_cast<int>(context->GetRingDimension() / 2);
+	auto norm_idx = [half_ring](int v) {
+		v %= half_ring;
+		if (v < 0)
+			v += half_ring;
+		return v;
+	};
 	if (rot_band >= 0) {
 		auto fhe_pre = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(context->GetScheme()->m_FHE);
 		if (fhe_pre) {
 			for (const auto& [slots_pre, _] : fhe_pre->m_bootPrecomMap) {
 				auto idx = FIDESlib::CKKS::GetBootstrapIndexes(context, static_cast<int>(slots_pre), nullptr);
-				full_keep.insert(idx.begin(), idx.end());
+				for (int v : idx)
+					full_keep.insert(norm_idx(v));
 			}
 		}
 		std::cerr << "[rot_band] band=" << rot_band << " full_keep=" << full_keep.size()
@@ -258,7 +269,7 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 		if (deferred.count(step)) continue;
 		auto raw_rot_ksk = FIDESlib::CKKS::GetRotationKeySwitchKey(pkImpl, step);
 		FIDESlib::CKKS::KeySwitchingKey rot_ksk(c);
-		const bool full = rot_band < 0 || full_keep.count(step) > 0;
+		const bool full = rot_band < 0 || full_keep.count(norm_idx(step)) > 0;
 		(full ? n_full : n_banded)++;
 		rot_ksk.Initialize(raw_rot_ksk, full ? -1 : rot_band);
 		c->AddRotationKey(step, std::move(rot_ksk));

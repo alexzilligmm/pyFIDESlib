@@ -323,17 +323,21 @@ void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset, int q_ba
     for (size_t i = 0; i < DIGITmeta.size(); ++i) {
         int n = (int)DIGITmeta[i].size() - 1;
         if (q_band >= 0) {
-            // digit layout = [specials..., Q-limbs in chain order]; a ciphertext at
-            // level <= q_band consumes digits whose DECOMP window starts <= q_band
-            // and only Q-limbs at chain positions <= q_band
-            if (decomp_start > q_band) {
+            // Digit-i key row layout = [specials...] ++ [Q-limbs in chain order
+            // EXCLUDING digit i's own DECOMP window [s_i, e_i)] — the kernels
+            // (dotKSK DIGIT phase) navigate the hole via start-decomp offsets.
+            // A ciphertext at level <= q_band consumes digits with s_i <= q_band
+            // and per-digit table entries head [0, min(band+1, s_i)) plus tail
+            // [e_i, band+1) shifted left by the hole.
+            const int s_i = decomp_start;
+            const int e_i = decomp_start + (int)DECOMPmeta[i].size();
+            if (s_i > q_band) {
                 decomp_start += (int)DECOMPmeta[i].size();
                 offset += cc.N * DIGITmeta.at(i).size();
                 continue;
             }
-            const int q_total = (int)DIGITmeta[i].size() - specials;
-            const int q_keep  = std::min(q_total, q_band + 1);
-            n                 = specials + q_keep - 1;
+            const int q_keep = std::min(q_band + 1, s_i) + std::max(0, q_band + 1 - e_i);
+            n                = specials + q_keep - 1;
         }
         generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], n, nullptr /*&DIGITauxptr[i]*/,
                  pInt, offset, nullptr, 0);
