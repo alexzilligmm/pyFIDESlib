@@ -6,6 +6,7 @@
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
 #include "CudaUtils.cuh"
+#include <cstdlib>
 #if defined(__clang__)
 #include <experimental/source_location>
 using sc = std::experimental::source_location;
@@ -20,6 +21,33 @@ using namespace FIDESlib::CKKS;
 
 void evalChebyshevSeries(Ciphertext& ctxt, const KeySwitchingKey& keySwitchingKey, std::vector<double>& coefficients, double lower_bound, double upper_bound);
 void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval);
+
+// Arcsine correction (FIDESLIB_ARCSINE=1, coefficient override FIDESLIB_ARCSINE_C3):
+// u = asin(2*pi*y)/(2*pi) ~= y*(1 + (2*pi)^2/6 * y^2) cancels the EvalMod
+// sine-linearization cubic so correction_factor can stay ~0 at small scales.
+static bool arcsineEnabled() {
+	static const bool v = [] {
+		const char* e = std::getenv("FIDESLIB_ARCSINE");
+		return e && *e && *e != '0';
+	}();
+	return v;
+}
+
+static double arcsineC3() {
+	static const double v = [] {
+		const char* e = std::getenv("FIDESLIB_ARCSINE_C3");
+		return (e && *e) ? std::atof(e) : (2.0 * M_PI) * (2.0 * M_PI) / 6.0;
+	}();
+	return v;
+}
+
+static void applyArcsineCorrection(Ciphertext& y) {
+	Ciphertext t(y.cc_);
+	t.square(y, false);
+	t.multScalar(arcsineC3(), false);
+	t.addScalar(1.0);
+	y.mult(t, false);
+}
 
 void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEncI, const KeySwitchingKey& keySwitchingKey, uint64_t post) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
@@ -53,6 +81,11 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
 	if constexpr (COMPLEX)
 		applyDoubleAngleIterations(ctxtEncI, cc.GetDoubleAngleIts(), keySwitchingKey);
+	if (arcsineEnabled()) {
+		applyArcsineCorrection(ctxtEnc);
+		if constexpr (COMPLEX)
+			applyArcsineCorrection(ctxtEncI);
+	}
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc DA res " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -77,7 +110,8 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	if constexpr (!COMPLEX)
 		ctxtEnc.add(ctxtEnc);
 	// cudaDeviceSynchronize();
-	multIntScalar(ctxtEnc, post);
+	if (post != 1)
+		multIntScalar(ctxtEnc, post);
 	if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
 		ctxtEnc.rescale();
 	// cudaDeviceSynchronize();
@@ -108,6 +142,8 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		std::cout << std::endl;
 	}
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
+	if (arcsineEnabled())
+		applyArcsineCorrection(ctxtEnc);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc DA " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -116,7 +152,8 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		}
 		std::cout << std::endl;
 	}
-	multIntScalar(ctxtEnc, post);
+	if (post != 1)
+		multIntScalar(ctxtEnc, post);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc final " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -744,6 +781,18 @@ void FIDESlib::CKKS::evalHornerSeries(Ciphertext& ctxt, const std::vector<double
 	ctxt.copy(acc);
 }
 
+// FIDESLIB_DA_FOLD=k folds the 2^k correction recovery into the LAST double-angle
+// iteration's constants (Y = 2^k*y: Y = 2*2^k*y^2 + 2^k*d). Signal exits the DA
+// already amplified, so StC/final-stage noise is NOT amplified by the recovery —
+// pair with FIDESLIB_SKIP_CORFACTOR=1 and correction_factor = k + deg.
+static int daFoldBits() {
+	static const int v = [] {
+		const char* e = std::getenv("FIDESLIB_DA_FOLD");
+		return e ? std::atoi(e) : 0;
+	}();
+	return v;
+}
+
 void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval) {
 	FIDESlib::CudaNvtxRange r_(std::string{ sc::current().function_name() });
 	ContextData& cc = ctxt.cc;
@@ -753,9 +802,15 @@ void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey
 		if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
 			ctxt.rescale();
 		ctxt.square(false);
-		ctxt.add(ctxt);
 		double scalar = -1.0 / std::pow((2.0 * M_PI), std::pow(2.0, j - r));
-		ctxt.addScalar(scalar);
+		if (daFoldBits() && j == r) {
+			const double s = std::pow(2.0, daFoldBits());
+			ctxt.multScalar(2.0 * s, false);
+			ctxt.addScalar(scalar * s);
+		} else {
+			ctxt.add(ctxt);
+			ctxt.addScalar(scalar);
+		}
 
 		// cudaDeviceSynchronize();
 	}

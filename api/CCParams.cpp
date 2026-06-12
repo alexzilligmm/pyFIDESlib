@@ -24,6 +24,23 @@ void CCParams<CryptoContextCKKSRNS>::SetScalingModSize(uint32_t size) {
 	params.SetScalingModSize(size);
 }
 
+namespace detail {
+template <typename P, typename = void> struct has_per_level_sizes : std::false_type {};
+template <typename P>
+struct has_per_level_sizes<P, std::void_t<decltype(std::declval<P&>().SetScalingModSizePerLevel(
+								  std::declval<std::vector<uint32_t>>()))>> : std::true_type {};
+} // namespace detail
+
+void CCParams<CryptoContextCKKSRNS>::SetScalingModSizePerLevel(std::vector<uint32_t> sizes) {
+	auto& params = std::any_cast<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>&>(cpu);
+	if constexpr (detail::has_per_level_sizes<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>>::value) {
+		params.SetScalingModSizePerLevel(std::move(sizes));
+	} else {
+		if (!sizes.empty())
+			throw std::runtime_error("SetScalingModSizePerLevel: installed OpenFHE lacks mixed-chain support");
+	}
+}
+
 void CCParams<CryptoContextCKKSRNS>::SetBatchSize(uint32_t size) {
 	auto& params = std::any_cast<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>&>(cpu);
 	params.SetBatchSize(size);

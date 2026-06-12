@@ -21,6 +21,25 @@ using namespace FIDESlib::CKKS;
 
 constexpr bool PRINT = false;
 
+// Pair with FIDESLIB_DA_FOLD (ApproxModEval.cu): the 2^correction recovery is
+// folded into the last double-angle iteration, so the end-of-bootstrap integer
+// scale-back must be skipped.
+static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
+    if (!std::getenv("BTS_SF_DEBUG"))
+        return;
+    cudaDeviceSynchronize();
+    printf("[bts_stage] %s: level=%d deg=%d log2(NF)=%.3f table=%.3f\n", stage, ctxt.getLevel(), ctxt.NoiseLevel,
+           std::log2(ctxt.NoiseFactor), std::log2(ctxt.cc.param.ScalingFactorReal[ctxt.getLevel()]));
+}
+
+static bool skipCorFactor() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_SKIP_CORFACTOR");
+        return e && *e && *e != '0';
+    }();
+    return v;
+}
+
 void FIDESlib::CKKS::BootstrapCPUraise(
     Ciphertext& ctxt, const int slots,
     std::shared_ptr<
@@ -68,6 +87,16 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     double pre = 1. / post;
     uint64_t scalar = std::llround(post);
 
+    // Mixed-size chain (see OpenFHE ckksrns-fhe.cpp, same gate): the uniform
+    // identity sf[0] ~ 2^p * 2^deg does not hold; follow the COMPOSITESCALING
+    // constants: pre = sf[0]/q0 input normalization, no integer 2^deg recovery
+    // (the CPU-precomputed StC matrices carry scaleDec = q0/sf[0]).
+    bool mixedChain = std::fabs(std::log2(cc.param.ScalingFactorReal[cc.L] * post / qDouble)) > 0.5;
+    if (mixedChain) {
+        pre    = cc.param.ScalingFactorReal[cc.L] / qDouble;
+        scalar = 1;
+    }
+
     //////////////////////////////////////////////////////////////////////
 
     {
@@ -107,13 +136,13 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         ctxt.rescale();
     }
 
-    //   std::cout << "LT" << std::endl;
-
+    btsStageProbe("pre-CtS", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, false);
     } else {
         EvalCoeffsToSlots(ctxt, slots, false);
     }
+    btsStageProbe("post-CtS", ctxt);
     //  std::cout << "ModRed" << std::endl;
 
     if (cc.N / 2 == slots) {
@@ -140,13 +169,13 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         ctxt.rescale();
     }
 
-    //  std::cout << "LT" << std::endl;
-
+    btsStageProbe("pre-StC", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, true);
     } else {
         EvalCoeffsToSlots(ctxt, slots, true);
     }
+    btsStageProbe("post-StC", ctxt);
 
     if (cc.N / 2 != slots) {
         aux.rotate(ctxt, slots);
@@ -154,7 +183,14 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     }
 
     uint64_t corFactor = (uint64_t)1 << std::llround(correction);
-    multIntScalar(ctxt, corFactor);
+    if (!skipCorFactor() && corFactor != 1)
+        multIntScalar(ctxt, corFactor);
+    // Mixed-size chain: realize the pending StC rescale so the output lands
+    // deg-1 exactly on the per-level table at the data scale (the lazy deg-2
+    // state does not match ScalingFactorRealBig there). Uniform unchanged.
+    if (mixedChain && ctxt.NoiseLevel == 2)
+        ctxt.rescale();
+    btsStageProbe("end", ctxt);
     if constexpr (PRINT) {
         cudaDeviceSynchronize();
         std::cout << "End bootstrap ";
@@ -215,6 +251,16 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     double pre = 1. / post;
     uint64_t scalar = std::llround(post);
 
+    // Mixed-size chain (see OpenFHE ckksrns-fhe.cpp, same gate): the uniform
+    // identity sf[0] ~ 2^p * 2^deg does not hold; follow the COMPOSITESCALING
+    // constants: pre = sf[0]/q0 input normalization, no integer 2^deg recovery
+    // (the CPU-precomputed StC matrices carry scaleDec = q0/sf[0]).
+    bool mixedChain = std::fabs(std::log2(cc.param.ScalingFactorReal[cc.L] * post / qDouble)) > 0.5;
+    if (mixedChain) {
+        pre    = cc.param.ScalingFactorReal[cc.L] / qDouble;
+        scalar = 1;
+    }
+
     //////////////////////////////////////////////////////////////////////
     bool sparse_encaps = cc.GetBootPrecomputation(slots).sparse_encaps;
 
@@ -262,13 +308,13 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         ctxt.rescale();
     }
 
-    //   std::cout << "LT" << std::endl;
-
+    btsStageProbe("pre-CtS", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, false);
     } else {
         EvalCoeffsToSlots(ctxt, slots, false);
     }
+    btsStageProbe("post-CtS", ctxt);
     //  std::cout << "ModRed" << std::endl;
 
     if (cc.N / 2 == slots) {
@@ -294,13 +340,13 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         ctxt.rescale();
     }
 
-    //  std::cout << "LT" << std::endl;
-
+    btsStageProbe("pre-StC", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, true);
     } else {
         EvalCoeffsToSlots(ctxt, slots, true);
     }
+    btsStageProbe("post-StC", ctxt);
 
     if (cc.N / 2 != slots) {
         aux.rotate(ctxt, slots);
@@ -308,7 +354,14 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     }
 
     uint64_t corFactor = (uint64_t)1 << std::llround(correction);
-    multIntScalar(ctxt, corFactor);
+    if (!skipCorFactor() && corFactor != 1)
+        multIntScalar(ctxt, corFactor);
+    // Mixed-size chain: realize the pending StC rescale so the output lands
+    // deg-1 exactly on the per-level table at the data scale (the lazy deg-2
+    // state does not match ScalingFactorRealBig there). Uniform unchanged.
+    if (mixedChain && ctxt.NoiseLevel == 2)
+        ctxt.rescale();
+    btsStageProbe("end", ctxt);
     if constexpr (PRINT) {
         cudaDeviceSynchronize();
         std::cout << "End bootstrap ";
