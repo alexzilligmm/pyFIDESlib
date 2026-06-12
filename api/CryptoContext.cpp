@@ -231,13 +231,40 @@ void CryptoContextImpl<DCRTPoly>::LoadContext(const PublicKey<DCRTPoly>& publicK
 	// here (their OpenFHE eval keys still exist) and GPU-loaded later via
 	// LoadRotationKeys() — used to keep decode keys off the device during prefill.
 	std::set<int> deferred(this->deferred_rotation_indexes.begin(), this->deferred_rotation_indexes.end());
+	// FIDESLIB_ROT_KEY_BAND=<chain position>: band MODEL rotation keys to the
+	// data segment (rotation-key limb pruning). Bootstrap/eval/conjugation keys
+	// load elsewhere and stay full.
+	const int rot_band = [] {
+		const char* e = std::getenv("FIDESLIB_ROT_KEY_BAND");
+		return (e && *e) ? std::atoi(e) : -1;
+	}();
+	// Bootstrap-internal rotations (Accumulate/CtS/StC) run at full level and
+	// AddRotationKeys skips already-present indexes, so any index the bootstrap
+	// needs must stay FULL here.
+	std::set<int> full_keep;
+	if (rot_band >= 0) {
+		auto fhe_pre = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(context->GetScheme()->m_FHE);
+		if (fhe_pre) {
+			for (const auto& [slots_pre, _] : fhe_pre->m_bootPrecomMap) {
+				auto idx = FIDESlib::CKKS::GetBootstrapIndexes(context, static_cast<int>(slots_pre), nullptr);
+				full_keep.insert(idx.begin(), idx.end());
+			}
+		}
+		std::cerr << "[rot_band] band=" << rot_band << " full_keep=" << full_keep.size()
+				  << " (precom entries=" << (fhe_pre ? fhe_pre->m_bootPrecomMap.size() : 0) << ")\n";
+	}
+	int n_banded = 0, n_full = 0;
 	for (const auto& step : this->rotation_indexes) {
 		if (deferred.count(step)) continue;
 		auto raw_rot_ksk = FIDESlib::CKKS::GetRotationKeySwitchKey(pkImpl, step);
 		FIDESlib::CKKS::KeySwitchingKey rot_ksk(c);
-		rot_ksk.Initialize(raw_rot_ksk);
+		const bool full = rot_band < 0 || full_keep.count(step) > 0;
+		(full ? n_full : n_banded)++;
+		rot_ksk.Initialize(raw_rot_ksk, full ? -1 : rot_band);
 		c->AddRotationKey(step, std::move(rot_ksk));
 	}
+	if (rot_band >= 0)
+		std::cerr << "[rot_band] model keys: banded=" << n_banded << " full=" << n_full << "\n";
 
 	// Bootstrapping precomputations.
 	auto fhe = std::dynamic_pointer_cast<lbcrypto::FHECKKSRNS>(context->GetScheme()->m_FHE);
@@ -1570,6 +1597,15 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalConjugate(const Ciphertext
 	res_gpu->conjugate(*src_gpu);
 
 	return result;
+}
+
+void CryptoContextImpl<DCRTPoly>::EvalMultMonomialInPlace(Ciphertext<DCRTPoly>& ciphertext, uint32_t power) {
+	if (this->devices.empty()) {
+		OPENFHE_THROW("EvalMultMonomialInPlace: CPU fallback not implemented (GPU contexts only)");
+	}
+	this->LoadCiphertext(ciphertext);
+	auto gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ciphertext->gpu));
+	gpu->multMonomial(static_cast<int>(power));
 }
 
 std::shared_ptr<void> CryptoContextImpl<DCRTPoly>::EvalFastRotationPrecompute(const Ciphertext<DCRTPoly>& ct) {

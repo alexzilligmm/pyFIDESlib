@@ -105,11 +105,11 @@ void RNSPoly::generateSpecialLimbs(const bool zero_out, const bool for_communica
     }
 }
 
-void RNSPoly::generateDecompAndDigit(bool iskey) {
+void RNSPoly::generateDecompAndDigit(bool iskey, int q_band) {
 #pragma omp parallel for num_threads(cc.GPUid.size())
     for (size_t i = 0; i < cc.GPUid.size(); ++i) {
         assert(omp_get_num_threads() == (int)cc.GPUid.size());
-        GPU[i].generateAllDecompAndDigit(iskey);
+        GPU[i].generateAllDecompAndDigit(iskey, q_band);
     }
 }
 

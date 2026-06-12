@@ -198,6 +198,9 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	// keep persistent accumulators below the CKKS Decode approximation-error bound.
 	// Requires the conjugation key (resident whenever bootstrap precomp is loaded).
 	Ciphertext<DCRTPoly> EvalConjugate(const Ciphertext<DCRTPoly>& ciphertext);
+	// Multiply by the monomial X^power (level-free, keyless); power = N/2 multiplies
+	// every slot by i — used for a+i*b ciphertext pairing.
+	void EvalMultMonomialInPlace(Ciphertext<DCRTPoly>& ciphertext, uint32_t power);
 
 	std::shared_ptr<void> EvalFastRotationPrecompute(const Ciphertext<DCRTPoly>& ct);
 	Ciphertext<DCRTPoly> EvalFastRotation(const Ciphertext<DCRTPoly>& ct, int32_t index, uint32_t m, const std::shared_ptr<void>& precomp);

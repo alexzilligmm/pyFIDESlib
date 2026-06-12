@@ -35,6 +35,7 @@ template <> class CCParams<CryptoContextCKKSRNS> {
 	void SetMultiplicativeDepth(uint32_t depth);
 	void SetScalingModSize(uint32_t size);
 	void SetScalingModSizePerLevel(std::vector<uint32_t> sizes);
+	void SetCKKSDataTypeComplex();
 	void SetBatchSize(uint32_t size);
 	void SetRingDim(uint32_t dim);
 	void SetScalingTechnique(ScalingTechnique tech);

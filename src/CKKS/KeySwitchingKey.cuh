@@ -28,7 +28,7 @@ class KeySwitchingKey {
 
     explicit KeySwitchingKey(Context& cc);
 
-    void Initialize(RawKeySwitchKey& rkk);
+    void Initialize(RawKeySwitchKey& rkk, int q_band = -1);
 };
 
 }  // namespace CKKS

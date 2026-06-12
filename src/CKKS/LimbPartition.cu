@@ -1,6 +1,8 @@
 //
 // Created by carlosad on 27/04/24.
 //
+#include <stdexcept>
+#include <string>
 #include <algorithm>
 #include <array>
 #include <variant>
@@ -313,13 +315,30 @@ void LimbPartition::generateAllDecompLimb(uint64_t* pInt, size_t offset) {
 
 */
 
-void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset) {
+void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset, int q_band) {
     cudaSetDevice(device);
     DIGITlimb.resize(DIGITmeta.size());
+    const int specials   = (int)SPECIALmeta.size();
+    int decomp_start     = 0;
     for (size_t i = 0; i < DIGITmeta.size(); ++i) {
-        generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], (int)DIGITmeta[i].size() - 1, nullptr /*&DIGITauxptr[i]*/,
+        int n = (int)DIGITmeta[i].size() - 1;
+        if (q_band >= 0) {
+            // digit layout = [specials..., Q-limbs in chain order]; a ciphertext at
+            // level <= q_band consumes digits whose DECOMP window starts <= q_band
+            // and only Q-limbs at chain positions <= q_band
+            if (decomp_start > q_band) {
+                decomp_start += (int)DECOMPmeta[i].size();
+                offset += cc.N * DIGITmeta.at(i).size();
+                continue;
+            }
+            const int q_total = (int)DIGITmeta[i].size() - specials;
+            const int q_keep  = std::min(q_total, q_band + 1);
+            n                 = specials + q_keep - 1;
+        }
+        generate(DIGITmeta[i], DIGITlimb[i], DIGITlimbptr[i], n, nullptr /*&DIGITauxptr[i]*/,
                  pInt, offset, nullptr, 0);
         offset += cc.N * DIGITmeta.at(i).size();
+        decomp_start += (int)DECOMPmeta[i].size();
     }
 }
 
@@ -877,7 +896,7 @@ void LimbPartition::copySpecialLimb(const LimbPartition& p) {
     p.getS().wait(s);
 }
 
-void LimbPartition::generateAllDecompAndDigit(bool iskey) {
+void LimbPartition::generateAllDecompAndDigit(bool iskey, int q_band) {
     cudaSetDevice(device);
     if ((!(iskey || cc.GPUid.size() == 1) && bufferGATHER == nullptr) ||
         ((iskey || cc.GPUid.size() == 1) && DECOMPlimb[0].size() == 0)) {
@@ -936,7 +955,9 @@ void LimbPartition::generateAllDecompAndDigit(bool iskey) {
                                 cudaMemcpyHostToDevice, s.ptr());
         }
         generateGatherLimb(iskey);
-        generateAllDigitLimb(bufferDECOMPandDIGIT, 0 /*cc.N * decomp_limbs*/);
+        generateAllDigitLimb(bufferDECOMPandDIGIT, 0 /*cc.N * decomp_limbs*/, q_band);
+        if (q_band >= 0)
+            key_q_band = q_band;
     }
 }
 
@@ -1146,6 +1167,10 @@ void LimbPartition::dotKSK(const LimbPartition& src, const LimbPartition& ksk, c
     const int limbsize = *level + 1;
     assert(limbsize <= limb.size());
     assert(limbsize <= src.limb.size());
+    // banded keys (rotation-key limb pruning) must not be used above their band
+    if (ksk.key_q_band >= 0 && limbsize > ksk.key_q_band + 1)
+        throw std::runtime_error("dotKSK: banded key (band " + std::to_string(ksk.key_q_band) +
+                                 ") used at limbsize " + std::to_string(limbsize));
 
     if constexpr (0) {
         std::map<int, int> used;

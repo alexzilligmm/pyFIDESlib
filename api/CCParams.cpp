@@ -31,6 +31,11 @@ struct has_per_level_sizes<P, std::void_t<decltype(std::declval<P&>().SetScaling
 								  std::declval<std::vector<uint32_t>>()))>> : std::true_type {};
 } // namespace detail
 
+void CCParams<CryptoContextCKKSRNS>::SetCKKSDataTypeComplex() {
+	auto& params = std::any_cast<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>&>(cpu);
+	params.SetCKKSDataType(lbcrypto::COMPLEX);
+}
+
 void CCParams<CryptoContextCKKSRNS>::SetScalingModSizePerLevel(std::vector<uint32_t> sizes) {
 	auto& params = std::any_cast<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>&>(cpu);
 	if constexpr (detail::has_per_level_sizes<lbcrypto::CCParams<lbcrypto::CryptoContextCKKSRNS>>::value) {

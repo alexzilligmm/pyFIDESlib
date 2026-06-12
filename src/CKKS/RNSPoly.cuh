@@ -69,7 +69,7 @@ class RNSPoly {
 
     void multElement(const RNSPoly& poly);
 
-    void generateDecompAndDigit(bool iskey);
+    void generateDecompAndDigit(bool iskey, int q_band = -1);
 
     void mult1AddMult23Add4(const RNSPoly& poly1, const RNSPoly& poly2, const RNSPoly& poly3, const RNSPoly& poly4);
 

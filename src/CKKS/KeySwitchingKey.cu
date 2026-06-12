@@ -17,13 +17,15 @@ constexpr int PREFIX_SIZE = 23;
 #endif
 
 namespace FIDESlib::CKKS {
-void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk) {
+void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc);
     keyID = rkk.keyid;
 
-    a.generateDecompAndDigit(true);
-    b.generateDecompAndDigit(true);
+    if (q_band >= 0 && cc->GPUid.size() > 1)
+        q_band = -1;  // banding is single-GPU only
+    a.generateDecompAndDigit(true, q_band);
+    b.generateDecompAndDigit(true, q_band);
     if (cc->GPUid.size() > 1) {
         a.grow(cc->L, false, true);
         b.grow(cc->L, false, true);

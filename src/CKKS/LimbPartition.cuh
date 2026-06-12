@@ -165,12 +165,16 @@ class LimbPartition {
 
     void generateAllDecompLimb(uint64_t* pInt, size_t offset);
 
-    void generateAllDigitLimb(uint64_t* pInt, size_t offset);
+    void generateAllDigitLimb(uint64_t* pInt, size_t offset, int q_band = -1);
 
     void copyLimb(const LimbPartition& partition);
     void copySpecialLimb(const LimbPartition& p);
 
-    void generateAllDecompAndDigit(bool iskey);
+    void generateAllDecompAndDigit(bool iskey, int q_band = -1);
+    // Banded key (rotation-key limb pruning): Q-limbs allocated only up to
+    // q_band (chain position), digits unused at ct level <= q_band skipped.
+    // -1 = full key. Guarded in dotKSK.
+    int key_q_band = -1;
 
     void mult1AddMult23Add4(const LimbPartition& partition1, const LimbPartition& partition2,
                             const LimbPartition& partition3, const LimbPartition& partition4);
