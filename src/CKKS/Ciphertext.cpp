@@ -319,6 +319,31 @@ void Ciphertext::store(RawCipherText& rawct) {
 	cudaDeviceSynchronize();
 }
 
+// Drain-free variant: same as store() above but WITHOUT the two unconditional
+// cudaDeviceSynchronize() (lines 305/319 of the plain overload). Limb::store
+// already does a per-limb cudaMemcpyAsync + cudaStreamSynchronize, and c0/c1.sync()
+// drain the component streams, so the host buffer is fully populated on return; the
+// two device-wide drains were redundant. Removing them eliminates ~1560 whole-device
+// serialisations/token on the KV-offload path (docs/speed/mask_encode_cache.md §B, K0).
+void Ciphertext::store(RawCipherText& rawct, cudaStream_t /*stream*/) {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+
+	CKKS::SetCurrentContext(cc_);
+	rawct.numRes = c0.getLevel() + 1;
+	rawct.sub_0.resize(rawct.numRes);
+	rawct.sub_1.resize(rawct.numRes);
+	c0.store(rawct.sub_0);
+	c1.store(rawct.sub_1);
+	rawct.N = cc.N;
+	c0.sync();
+	c1.sync();
+
+	rawct.NoiseLevel = NoiseLevel;
+	rawct.Noise		 = NoiseFactor;
+	rawct.keyid		 = keyID;
+	rawct.slots		 = slots;
+}
+
 void Ciphertext::modDown(bool free) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);

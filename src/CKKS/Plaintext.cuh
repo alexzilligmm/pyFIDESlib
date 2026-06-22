@@ -102,6 +102,10 @@ namespace FIDESlib::CKKS {
      */
     void load(const RawPlainText& raw);
     void load(const RawPlainText& raw, cudaStream_t stream);
+    // Load from a pinned arena: limb data at `arena_base + off[i]` (len[i] bytes); `meta` supplies
+    // moduli + Noise/NoiseLevel/slots (its sub_0 is unused). Async H2D (overlaps compute).
+    void loadStaged(const RawPlainText& meta, const uint8_t* arena_base, const std::vector<size_t>& off,
+                    const std::vector<size_t>& len, cudaStream_t stream);
     /**
      * @brief Store this plaintext into a raw representation.
      *

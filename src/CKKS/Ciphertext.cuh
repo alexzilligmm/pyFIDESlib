@@ -153,6 +153,21 @@ class Ciphertext {
     void store(RawCipherText& rawct);
 
     /**
+     * @brief Drain-free store for async offload (KV-cache eviction).
+     *
+     * Identical to store(rawct) but omits the two unconditional
+     * cudaDeviceSynchronize() that the plain overload issues. The per-limb
+     * cudaStreamSynchronize inside Limb::store (and c0/c1.sync()) already
+     * guarantee the D->H copies complete before this returns, so the two
+     * whole-device drains were redundant over-synchronisation — at ~780 K/V
+     * ciphertexts/token that is ~1560 device-wide serialisations removed. The
+     * `stream` argument is reserved for a future dedicated-offload-stream copy
+     * path; today the per-limb copies still run on their own limb streams.
+     * See docs/speed/mask_encode_cache.md §B (K0).
+     */
+    void store(RawCipherText& rawct, cudaStream_t stream);
+
+    /**
      * @brief Adds another ciphertext to *this* (in‑place).
      *
      * The method ensures both ciphertexts are on the same level, performing

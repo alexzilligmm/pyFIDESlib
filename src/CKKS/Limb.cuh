@@ -73,6 +73,11 @@ class Limb {
     template <typename Q>
     void load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream);
 
+    // Async H2D directly from a caller-owned host buffer (must be PINNED for the copy to be truly
+    // async). Type-agnostic (void* + bytes) so the SWITCH macro compiles for both u32/u64 limbs;
+    // the staged decode path only ever hits the u64 instantiation. Used by RNSPoly::loadConstantStaged.
+    void load_async_ptr(const void* src, size_t bytes, cudaStream_t stream);
+
     void load(const VectorGPU<T>& dat);
 
     void store(std::vector<T>& dat) const;

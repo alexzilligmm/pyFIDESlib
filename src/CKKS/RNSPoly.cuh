@@ -112,6 +112,12 @@ class RNSPoly {
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2);
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2,
                       cudaStream_t stream);
+    // Like loadConstant(.., stream) but the per-limb source is a PINNED arena: limb i is at
+    // `arena_base + byte_off[i]` for `byte_len[i]` bytes. Async H2D (overlaps compute). Decode
+    // weights only: asserts no special/modup limbs (numRes == limbsize). Single-GPU + non-null stream.
+    void loadConstantStaged(const uint8_t* arena_base, const std::vector<size_t>& byte_off,
+                            const std::vector<size_t>& byte_len, const std::vector<uint64_t>& moduli,
+                            cudaStream_t stream);
     void rotateModupDotKSK(RNSPoly& poly, RNSPoly& poly1, const KeySwitchingKey& key);
     void squareModupDotKSK(RNSPoly& c0, RNSPoly& c1, const KeySwitchingKey& key);
     void generatePartialSpecialLimbs();

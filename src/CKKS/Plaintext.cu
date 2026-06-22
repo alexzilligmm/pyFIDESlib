@@ -98,6 +98,18 @@ void Plaintext::load(const RawPlainText& raw, cudaStream_t stream_override) {
     slots = raw.slots;
 }
 
+void Plaintext::loadStaged(const RawPlainText& meta, const uint8_t* arena_base,
+                           const std::vector<size_t>& off, const std::vector<size_t>& len,
+                           cudaStream_t stream) {
+    CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
+    CKKS::SetCurrentContext(cc_);
+    c0.loadConstantStaged(arena_base, off, len, meta.moduli, stream);
+
+    NoiseFactor = meta.Noise;
+    NoiseLevel = meta.NoiseLevel;
+    slots = meta.slots;
+}
+
 void Plaintext::store(RawPlainText& raw) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc_);

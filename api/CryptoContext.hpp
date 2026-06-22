@@ -79,6 +79,21 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// @param pt Plaintext to load.
 	/// @param stream CUDA stream for async H2D copies (single-GPU contexts only).
 	void LoadPlaintext(Plaintext& pt, cudaStream_t stream);
+	/// @brief CPU-ONLY pre-extraction half of the acquire (no CUDA). Builds the host RawPlainText
+	/// (GetRawPlainText: limb copy + bit-reverse — the ~10.5 s/tok serial cost) and stashes it in
+	/// prefetched_raw, so a later LoadPlaintext uploads without re-extracting. Safe to call from a
+	/// residency WORKER thread during compute: reads only this->cpu + pt->cpu (both read-only) and
+	/// the mutex-guarded stash; touches no device state, no inf.w, no FHE context. No-op if loaded.
+	void ExtractRawPlaintext(Plaintext& pt);
+	/// @brief Begin staging a residency block under FHE_PIN_STAGE: ping-pong to the next pinned
+	/// arena and reset it. Call once before the per-plaintext ExtractRawPlaintext calls of a block
+	/// (from the residency worker). No-op when FHE_PIN_STAGE is off.
+	void BeginStageBlock();
+	/// @brief Toggle PERSISTENT staging (FHE_PIN_STAGE): while on, LoadPlaintext/ExtractRawPlaintext
+	/// stage a plaintext once into a grow-once arena keyed by identity and async-load it every token
+	/// without re-extracting — for CONSTANT weights reloaded per token (lm_head tiles). Off ⇒ the
+	/// ping-pong block arena. Set true before such loads, false after.
+	void SetPersistentStaging(bool on);
 	/// @brief Load a ciphertext to the devices.
 	/// @param ct Ciphertext to load. Handles both an OpenFHE-backed ct->cpu and
 	/// a ct->cpu previously stashed by StoreDeviceCiphertext (RawCipherText).
@@ -90,6 +105,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// memory and leaves ct->cpu stale — this preserves the computed value, so a
 	/// later LoadCiphertext restores it exactly. Returns false if not loaded.
 	bool StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct);
+
+	/// @brief Drain-free offload for async KV eviction. Same as StoreDeviceCiphertext(ct)
+	/// but routes through Ciphertext::store(raw, stream) which omits the two device-wide
+	/// cudaDeviceSynchronize() (K0). Safe to call from a residency worker thread: the
+	/// offloaded_ciphertexts stash and device registry are mutex-guarded.
+	bool StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct, cudaStream_t stream);
 
 	// ---- Key Generation ----
 
@@ -291,11 +312,31 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// CUDA/internal types. ct->cpu is left as its original OpenFHE shell so any
 	/// cpu-reading op still sees a valid ciphertext while offloaded.
 	std::unordered_map<uint32_t, std::any> offloaded_ciphertexts;
+	/// @brief Guards offloaded_ciphertexts. The async KV pipeline (K1/K2) reloads
+	/// block i+1 (erase) on a residency worker thread while it offloads block i
+	/// (insert) — without this lock those concurrent find/erase/insert race.
+	std::unique_ptr<std::shared_mutex> offloaded_ciphertexts_mutex;
+	/// @brief Bounded (one-block-ahead) host RawPlainText stash, keyed by host plaintext identity
+	/// (PlaintextImpl*). ExtractRawPlaintext (CPU-only, worker thread) fills it during compute;
+	/// LoadPlaintext drains+erases it on the device upload. NON-pinned, transient — at most the
+	/// next block's weights live here (the prefetch+upload are one block apart), so it self-bounds
+	/// (~1.7 GB). This is the CPU-extract overlap that hides the ~10.5 s/tok GetRawPlainText.
+	std::unordered_map<const void*, std::any> prefetched_raw;
+	std::unique_ptr<std::shared_mutex> prefetched_raw_mutex;
 	/// @brief Next available handle for GPU objects. Zero is reserved as a null handle.
+	/// RegisterDevicePlaintext / RegisterDeviceCiphertext increment this under DIFFERENT
+	/// mutexes, so the residency worker (KV reload / weight load) and the main compute
+	/// thread would race it (handle collision -> map corruption). The increment is
+	/// serialised by a process-static mutex in RegisterDevice*; kept a plain uint32_t so
+	/// CryptoContextImpl stays move-constructible (it is make_shared(std::move(...))'d).
 	uint32_t next_gpu_handle = 1;
 
 	uint32_t RegisterDevicePlaintext(std::shared_ptr<void>&& p);
 	uint32_t RegisterDeviceCiphertext(std::shared_ptr<void>&& c);
+	/// @brief Allocate the next GPU handle, serialised across plaintext/ciphertext
+	/// registration (which hold different mutexes) so concurrent residency-worker and
+	/// compute-thread registrations cannot collide.
+	uint32_t next_handle();
 	std::shared_ptr<void>& GetDevicePlaintext(uint32_t handle);
 	std::shared_ptr<void>& GetDeviceCiphertext(uint32_t handle);
 	bool EvictDevicePlaintext(uint32_t handle);

@@ -899,6 +899,40 @@ void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const
     }
 }
 
+void RNSPoly::loadConstantStaged(const uint8_t* arena_base, const std::vector<size_t>& byte_off,
+                                 const std::vector<size_t>& byte_len, const std::vector<uint64_t>& moduli,
+                                 cudaStream_t stream) {
+    // Mirrors loadConstant(.., stream) but sources each limb from the pinned arena (async H2D).
+    // stream may be the default stream (nullptr) — the copy is still async from pinned memory.
+    assert(cc.GPUid.size() == 1);
+
+    int limbsize = 0;
+    int Slimbsize = 0;
+    for (int i = 0; i < (int)moduli.size(); ++i) {
+        if (i <= cc.L && moduli[i] == cc.prime.at(i).p) {
+            limbsize++;
+        } else {
+            Slimbsize++;
+        }
+    }
+    assert(Slimbsize == 0);   // decode weight plaintexts carry no special/modup limbs
+    assert(limbsize <= cc.L + 1);
+    assert((int)byte_off.size() == limbsize && (int)byte_len.size() == limbsize);
+
+    if (level < limbsize - 1) {
+        grow(limbsize - 1, false, true);
+    } else {
+        dropToLevel(limbsize - 1);
+    }
+    assert(level == limbsize - 1);
+    for (int i = 0; i < limbsize; ++i) {
+        assert(moduli[i] == cc.prime.at(i).p);
+        cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
+        SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
+               load_async_ptr(arena_base + byte_off[i], byte_len[i], stream));
+    }
+}
+
 void RNSPoly::broadcastLimb0() {
     if (cc.GPUid.size() == 1) {
         for (size_t i = 0; i < cc.GPUid.size(); ++i) {

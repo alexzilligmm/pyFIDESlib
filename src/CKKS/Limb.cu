@@ -130,6 +130,14 @@ void Limb<T>::load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream_o
     cudaMemcpyAsync(v.data, dat.data(), dat.size() * sizeof(T), cudaMemcpyHostToDevice, stream_override);
 }
 
+template <typename T>
+void Limb<T>::load_async_ptr(const void* src, size_t bytes, cudaStream_t stream) {
+    // src must be pinned (cudaMallocHost arena) for this to be a genuinely asynchronous H2D.
+    // NOT explicitly instantiated here: it is a non-template member, so the `template class Limb<T>`
+    // instantiation driven by ntt_types.inc (X macro) already covers it.
+    cudaMemcpyAsync(v.data, src, bytes, cudaMemcpyHostToDevice, stream);
+}
+
 template void Limb<uint32_t>::load<uint32_t>(const std::vector<uint32_t>& dat_);
 
 template void Limb<uint32_t>::load<uint64_t>(const std::vector<uint64_t>& dat_);
