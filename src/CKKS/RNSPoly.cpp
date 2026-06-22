@@ -933,6 +933,53 @@ void RNSPoly::loadConstantStaged(const uint8_t* arena_base, const std::vector<si
     }
 }
 
+void RNSPoly::storeStaged(uint8_t* base, size_t& cursor, std::vector<size_t>& off,
+                          std::vector<size_t>& len, cudaStream_t stream) {
+    assert(cc.GPUid.size() == 1);
+    const int n = level + 1;
+    off.resize(n);
+    len.resize(n);
+    for (int i = 0; i < n; ++i) {
+        cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
+        size_t bytes = 0;
+        SWITCH_RET(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
+                   store_async_ptr(base + cursor, stream), bytes);
+        off[i] = cursor;
+        len[i] = bytes;
+        cursor += bytes;
+    }
+}
+
+void RNSPoly::loadStaged(const uint8_t* base, const std::vector<size_t>& off,
+                         const std::vector<size_t>& len, const std::vector<uint64_t>& moduli,
+                         cudaStream_t stream) {
+    // Mirrors load() (regular limbs via grow(constant=false)), but each limb is an async H2D from
+    // the pinned arena. Ciphertexts at cache level carry no special/modup limbs.
+    assert(cc.GPUid.size() == 1);
+    int limbsize = 0;
+    int Slimbsize = 0;
+    for (int i = 0; i < (int)moduli.size(); ++i) {
+        if (i <= cc.L && moduli[i] == cc.prime.at(i).p)
+            limbsize++;
+        else
+            Slimbsize++;
+    }
+    assert(Slimbsize == 0);
+    assert(limbsize - 1 <= cc.L);
+    assert((int)off.size() == limbsize && (int)len.size() == limbsize);
+    if (level < limbsize - 1)
+        grow(limbsize - 1, false);
+    if (level > limbsize - 1)
+        dropToLevel(limbsize - 1);
+    assert(level == limbsize - 1);
+    for (int i = 0; i < limbsize; ++i) {
+        assert(moduli[i] == cc.prime.at(i).p);
+        cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
+        SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
+               load_async_ptr(base + off[i], len[i], stream));
+    }
+}
+
 void RNSPoly::broadcastLimb0() {
     if (cc.GPUid.size() == 1) {
         for (size_t i = 0; i < cc.GPUid.size(); ++i) {

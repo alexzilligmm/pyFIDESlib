@@ -24,6 +24,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <chrono>
 #include <functional>
 #include <openfhe.h>
 
@@ -35,6 +36,7 @@
 
 #include <memory>
 #include <mutex>
+#include <future>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -472,6 +474,44 @@ StagedEntry& persist_stage_locked(const void* key, FIDESlib::CKKS::RawPlainText&
 	}
 	return g_persist_staged.emplace(key, stage_into(g_persist_arena, std::move(raw))).first->second;
 }
+
+// ---- Async KV-cache offload arena (pinned, position-keyed, reused) ----
+// The V cache is d_head (=64) cts/block and the K cache 1 ct/block → ~780 cts (~9 GB) per token,
+// held host-side between tokens. A single REUSED pinned arena (memlock is unlimited) lets the
+// per-block offload (D2H) and reload (H2D) run genuinely async and overlap compute — the K1/K2 path.
+// Slots are keyed by a STABLE cache position (block+lane), allocated once on first offload and
+// overwritten in place every token: a block's reload (at its compute) precedes its offload (at
+// release), so in-place overwrite never races the consumer.
+constexpr size_t kKvArenaBytes = size_t(12) << 30;   // 12 GB (KV ≈ 9 GB + slack)
+struct KvSlot {
+	size_t						 off = 0;   // byte offset into g_kv_arena.base
+	size_t						 cap = 0;   // reserved bytes (stable after token 0)
+	FIDESlib::CKKS::StagedCtMeta meta;      // per-limb layout + ct metadata (refreshed each offload)
+};
+PinnedArena								g_kv_arena;
+std::unordered_map<std::string, KvSlot> g_kv_slots;
+std::mutex								g_kv_mutex;
+std::future<void>						g_kv_prewarm;   // background 12GB cudaMallocHost (hides tok0's ~3.5s)
+
+// Reserve (first sight) or reuse a stable pinned slot for a cache position. Caller holds g_kv_mutex.
+KvSlot& kv_slot_ensure(const std::string& pos_key, size_t bytes) {
+	if (g_kv_arena.base == nullptr) {
+		void* p = nullptr;
+		cudaMallocHost(&p, kKvArenaBytes);
+		g_kv_arena.base = static_cast<uint8_t*>(p);
+		g_kv_arena.cap	= g_kv_arena.base ? kKvArenaBytes : 0;
+		g_kv_arena.used = 0;
+	}
+	KvSlot& s = g_kv_slots[pos_key];
+	if (s.cap < bytes) {   // first sight or grew (runs once/position — sizes stable after token 0)
+		if (g_kv_arena.used + bytes > g_kv_arena.cap)
+			OPENFHE_THROW("KV pinned arena exhausted (raise kKvArenaBytes)");
+		s.off = g_kv_arena.used;
+		s.cap = bytes;
+		g_kv_arena.used += bytes;
+	}
+	return s;
+}
 }   // namespace
 
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
@@ -480,6 +520,85 @@ void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
 }
 
 void CryptoContextImpl<DCRTPoly>::SetPersistentStaging(bool on) { g_stage_persistent = on; }
+
+void CryptoContextImpl<DCRTPoly>::PrewarmKvArena() {
+	// Allocate the 12GB pinned KV-offload arena on a background thread ONCE, at decode init, so the
+	// ~3.5s cudaMallocHost overlaps token-0's block compute instead of stalling the first offload
+	// (REL(0)). kv_slot_ensure publishes the arena under g_kv_mutex; whichever finishes first wins
+	// and the loser frees its allocation, so there is never a double-resident 24GB.
+	static std::once_flag once;
+	std::call_once(once, [] {
+		g_kv_prewarm = std::async(std::launch::async, [] {
+			void* p = nullptr;
+			cudaMallocHost(&p, kKvArenaBytes);   // ~3.5s pinning 12GB (pinned pages commit at alloc)
+			std::lock_guard<std::mutex> g(g_kv_mutex);
+			if (g_kv_arena.base == nullptr) {
+				g_kv_arena.base = static_cast<uint8_t*>(p);
+				g_kv_arena.cap	= p ? kKvArenaBytes : 0;
+				g_kv_arena.used = 0;
+			} else if (p) {
+				cudaFreeHost(p);   // kv_slot_ensure won the race — drop ours
+			}
+		});
+	});
+}
+
+bool CryptoContextImpl<DCRTPoly>::KvStoreStaged(Ciphertext<DCRTPoly>& ct, const std::string& pos_key,
+												cudaStream_t stream) {
+	if (!ct->loaded)
+		return false;
+	if (this->devices.empty() || !this->loaded) {
+		OPENFHE_THROW("CryptoContext not loaded to any device");
+	}
+	auto		 ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+	const size_t bytes	= ct_gpu->staged_bytes();
+
+	std::lock_guard<std::mutex> g(g_kv_mutex);
+	KvSlot&						slot = kv_slot_ensure(pos_key, bytes);
+	ct_gpu->storeStaged(g_kv_arena.base + slot.off, slot.meta, stream);   // async D->H, no sync
+
+	// storeStaged omits the per-limb moduli (load needs them) — fill from the modulus chain. A ct at
+	// numRes residues uses the first numRes ciphertext (Q) primes.
+	auto&		context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	const auto& chain	= context->GetCryptoParameters()->GetElementParams()->GetParams();
+	slot.meta.moduli.clear();
+	slot.meta.moduli.reserve(slot.meta.numRes);
+	for (int i = 0; i < slot.meta.numRes; ++i)
+		slot.meta.moduli.push_back(chain[i]->GetModulus().ConvertToInt());
+	// Device copy is STILL valid (D->H only reads it) until KvEvict — leave ct->loaded=true so a
+	// stray reader is correct; the caller evicts after the offload stream is synchronised.
+	return true;
+}
+
+void CryptoContextImpl<DCRTPoly>::KvEvict(Ciphertext<DCRTPoly>& ct) {
+	if (!ct->loaded)
+		return;
+	std::lock_guard<std::mutex> g(g_kv_mutex);
+	this->EvictDeviceCiphertext(ct->gpu);   // free device; pinned slot holds the data
+	ct->loaded = false;
+}
+
+void CryptoContextImpl<DCRTPoly>::KvLoadStaged(Ciphertext<DCRTPoly>& ct, const std::string& pos_key,
+											   cudaStream_t stream) {
+	if (ct->loaded || this->devices.empty())
+		return;
+	if (!this->loaded) {
+		OPENFHE_THROW("CryptoContext not loaded to any device");
+	}
+	std::lock_guard<std::mutex> g(g_kv_mutex);
+	auto						it = g_kv_slots.find(pos_key);
+	if (it == g_kv_slots.end()) {
+		OPENFHE_THROW("KvLoadStaged: no pinned slot for cache position " + pos_key);
+	}
+	KvSlot&	 slot		 = it->second;
+	auto&	 context_gpu = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
+	auto	 gpu_ct		 = std::make_shared<FIDESlib::CKKS::Ciphertext>(context_gpu);   // empty shell
+	gpu_ct->loadStaged(g_kv_arena.base + slot.off, slot.meta, stream);                  // async H->D
+	uint32_t handle	   = this->RegisterDeviceCiphertext(std::move(gpu_ct));
+	ct->gpu			   = handle;
+	ct->loaded		   = true;
+	ct->original_level = this->multiplicative_depth - ct->GetLevel();
+}
 
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stream_override) {
 	if (pt->loaded || this->devices.empty())
@@ -691,9 +810,18 @@ bool CryptoContextImpl<DCRTPoly>::StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct
 		OPENFHE_THROW("CryptoContext not loaded to any device");
 	}
 
+	// FHE_TIME_KV diagnostic: split the offload into store(D2H)/moduli(OpenFHE)/evict to find the
+	// 2.7 s; print + reset every 24 cts (~one token's worth). Zero overhead when off.
+	static const bool kvbrk = [] { const char* e = std::getenv("FHE_TIME_KV"); return e && *e && std::atoi(e) != 0; }();
+	static double g_store = 0, g_mod = 0, g_evict = 0;
+	static int	  g_n	  = 0;
+	auto _t = std::chrono::steady_clock::now();
+	auto _lap = [&] { auto n = std::chrono::steady_clock::now(); double d = std::chrono::duration<double, std::milli>(n - _t).count(); _t = n; return d; };
+
 	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
 	FIDESlib::CKKS::RawCipherText raw_ct;
 	ct_gpu->store(raw_ct, stream);	// drain-free device -> host
+	if (kvbrk) g_store += _lap();
 
 	auto& context	  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& chain = context->GetCryptoParameters()->GetElementParams()->GetParams();
@@ -701,10 +829,19 @@ bool CryptoContextImpl<DCRTPoly>::StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct
 	raw_ct.moduli.reserve(raw_ct.numRes);
 	for (int i = 0; i < raw_ct.numRes; ++i)
 		raw_ct.moduli.push_back(chain[i]->GetModulus().ConvertToInt());
+	if (kvbrk) g_mod += _lap();
 
 	const uint32_t key = ct->gpu;
 	if (!this->EvictDeviceCiphertext(key)) {
 		OPENFHE_THROW("StoreDeviceCiphertext: could not evict ciphertext from device");
+	}
+	if (kvbrk) {
+		g_evict += _lap();
+		if (++g_n % 24 == 0) {
+			std::fprintf(stderr, "[storebrk] store=%.1f moduli=%.1f evict=%.1f ms (per ~24 cts)\n", g_store, g_mod, g_evict);
+			std::fflush(stderr);
+			g_store = g_mod = g_evict = 0;
+		}
 	}
 	if (offloaded_ciphertexts_mutex)
 		offloaded_ciphertexts_mutex->lock();

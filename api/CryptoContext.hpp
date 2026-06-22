@@ -112,6 +112,23 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// offloaded_ciphertexts stash and device registry are mutex-guarded.
 	bool StoreDeviceCiphertext(Ciphertext<DCRTPoly>& ct, cudaStream_t stream);
 
+	/// @brief Async KV-cache offload into a reused PINNED arena, keyed by a stable cache position
+	/// (block+lane), NOT the device handle. Enqueues the D2H of every limb on `stream` (no sync)
+	/// and records the staged descriptor; does NOT free the device copy — call KvEvict after the
+	/// stream is synced. Returns false if `ct` is not on device. Single-GPU only.
+	/// @brief Kick off the 12GB pinned KV-arena allocation on a background thread (once), so the
+	/// ~3.5s cudaMallocHost overlaps token-0 compute instead of stalling the first KV offload.
+	/// Call at decode init when the swap is active.
+	void PrewarmKvArena();
+	bool KvStoreStaged(Ciphertext<DCRTPoly>& ct, const std::string& pos_key, cudaStream_t stream);
+	/// @brief Free the device copy of a ciphertext previously enqueued by KvStoreStaged. Must be
+	/// called only after the offload stream has been synchronised (the pinned slot is then valid).
+	void KvEvict(Ciphertext<DCRTPoly>& ct);
+	/// @brief Async KV-cache reload: reconstruct the device ciphertext from its pinned slot
+	/// (`pos_key`) via an H2D on `stream` (no sync — the caller syncs before use). Registers a new
+	/// device handle on `ct`. No-op if already loaded.
+	void KvLoadStaged(Ciphertext<DCRTPoly>& ct, const std::string& pos_key, cudaStream_t stream);
+
 	// ---- Key Generation ----
 
 	/// @brief Generate a public/private key pair.

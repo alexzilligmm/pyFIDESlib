@@ -344,6 +344,35 @@ void Ciphertext::store(RawCipherText& rawct, cudaStream_t /*stream*/) {
 	rawct.slots		 = slots;
 }
 
+size_t Ciphertext::staged_bytes() const {
+    // u64 upper bound; loadStaged uses the per-limb recorded lengths, so over-sizing the slot is safe.
+    return (size_t)(c0.getLevel() + 1 + c1.getLevel() + 1) * (size_t)cc.N * sizeof(uint64_t);
+}
+
+void Ciphertext::storeStaged(uint8_t* base, StagedCtMeta& m, cudaStream_t stream) {
+    CKKS::SetCurrentContext(cc_);
+    m.numRes = c0.getLevel() + 1;
+    m.N      = cc.N;
+    size_t cursor = 0;
+    c0.storeStaged(base, cursor, m.off0, m.len0, stream);
+    c1.storeStaged(base, cursor, m.off1, m.len1, stream);
+    m.total_bytes = cursor;
+    m.NoiseLevel  = NoiseLevel;
+    m.Noise       = NoiseFactor;
+    m.keyid       = keyID;
+    m.slots       = slots;
+}
+
+void Ciphertext::loadStaged(const uint8_t* base, const StagedCtMeta& m, cudaStream_t stream) {
+    CKKS::SetCurrentContext(cc_);
+    keyID = m.keyid;
+    c0.loadStaged(base, m.off0, m.len0, m.moduli, stream);
+    c1.loadStaged(base, m.off1, m.len1, m.moduli, stream);
+    NoiseLevel  = m.NoiseLevel;
+    NoiseFactor = m.Noise;
+    slots       = m.slots;
+}
+
 void Ciphertext::modDown(bool free) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);

@@ -21,6 +21,25 @@ namespace FIDESlib::CKKS {
 extern bool hoistRotateFused;
 
 /**
+ * @brief Pinned-arena offload descriptor for one ciphertext (async KV-cache swap).
+ *
+ * storeStaged() writes c0 then c1 contiguously into a pinned arena slot and fills the per-limb
+ * (offset,length) tables plus the scalar metadata; the CryptoContext fills `moduli` from the chain.
+ * loadStaged() reconstructs the device ciphertext from the same slot. All copies are async (no sync).
+ */
+struct StagedCtMeta {
+    int numRes = 0;
+    int N = 0;
+    int NoiseLevel = 1;
+    int slots = 0;
+    double Noise = 0;
+    std::string keyid;
+    std::vector<uint64_t> moduli;                    // numRes (filled by CryptoContext)
+    std::vector<size_t> off0, len0, off1, len1;      // per-limb byte offsets/lengths within the slot
+    size_t total_bytes = 0;
+};
+
+/**
  * @class Ciphertext
  * @brief Represents a ciphertext in the CKKS scheme.
  *
@@ -166,6 +185,15 @@ class Ciphertext {
      * See docs/speed/mask_encode_cache.md §B (K0).
      */
     void store(RawCipherText& rawct, cudaStream_t stream);
+
+    /** @brief Upper-bound byte size of this ciphertext's staged form ((level+1)*2 limbs, u64). */
+    [[nodiscard]] size_t staged_bytes() const;
+
+    /** @brief Async D2H of c0,c1 into a pinned arena slot `base`; fills `m` (except moduli). No sync. */
+    void storeStaged(uint8_t* base, StagedCtMeta& m, cudaStream_t stream);
+
+    /** @brief Async H2D reconstruction of c0,c1 from a pinned arena slot `base` per `m`. No sync. */
+    void loadStaged(const uint8_t* base, const StagedCtMeta& m, cudaStream_t stream);
 
     /**
      * @brief Adds another ciphertext to *this* (in‑place).

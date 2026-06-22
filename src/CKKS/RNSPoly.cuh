@@ -118,6 +118,15 @@ class RNSPoly {
     void loadConstantStaged(const uint8_t* arena_base, const std::vector<size_t>& byte_off,
                             const std::vector<size_t>& byte_len, const std::vector<uint64_t>& moduli,
                             cudaStream_t stream);
+    // Async D2H of limbs 0..level into a PINNED arena starting at `base + cursor`; appends each
+    // limb's (offset,length) to off/len and advances cursor. No sync. KV-cache offload (storeStaged).
+    void storeStaged(uint8_t* base, size_t& cursor, std::vector<size_t>& off, std::vector<size_t>& len,
+                     cudaStream_t stream);
+    // Async H2D reconstruction from a PINNED arena. Mirrors load() (constant=false → regular limbs,
+    // NOT loadConstant's shared constant buffer), sourcing limb i from `base + off[i]`. No sync.
+    // Ciphertext (no special/modup) only: asserts numRes == limbsize.
+    void loadStaged(const uint8_t* base, const std::vector<size_t>& off, const std::vector<size_t>& len,
+                    const std::vector<uint64_t>& moduli, cudaStream_t stream);
     void rotateModupDotKSK(RNSPoly& poly, RNSPoly& poly1, const KeySwitchingKey& key);
     void squareModupDotKSK(RNSPoly& c0, RNSPoly& c1, const KeySwitchingKey& key);
     void generatePartialSpecialLimbs();

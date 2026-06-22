@@ -78,6 +78,11 @@ class Limb {
     // the staged decode path only ever hits the u64 instantiation. Used by RNSPoly::loadConstantStaged.
     void load_async_ptr(const void* src, size_t bytes, cudaStream_t stream);
 
+    // Async D2H into a caller-owned host buffer (must be PINNED for a truly async copy). No sync.
+    // Returns the byte count written (v.size * sizeof(T)). Mirror of load_async_ptr, used by
+    // RNSPoly::storeStaged for the async KV-cache offload.
+    size_t store_async_ptr(void* dst, cudaStream_t stream) const;
+
     void load(const VectorGPU<T>& dat);
 
     void store(std::vector<T>& dat) const;

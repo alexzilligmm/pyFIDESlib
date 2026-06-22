@@ -138,6 +138,15 @@ void Limb<T>::load_async_ptr(const void* src, size_t bytes, cudaStream_t stream)
     cudaMemcpyAsync(v.data, src, bytes, cudaMemcpyHostToDevice, stream);
 }
 
+template <typename T>
+size_t Limb<T>::store_async_ptr(void* dst, cudaStream_t stream) const {
+    // dst must be pinned (cudaMallocHost arena) for a truly async D2H. No per-limb sync (the caller
+    // batches one sync per ciphertext/block). NOT explicitly instantiated: the X-macro covers it.
+    const size_t bytes = v.size * sizeof(T);
+    cudaMemcpyAsync(dst, v.data, bytes, cudaMemcpyDeviceToHost, stream);
+    return bytes;
+}
+
 template void Limb<uint32_t>::load<uint32_t>(const std::vector<uint32_t>& dat_);
 
 template void Limb<uint32_t>::load<uint64_t>(const std::vector<uint64_t>& dat_);
