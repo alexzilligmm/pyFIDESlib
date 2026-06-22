@@ -371,9 +371,11 @@ namespace {
 // overlaps compute. Double-buffered + reset-per-block: arena holds one block; the ping-pong means
 // the arena being reset/filled is never the one currently uploading. Bounded (2×3 GB), no OOM.
 bool fhe_pin_stage() {
+	// Default ON (verified best path). FHE_PIN_STAGE=0 opts out (host-memory-constrained configs) →
+	// pageable-sync upload. Only ever allocates when staging is active (block residency / lm_head).
 	static const bool v = [] {
 		const char* e = std::getenv("FHE_PIN_STAGE");
-		return e && *e && std::atoi(e) != 0;
+		return !(e && *e && std::atoi(e) == 0);
 	}();
 	return v;
 }
