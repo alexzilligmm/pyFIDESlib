@@ -482,7 +482,13 @@ StagedEntry& persist_stage_locked(const void* key, FIDESlib::CKKS::RawPlainText&
 // Slots are keyed by a STABLE cache position (block+lane), allocated once on first offload and
 // overwritten in place every token: a block's reload (at its compute) precedes its offload (at
 // release), so in-place overwrite never races the consumer.
-constexpr size_t kKvArenaBytes = size_t(12) << 30;   // 12 GB (KV ≈ 9 GB + slack)
+// env KV_ARENA_GB (default 12 GB): decode KV ≈ 9 GB + slack; prefill also stages cf.stg entries
+// here, so max-staging (T>=128, chunk-4 ~221 entries) needs a larger arena (set KV_ARENA_GB=24).
+static const size_t kKvArenaBytes = [] {
+	const char* e = std::getenv("KV_ARENA_GB");
+	const size_t gb = (e && *e && std::atoi(e) > 0) ? static_cast<size_t>(std::atoi(e)) : 12;
+	return gb << 30;
+}();
 struct KvSlot {
 	size_t						 off = 0;   // byte offset into g_kv_arena.base
 	size_t						 cap = 0;   // reserved bytes (stable after token 0)
