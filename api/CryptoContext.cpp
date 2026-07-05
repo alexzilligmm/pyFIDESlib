@@ -956,7 +956,31 @@ void CryptoContextImpl<DCRTPoly>::EvalBootstrapSetup(const std::vector<uint32_t>
 		OPENFHE_THROW("Unsupported key distribution");
 	}
 
-	int32_t modall = static_cast<int>(lbcrypto::GetMultiplicativeDepthByCoeffVector(coeffchebyshev, false)) + doubleAngleIts;
+	// FIDESLIB_ARCSINE = reserve + enable everywhere (isolation probes);
+	// FIDESLIB_ARCSINE_RESERVE = reserve ONLY, correction stays off until a
+	// caller scopes it on via setArcsineOverride (production: cutmax argmax).
+	int arcsineLvls = 0;
+	const auto env_on = [](const char* n) {
+		const char* e = std::getenv(n);
+		return e && *e && *e != '0';
+	};
+	if (env_on("FIDESLIB_ARCSINE") || env_on("FIDESLIB_ARCSINE_RESERVE")) {
+		arcsineLvls = 3;  // measured: applyArcsineCorrection consumes 3 levels (job 48598682)
+		if (const char* al = std::getenv("FIDESLIB_ARCSINE_LEVELS"); al && *al)
+			arcsineLvls = std::atoi(al);
+	}
+	// FIDESLIB_SPARSE_ARCSINE = dual-slots mode: the arcsine reservation rides
+	// ONLY sparse-slot precomps (slots < N/2); the full-slot precomp stays
+	// byte-identical vanilla (reserve-without-consume is fatal, job 48603930).
+	if (env_on("FIDESLIB_SPARSE_ARCSINE")) {
+		arcsineLvls = 0;
+		if (slots < context->GetRingDimension() / 2) {
+			arcsineLvls = 3;
+			if (const char* al = std::getenv("FIDESLIB_ARCSINE_LEVELS"); al && *al)
+				arcsineLvls = std::atoi(al);
+		}
+	}
+	int32_t modall = static_cast<int>(lbcrypto::GetMultiplicativeDepthByCoeffVector(coeffchebyshev, false)) + doubleAngleIts + arcsineLvls;
 
 	if (this->devices.empty()) {
 		context->EvalBootstrapSetup(levelBudget, std::move(dim1), slots, correctionFactor, true);

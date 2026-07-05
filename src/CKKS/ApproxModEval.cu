@@ -6,6 +6,7 @@
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
 #include "CudaUtils.cuh"
+#include <atomic>
 #include <cstdlib>
 #if defined(__clang__)
 #include <experimental/source_location>
@@ -25,9 +26,35 @@ void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey
 // Arcsine correction (FIDESLIB_ARCSINE=1, coefficient override FIDESLIB_ARCSINE_C3):
 // u = asin(2*pi*y)/(2*pi) ~= y*(1 + (2*pi)^2/6 * y^2) cancels the EvalMod
 // sine-linearization cubic so correction_factor can stay ~0 at small scales.
+// Runtime scoping: setArcsineOverride(1/0) forces on/off (-1 restores the env
+// default) so a caller (cutmax argmax) can enable it per-region while the rest
+// of the pipeline bootstraps arcsine-free. The context must have the levels
+// reserved at build (FIDESLIB_ARCSINE or FIDESLIB_ARCSINE_RESERVE).
+static std::atomic<int>& arcsineOverride() {
+	static std::atomic<int> v{ -1 };
+	return v;
+}
+void FIDESlib::CKKS::setArcsineOverride(int v) {
+	arcsineOverride().store(v, std::memory_order_relaxed);
+}
 static bool arcsineEnabled() {
+	const int o = arcsineOverride().load(std::memory_order_relaxed);
+	if (o >= 0)
+		return o != 0;
 	static const bool v = [] {
 		const char* e = std::getenv("FIDESLIB_ARCSINE");
+		return e && *e && *e != '0';
+	}();
+	return v;
+}
+
+// FIDESLIB_SPARSE_ARCSINE = dual-slots mode: arcsine reservation+correction
+// live ONLY on sparse-slot precomps (approxModReductionSparse); the full-slot
+// (dense) path never applies it. Removes the reserve/consume mismatch surface
+// entirely (mismatch in either direction is fatal, job 48603930).
+static bool sparseArcsineMode() {
+	static const bool v = [] {
+		const char* e = std::getenv("FIDESLIB_SPARSE_ARCSINE");
 		return e && *e && *e != '0';
 	}();
 	return v;
@@ -42,11 +69,18 @@ static double arcsineC3() {
 }
 
 static void applyArcsineCorrection(Ciphertext& y) {
+	const int lvl_in = static_cast<int>(y.getLevel());
 	Ciphertext t(y.cc_);
 	t.square(y, false);
 	t.multScalar(arcsineC3(), false);
 	t.addScalar(1.0);
 	y.mult(t, false);
+	static const bool logged = [&] {
+		std::cout << "[arcsine] engaged C3=" << arcsineC3() << " level " << lvl_in << "->" << y.getLevel()
+				  << std::endl;
+		return true;
+	}();
+	(void)logged;
 }
 
 void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEncI, const KeySwitchingKey& keySwitchingKey, uint64_t post) {
@@ -81,7 +115,7 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
 	if constexpr (COMPLEX)
 		applyDoubleAngleIterations(ctxtEncI, cc.GetDoubleAngleIts(), keySwitchingKey);
-	if (arcsineEnabled()) {
+	if (!sparseArcsineMode() && arcsineEnabled()) {
 		applyArcsineCorrection(ctxtEnc);
 		if constexpr (COMPLEX)
 			applyArcsineCorrection(ctxtEncI);
@@ -142,7 +176,9 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		std::cout << std::endl;
 	}
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
-	if (arcsineEnabled())
+	// dual-slots mode: this precomp carries the +3 reservation — the
+	// correction MUST run unconditionally (reserve-without-consume is fatal)
+	if (sparseArcsineMode() || arcsineEnabled())
 		applyArcsineCorrection(ctxtEnc);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc DA " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;

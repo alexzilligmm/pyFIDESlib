@@ -2,6 +2,8 @@
 // Created by carlosad on 2/05/24.
 //
 #include <source_location>
+#include <stdexcept>
+#include <string>
 #include "CKKS/BootstrapPrecomputation.cuh"
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
@@ -581,8 +583,17 @@ bool ContextData::HasBootPrecomputation(int slots) {
     return precom.boot.contains(slots);
 }
 BootstrapPrecomputation& ContextData::GetBootPrecomputation(int slots) {
-    if (!precom.boot.contains(slots))
-        assert("No precomputation." == nullptr);
+    if (!precom.boot.contains(slots)) {
+        // was assert(...) — a NO-OP in release, so a missing slot silently
+        // default-constructed an empty precomp and Bootstrap deref'd null ->
+        // segfault. Throw with the requested slot count so the miss is visible
+        // (diagnoses the complex+dual-precomp block-0 crash).
+        std::string have;
+        for (const auto& [s, _] : precom.boot) have += " " + std::to_string(s);
+        throw std::runtime_error(
+            "GetBootPrecomputation: no precomp for slots=" + std::to_string(slots) +
+            " (have:" + have + ")");
+    }
     return precom.boot[slots];
 }
 
