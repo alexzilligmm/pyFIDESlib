@@ -450,13 +450,17 @@ StagedEntry stage_raw(FIDESlib::CKKS::RawPlainText&& raw) {
 }
 
 // ---- Persistent staging: for CONSTANT weights reloaded every token (lm_head tiles). Stage each
-// once into a grow-once arena (never reset/ping-ponged), keep the StagedEntry forever, async-load
-// every token (no re-extract). Gated by g_stage_persistent (set around such loads). ~one weight
-// set, bounded; entries are never erased so the arena base is stable for their lifetime.
+// once into a grow-once arena (never reset/ping-ponged), async-load every token (no re-extract).
+// Gated by g_stage_persistent (set around such loads). ~one weight set, bounded. Entries are keyed
+// by PlaintextImpl ADDRESS and erased from ~PlaintextImpl (PersistStagingForget): the allocator
+// recycles addresses, so a weights_at()-releveled tile landing on a dead tile's address would
+// silently reuse the stale staged limbs (post-handoff eager decode tok>=2 garbage, 48856712).
+// Erasure keeps the arena bytes reserved (grow-once; overflow already falls back pageable).
+// Map+mutex are intentionally immortal: plaintexts destroyed during static teardown still forget.
 constexpr size_t kPersistArenaBytes = size_t(4) << 30;
 PinnedArena		 g_persist_arena;
-std::unordered_map<const void*, StagedEntry> g_persist_staged;
-std::mutex									 g_persist_mutex;
+auto&		g_persist_staged = *new std::unordered_map<const void*, StagedEntry>();
+auto&		g_persist_mutex	 = *new std::mutex();
 bool										 g_stage_persistent = false;
 
 // Stage `raw` for plaintext `key` persistently (idempotent: no-op if already staged). Returns the
@@ -519,6 +523,12 @@ KvSlot& kv_slot_ensure(const std::string& pos_key, size_t bytes) {
 	return s;
 }
 }   // namespace
+
+// Called from ~PlaintextImpl: drop the address-keyed persist-staged entry with its object.
+void PersistStagingForget(const void* key) {
+	std::lock_guard<std::mutex> g(g_persist_mutex);
+	g_persist_staged.erase(key);
+}
 
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
 	if (fhe_pin_stage())
