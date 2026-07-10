@@ -21,7 +21,7 @@ constexpr bool PRINT = false;
 using namespace FIDESlib::CKKS;
 
 void evalChebyshevSeries(Ciphertext& ctxt, const KeySwitchingKey& keySwitchingKey, std::vector<double>& coefficients, double lower_bound, double upper_bound);
-void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval);
+void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval, double outScale = 1.0);
 
 // Arcsine correction (FIDESLIB_ARCSINE=1, coefficient override FIDESLIB_ARCSINE_C3):
 // u = asin(2*pi*y)/(2*pi) ~= y*(1 + (2*pi)^2/6 * y^2) cancels the EvalMod
@@ -56,6 +56,19 @@ static bool sparseArcsineMode() {
 	static const bool v = [] {
 		const char* e = std::getenv("FIDESLIB_SPARSE_ARCSINE");
 		return e && *e && *e != '0';
+	}();
+	return v;
+}
+
+// FIDESLIB_SPARSE_BTS_BIAS=eps: deliberate (1-eps) multiplicative output bias on the
+// SPARSE precomp only, folded into the Chebyshev coeffs (x S^(1/2^r)) + the double-angle
+// constants (x S^(2^(j-r))) — zero extra ops/levels, dense path untouched. Restores the
+// dense EvalMod's structured-value downward bias that the accurate sparse path loses
+// (softmax/LN Goldschmidt band-edge margin — the T=128 sparse decode cliff).
+static double sparseBtsBias() {
+	static const double v = [] {
+		const char* e = std::getenv("FIDESLIB_SPARSE_BTS_BIAS");
+		return (e && *e) ? std::atof(e) : 0.0;
 	}();
 	return v;
 }
@@ -165,7 +178,23 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 
 	KeySwitchingKey& keySwitchingKey = cc.GetEvalKey(ctxtEnc.keyID);
 
-	evalChebyshevSeries(ctxtEnc, cc.GetCoeffsChebyshev(), (double)-1.0, (double)1.0);
+	const double S = 1.0 - sparseBtsBias();
+	if (S != 1.0) {
+		const int r	   = cc.GetDoubleAngleIts();
+		const double t = std::pow(S, std::ldexp(1.0, -r));
+		std::vector<double> scaled = cc.GetCoeffsChebyshev();
+		for (auto& a : scaled)
+			a *= t;
+		static const bool logged = [&] {
+			std::cout << "[sparse_bts_bias] engaged eps=" << sparseBtsBias() << " S=" << S << " r=" << r
+					  << " cheb_pre=" << t << std::endl;
+			return true;
+		}();
+		(void)logged;
+		evalChebyshevSeries(ctxtEnc, scaled, (double)-1.0, (double)1.0);
+	} else {
+		evalChebyshevSeries(ctxtEnc, cc.GetCoeffsChebyshev(), (double)-1.0, (double)1.0);
+	}
 
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc res " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
@@ -175,7 +204,7 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		}
 		std::cout << std::endl;
 	}
-	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
+	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey, S);
 	// dual-slots mode: this precomp carries the +3 reservation — the
 	// correction MUST run unconditionally (reserve-without-consume is fatal)
 	if (sparseArcsineMode() || arcsineEnabled())
@@ -829,7 +858,7 @@ static int daFoldBits() {
 	return v;
 }
 
-void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval) {
+void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval, double outScale) {
 	FIDESlib::CudaNvtxRange r_(std::string{ sc::current().function_name() });
 	ContextData& cc = ctxt.cc;
 	int32_t r		= its;
@@ -838,7 +867,7 @@ void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey
 		if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
 			ctxt.rescale();
 		ctxt.square(false);
-		double scalar = -1.0 / std::pow((2.0 * M_PI), std::pow(2.0, j - r));
+		double scalar = -1.0 / std::pow((2.0 * M_PI) / outScale, std::pow(2.0, j - r));
 		if (daFoldBits() && j == r) {
 			const double s = std::pow(2.0, daFoldBits());
 			ctxt.multScalar(2.0 * s, false);
