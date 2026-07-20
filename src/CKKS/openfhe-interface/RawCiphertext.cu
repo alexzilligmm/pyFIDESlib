@@ -1056,7 +1056,7 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
 
     std::cout << "Rotation keys loaded: " << GPUcc.precom.keys.begin()->second.rot_keys.size() << " ~ "
               << 2 * ((long long)GPUcc.precom.keys.begin()->second.rot_keys.size() * GPUcc.dnum *
-                      (GPUcc.L + GPUcc.K + 1) * GPUcc.N * 8 / (1 << 20))
+                      (GPUcc.L + GPUcc.K + 1) * GPUcc.N * (NATIVEINT / 8) / (1 << 20))
               << "MB" << std::endl;
 }
 
