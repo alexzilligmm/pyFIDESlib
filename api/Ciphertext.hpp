@@ -21,6 +21,7 @@ template <> class CiphertextImpl<DCRTPoly> {
 
 	CiphertextImpl(const CiphertextImpl<DCRTPoly>&);
 	CiphertextImpl(const Ciphertext<DCRTPoly>&);
+	CiphertextImpl(const CiphertextImpl<DCRTPoly>&, bool lazy_cpu_shadow);
 	CiphertextImpl& operator=(const CiphertextImpl<DCRTPoly>&) = delete;
 	CiphertextImpl& operator=(const Ciphertext<DCRTPoly>&)	   = delete;
 

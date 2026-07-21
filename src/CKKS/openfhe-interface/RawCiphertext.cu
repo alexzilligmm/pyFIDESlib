@@ -14,17 +14,17 @@ using namespace lbcrypto;
 * Converts a vector of polynomial limbs to a single flattened array
 */
 std::vector<std::vector<uint64_t>> FIDESlib::CKKS::GetRawArray(
-    std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys) {
+    const std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>>& polys) {
     // total size is r * N
     int numRes = polys.size();
     int numElements = (polys[0].GetValues() /*.m_values*/).GetLength();
 
     std::vector<std::vector<uint64_t>> flattened(numRes, std::vector<uint64_t>(numElements));
 
-    // Fill the array
     for (int r = 0; r < numRes; ++r) {
+        const auto& vals = polys[r].GetValues();
         for (int i = 0; i < numElements; i++) {
-            flattened[r][i] = (polys[r].GetValues() /*.m_values*/)[i].ConvertToInt();
+            flattened[r][i] = vals[i].ConvertToInt();
         }
     }
     return flattened;
@@ -33,7 +33,9 @@ std::vector<std::vector<uint64_t>> FIDESlib::CKKS::GetRawArray(
 /**
 * Gets the moduli from a vector of polynomial limbs and returns a single array
 */
-static std::vector<uint64_t> GetModuli(std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys) {
+// const& (was by value): this copied the entire limb vector purely to read
+// numRes moduli scalars. Pure parameter-passing change.
+static std::vector<uint64_t> GetModuli(const std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>>& polys) {
     int numRes = polys.size();
     std::vector<uint64_t> moduli(numRes);
     for (int r = 0; r < numRes; r++) {

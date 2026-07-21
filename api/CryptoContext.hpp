@@ -217,6 +217,11 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalMult(const Ciphertext<DCRTPoly>& ct1, double scalar);
 	Ciphertext<DCRTPoly> EvalMult(double scalar, const Ciphertext<DCRTPoly>& ct1);
 	void EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, Plaintext& pt);
+
+	void CopyCiphertextDevice(Ciphertext<DCRTPoly>& dst, const Ciphertext<DCRTPoly>& src);
+
+	Ciphertext<DCRTPoly> MakeGpuResultLike(const Ciphertext<DCRTPoly>& src);
+	static bool LazyCpuShadowEnabled();
 	void EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, double scalar);
 	void EvalMultInPlace(double scalar, Ciphertext<DCRTPoly>& ct1);
 	Ciphertext<DCRTPoly> EvalMultMutable(Ciphertext<DCRTPoly>& ct1, Ciphertext<DCRTPoly>& ct2);
@@ -231,13 +236,7 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalRotate(const Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 	void EvalRotateInPlace(Ciphertext<DCRTPoly>& ciphertext, int32_t index);
 
-	// Complex conjugation (automorphism 2N-1), slot-wise conj of the packed values.
-	// (ct + conj(ct)) annihilates the imaginary noise component exactly — used to
-	// keep persistent accumulators below the CKKS Decode approximation-error bound.
-	// Requires the conjugation key (resident whenever bootstrap precomp is loaded).
 	Ciphertext<DCRTPoly> EvalConjugate(const Ciphertext<DCRTPoly>& ciphertext);
-	// Multiply by the monomial X^power (level-free, keyless); power = N/2 multiplies
-	// every slot by i — used for a+i*b ciphertext pairing.
 	void EvalMultMonomialInPlace(Ciphertext<DCRTPoly>& ciphertext, uint32_t power);
 
 	std::shared_ptr<void> EvalFastRotationPrecompute(const Ciphertext<DCRTPoly>& ct);

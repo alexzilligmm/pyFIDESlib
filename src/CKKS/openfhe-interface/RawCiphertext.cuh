@@ -92,7 +92,7 @@ struct RawKeySwitchKey {
     std::string keyid;
 };
 
-std::vector<std::vector<uint64_t>> GetRawArray(std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys);
+std::vector<std::vector<uint64_t>> GetRawArray(const std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>>& polys);
 
 RawCipherText GetRawCipherText(lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cc,
                                lbcrypto::Ciphertext<lbcrypto::DCRTPoly> ct, int REV = 1);
