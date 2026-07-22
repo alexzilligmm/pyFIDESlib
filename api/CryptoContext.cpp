@@ -20,6 +20,7 @@
 #include "lattice/hal/lat-backend.h"
 
 #include <any>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -342,28 +343,11 @@ void CryptoContextImpl<DCRTPoly>::LoadRotationKeys(const std::vector<int>& steps
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt) {
-	if (pt->loaded || this->devices.empty())
-		return;
-
-	if (!this->loaded) {
-		OPENFHE_THROW("CryptoContext not loaded to any device");
-	}
-
-	auto& context_gpu								  = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
-	auto& context									  = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
-	const auto& ptImpl								  = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
-	FIDESlib::CKKS::RawPlainText raw_pt				  = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
-	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
-	const cudaStream_t load_stream = ResolvePlaintextLoadStream(nullptr);
-	if (load_stream != nullptr) {
-		gpu_pt->load(raw_pt, load_stream);
-	} else {
-		gpu_pt->load(raw_pt);
-	}
-	uint32_t handle					  = this->RegisterDevicePlaintext(std::move(gpu_pt));
-	pt->gpu						  = handle;
-	pt->loaded					  = true;
-	RecordPlaintextReady(handle, load_stream);
+	// Delegate to the stash-aware overload: a plaintext staged by a residency worker
+	// (ExtractRawPlaintext) must be found by EVERY load path — under FHE_STAGE_RELEASE_CPU its
+	// OpenFHE-side payload is gone and an inline re-extract would throw. Value-identical:
+	// with no staged entry this extracts inline exactly as before.
+	this->LoadPlaintext(pt, nullptr);
 }
 
 namespace {
@@ -385,13 +369,28 @@ const size_t kStageArenaBytes = [] {
 struct PinnedArena {
 	uint8_t* base = nullptr;
 	size_t	 cap  = 0;
-	size_t	 used = 0;
+	// Atomic so stage_into can be called from an OMP team (worker-side block staging):
+	// offsets are reserved with fetch_add, the memcpys then run lock-free in parallel.
+	std::atomic<size_t> used{0};
 };
+std::atomic<uint64_t> g_stage_overflow_pts{0};   // pts that fell back pageable since the last flip
+
+bool stage_stats_enabled() {
+	static const bool v = [] {
+		const char* e = std::getenv("FHE_STAGE_STATS");
+		return e && *e && std::atoi(e) != 0;
+	}();
+	return v;
+}
 struct StagedEntry {
 	FIDESlib::CKKS::RawPlainText meta;   // arena!=null ⇒ sub_0 cleared (data in arena); else sub_0 kept
 	const uint8_t*				 arena = nullptr;
 	std::vector<size_t>			 off;    // per-limb byte offset into arena
 	std::vector<size_t>			 len;    // per-limb byte length
+	// COEFF-mode (MarkCoeffStaged): the single staged limb is a q0 EVAL limb; the load expands
+	// it to target_limbs on the GPU instead of uploading pre-built limbs.
+	bool						 coeff		  = false;
+	int							 target_limbs = 0;
 };
 PinnedArena g_stage_arena[2];
 int			g_stage_cur = 0;
@@ -402,6 +401,11 @@ void stage_arena_begin() {
 	std::lock_guard<std::mutex> g(g_stage_mutex);
 	g_stage_cur	   = (g_stage_cur + 1) & 1;
 	PinnedArena& a = g_stage_arena[g_stage_cur];
+	const uint64_t ov = g_stage_overflow_pts.exchange(0);
+	if (ov > 0 || stage_stats_enabled())
+		std::fprintf(stderr, "[stage] arena flip: resetting used=%.2f GB cap=%.2f GB overflow_pts=%llu%s\n",
+					 a.used.load() / 1e9, a.cap / 1e9, static_cast<unsigned long long>(ov),
+					 ov > 0 ? " (raise FHE_STAGE_ARENA_GB)" : "");
 	if (a.cap < kStageArenaBytes) {
 		if (a.base)
 			cudaFreeHost(a.base);
@@ -415,22 +419,30 @@ void stage_arena_begin() {
 
 // Copy raw's limbs into arena `a` (host memcpy, no CUDA). On success sub_0 is cleared and
 // arena/off/len set; on overflow/no-arena it falls back (sub_0 kept, arena=null) → pageable upload.
+// Thread-safe: the plaintext's total bytes are reserved with ONE atomic fetch_add, so an OMP team
+// can stage a block's plaintexts concurrently; the memcpys run lock-free into disjoint ranges.
 StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw) {
 	StagedEntry e;
-	bool		ok = (a.base != nullptr);
+	size_t		total = 0;
+	for (const auto& limb : raw.sub_0)
+		total += limb.size() * sizeof(uint64_t);
+	bool ok = (a.base != nullptr) && total > 0;
 	if (ok) {
-		e.off.reserve(raw.sub_0.size());
-		e.len.reserve(raw.sub_0.size());
-		for (auto& limb : raw.sub_0) {
-			const size_t bytes = limb.size() * sizeof(uint64_t);
-			if (a.used + bytes > a.cap) {
-				ok = false;
-				break;
+		const size_t base_off = a.used.fetch_add(total, std::memory_order_relaxed);
+		if (base_off + total > a.cap) {
+			ok = false;   // reservation lost until the next flip resets the bump — arena is per block
+			g_stage_overflow_pts.fetch_add(1, std::memory_order_relaxed);
+		} else {
+			e.off.reserve(raw.sub_0.size());
+			e.len.reserve(raw.sub_0.size());
+			size_t cur = base_off;
+			for (auto& limb : raw.sub_0) {
+				const size_t bytes = limb.size() * sizeof(uint64_t);
+				std::memcpy(a.base + cur, limb.data(), bytes);
+				e.off.push_back(cur);
+				e.len.push_back(bytes);
+				cur += bytes;
 			}
-			std::memcpy(a.base + a.used, limb.data(), bytes);
-			e.off.push_back(a.used);
-			e.len.push_back(bytes);
-			a.used += bytes;
 		}
 	}
 	if (ok) {
@@ -529,12 +541,71 @@ void PersistStagingForget(const void* key) {
 	g_persist_staged.erase(key);
 }
 
+// Kick off the pinned stage-arena allocations (2 × FHE_STAGE_ARENA_GB) on a background thread,
+// once — worker-side block staging (ViT/prefill) uses block-sized arenas whose cudaMallocHost
+// costs seconds; prewarming at driver init hides it under context setup. stage_arena_begin's
+// lazy-alloc branch stays as the fallback and both run under g_stage_mutex, so whichever side
+// wins the race publishes the arena and the loser's allocation is dropped.
+namespace {
+std::future<void> g_stage_prewarm;
+}
+void PrewarmStageArenas() {
+	if (!fhe_pin_stage())
+		return;
+	static std::once_flag once;
+	std::call_once(once, [] {
+		g_stage_prewarm = std::async(std::launch::async, [] {
+			for (int i = 0; i < 2; ++i) {
+				void* p = nullptr;
+				cudaMallocHost(&p, kStageArenaBytes);
+				std::lock_guard<std::mutex> g(g_stage_mutex);
+				PinnedArena& a = g_stage_arena[i];
+				if (a.base == nullptr && p) {
+					a.base = static_cast<uint8_t*>(p);
+					a.cap  = kStageArenaBytes;
+					a.used = 0;
+				} else if (p) {
+					cudaFreeHost(p);   // lazy-alloc won the race — drop ours
+				}
+			}
+		});
+	});
+}
+
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
 	if (fhe_pin_stage())
 		stage_arena_begin();
 }
 
 void CryptoContextImpl<DCRTPoly>::SetPersistentStaging(bool on) { g_stage_persistent = on; }
+
+double CryptoContextImpl<DCRTPoly>::ScalingFactorReal(uint32_t level) const {
+	const auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	const auto	cp		= std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(context->GetCryptoParameters());
+	if (!cp)
+		OPENFHE_THROW("ScalingFactorReal: not a CKKS-RNS context");
+	return cp->GetScalingFactorReal(level);
+}
+
+void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale) {
+	auto& ptImpl = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
+	if (ptImpl->GetElement<lbcrypto::DCRTPoly>().GetAllElements().size() != 1)
+		OPENFHE_THROW("MarkCoeffStaged: expected a 1-limb (q0) host encode");
+	ptImpl->SetLevel(target_level);
+	ptImpl->SetScalingFactor(target_scale);
+	pt->coeff_staged = true;
+}
+
+// Called from ~PlaintextImpl: drop a worker-staged entry that was never consumed. Without this,
+// the allocator can recycle the address into a NEW plaintext, whose first load would silently
+// upload the dead object's staged limbs (the g_persist_staged 48856712 bug class).
+void CryptoContextImpl<DCRTPoly>::ForgetPrefetchedRaw(const void* key) {
+	if (!prefetched_raw_mutex)
+		return;
+	prefetched_raw_mutex->lock();
+	prefetched_raw.erase(key);
+	prefetched_raw_mutex->unlock();
+}
 
 void CryptoContextImpl<DCRTPoly>::PrewarmKvArena() {
 	// Allocate the 12GB pinned KV-offload arena on a background thread ONCE, at decode init, so the
@@ -641,8 +712,16 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 			auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 			const auto& ptImpl = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 			e = &persist_stage_locked(key, FIDESlib::CKKS::GetRawPlainText(context, ptImpl));
+			if (pt->coeff_staged) {
+				if (e->arena == nullptr)
+					OPENFHE_THROW("LoadPlaintext: coeff-staged plaintext overflowed the persistent arena");
+				e->coeff		= true;
+				e->target_limbs = static_cast<int>(this->multiplicative_depth + 1 - pt->GetLevel());
+			}
 		}
-		if (e->arena != nullptr) {
+		if (e->coeff) {
+			gpu_pt->loadCoeffExpand(e->meta, e->arena + e->off[0], e->len[0], e->target_limbs, load_stream);
+		} else if (e->arena != nullptr) {
 			gpu_pt->loadStaged(e->meta, e->arena, e->off, e->len, load_stream);
 		} else if (load_stream != nullptr) {
 			gpu_pt->load(e->meta, load_stream);   // overflow fallback: pageable from the kept sub_0
@@ -678,9 +757,17 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 		prefetched_raw_mutex->unlock();
 	}
 
-	if (have_staged && staged.arena != nullptr) {
+	if (have_staged && staged.coeff) {
+		gpu_pt->loadCoeffExpand(staged.meta, staged.arena + staged.off[0], staged.len[0],
+								staged.target_limbs, load_stream);
+	} else if (have_staged && staged.arena != nullptr) {
 		gpu_pt->loadStaged(staged.meta, staged.arena, staged.off, staged.len, load_stream);
 	} else {
+		// A coeff-marked plaintext carries only its q0 limb — it MUST come through the staged
+		// path (a plain 1-limb upload at a claimed deeper level would be silently wrong).
+		if (pt->coeff_staged)
+			OPENFHE_THROW("LoadPlaintext: coeff-staged plaintext has no staged entry (consumed "
+						  "twice, or staged before the arena was armed) — this is a bug");
 		FIDESlib::CKKS::RawPlainText* src = have_staged ? &staged.meta : &raw_pt;   // staged-fallback keeps sub_0
 		if (!have_staged && !from_stash) {
 			auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
@@ -729,10 +816,35 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 	auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& ptImpl = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
+	if (pt->coeff_staged && raw.numRes != 1)
+		OPENFHE_THROW("ExtractRawPlaintext: coeff-staged plaintext must carry exactly one (q0) limb");
 	// Stage into the pinned arena (host memcpy on this worker — overlapped, no CUDA call) when
 	// FHE_PIN_STAGE; else stash the raw for a pageable upload.
 	std::any entry = fhe_pin_stage() ? std::any(stage_raw(std::move(raw)))
 									 : std::any(std::move(raw));
+	if (pt->coeff_staged) {
+		if (entry.type() != typeid(StagedEntry) || std::any_cast<const StagedEntry&>(entry).arena == nullptr)
+			OPENFHE_THROW("ExtractRawPlaintext: coeff-staged plaintext requires the pinned arena "
+						  "(FHE_PIN_STAGE on, arena not overflowed) — raise FHE_STAGE_ARENA_GB");
+		StagedEntry& se = std::any_cast<StagedEntry&>(entry);
+		se.coeff		= true;
+		// pt->GetLevel() reports the TARGET level (MarkCoeffStaged); limbs = depth+1 - level.
+		se.target_limbs = static_cast<int>(this->multiplicative_depth + 1 - pt->GetLevel());
+	}
+	// FHE_STAGE_RELEASE_CPU: once the limbs live in the pinned arena, the OpenFHE-side DCRTPoly is
+	// redundant (~4-6 MB/pt; a ViT block is ~65 GB) — drop it so staged blocks don't double-hold
+	// host RAM. Only on a successful arena stage (the pageable fallback still reads sub_0/meta).
+	// A second extraction of a released plaintext throws LOUDLY in GetRawPlainText — never silent.
+	// The encoding's value vector survives (GetRealPackedValue/GetLevel read metadata, not the poly).
+	static const bool release_cpu = [] {
+		const char* e = std::getenv("FHE_STAGE_RELEASE_CPU");
+		return e && *e && std::atoi(e) != 0;
+	}();
+	if (release_cpu && entry.type() == typeid(StagedEntry) &&
+		std::any_cast<const StagedEntry&>(entry).arena != nullptr) {
+		auto& pt_nc = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
+		pt_nc->GetElement<lbcrypto::DCRTPoly>() = lbcrypto::DCRTPoly();
+	}
 	prefetched_raw_mutex->lock();
 	prefetched_raw[key] = std::move(entry);
 	prefetched_raw_mutex->unlock();
@@ -1911,11 +2023,12 @@ void CryptoContextImpl<DCRTPoly>::EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, Pla
 }
 
 bool CryptoContextImpl<DCRTPoly>::LazyCpuShadowEnabled() {
-	static const bool on = [] {
-		const char* e = std::getenv("FIDESLIB_LAZY_CPU_SHADOW");
-		return e && *e && std::atoi(e) != 0;
-	}();
-	return on;
+	// BAKED ON (2026-07-21, user ruling — no longer tunable): the lazy CPU shadow is
+	// value-validated on both arms (ViT e2e 49902068/49902164, GPT-2 planned decode A/B
+	// 49902926 top1-identical) and strictly faster (ct×pt mult 659→35 µs, ViT block
+	// 45→20 s, GPT-2 decode −15 %). The old FIDESLIB_LAZY_CPU_SHADOW env is ignored;
+	// the CloneEmpty shadow with the loud-throw re-upload guards is the only behavior.
+	return true;
 }
 
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::MakeGpuResultLike(const Ciphertext<DCRTPoly>& src) {

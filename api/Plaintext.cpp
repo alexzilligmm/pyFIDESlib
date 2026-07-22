@@ -16,6 +16,8 @@ PlaintextImpl::PlaintextImpl(const CryptoContext<DCRTPoly>&& context)
 
 PlaintextImpl::~PlaintextImpl() {
 	PersistStagingForget(this);
+	if (this->parent_context)
+		this->parent_context->ForgetPrefetchedRaw(this);   // unconsumed worker-staged entry, if any
 	if (this->loaded && this->gpu != 0 && this->parent_context) {
 		this->parent_context->EvictDevicePlaintext(this->gpu);
 		this->gpu = 0;

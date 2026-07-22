@@ -85,6 +85,16 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// residency WORKER thread during compute: reads only this->cpu + pt->cpu (both read-only) and
 	/// the mutex-guarded stash; touches no device state, no inf.w, no FHE context. No-op if loaded.
 	void ExtractRawPlaintext(Plaintext& pt);
+	/// @brief Drop a worker-staged (prefetched_raw) entry for a plaintext being destroyed. Called
+	/// from ~PlaintextImpl so a recycled address can never resurrect a dead object's staged limbs.
+	void ForgetPrefetchedRaw(const void* key);
+	/// @brief The FLEXIBLEAUTO per-level scaling factor (for the coeff-mode encode prescale).
+	double ScalingFactorReal(uint32_t level) const;
+	/// @brief Mark a 1-limb (q0) host encode as a COEFF-mode weight plaintext at `target_level`:
+	/// overwrites the plaintext's level + scaling factor to the target's and sets coeff_staged.
+	/// Staged loads then expand it to the target limbs ON THE GPU (INTT → broadcastLimb0 → NTT),
+	/// replacing the host-side per-limb CRT+NTT that dominates MakeCKKSPackedPlaintext (~4.6x).
+	void MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale);
 	/// @brief Begin staging a residency block under FHE_PIN_STAGE: ping-pong to the next pinned
 	/// arena and reset it. Call once before the per-plaintext ExtractRawPlaintext calls of a block
 	/// (from the residency worker). No-op when FHE_PIN_STAGE is off.
@@ -221,6 +231,8 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	void CopyCiphertextDevice(Ciphertext<DCRTPoly>& dst, const Ciphertext<DCRTPoly>& src);
 
 	Ciphertext<DCRTPoly> MakeGpuResultLike(const Ciphertext<DCRTPoly>& src);
+	/// Always true (baked 2026-07-21): fresh GPU-op outputs carry a metadata-only CPU shadow
+	/// (CloneEmpty), never a deep copy. The FIDESLIB_LAZY_CPU_SHADOW env is no longer read.
 	static bool LazyCpuShadowEnabled();
 	void EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, double scalar);
 	void EvalMultInPlace(double scalar, Ciphertext<DCRTPoly>& ct1);
@@ -367,6 +379,12 @@ template <> class CryptoContextImpl<DCRTPoly> {
 
 	static std::vector<int> GetConvolutionTransformRotationIndices(int rowSize, int bStep, int stride, uint32_t gStep);
 };
+
+/// @brief Kick off the pinned stage-arena allocations (2 × FHE_STAGE_ARENA_GB) on a background
+/// thread, once. Worker-side block staging (ViT/prefill) uses block-sized arenas whose
+/// cudaMallocHost costs seconds; call at driver init so the pinning overlaps context setup.
+/// No-op when FHE_PIN_STAGE=0.
+void PrewarmStageArenas();
 
 } // namespace fideslib
 

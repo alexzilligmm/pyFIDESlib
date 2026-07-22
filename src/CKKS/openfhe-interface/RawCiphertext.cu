@@ -3,6 +3,8 @@
 //
 #include <bit>
 #include <cassert>
+#include <stdexcept>
+#include <type_traits>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/openfhe-interface/ParameterSwitch.cuh"
@@ -19,12 +21,22 @@ std::vector<std::vector<uint64_t>> FIDESlib::CKKS::GetRawArray(
     int numRes = polys.size();
     int numElements = (polys[0].GetValues() /*.m_values*/).GetLength();
 
-    std::vector<std::vector<uint64_t>> flattened(numRes, std::vector<uint64_t>(numElements));
+    std::vector<std::vector<uint64_t>> flattened;
+    flattened.reserve(numRes);
 
+    using NativeInt = std::decay_t<decltype(polys[0].GetValues()[0])>;
     for (int r = 0; r < numRes; ++r) {
         const auto& vals = polys[r].GetValues();
-        for (int i = 0; i < numElements; i++) {
-            flattened[r][i] = vals[i].ConvertToInt();
+        if constexpr (sizeof(NativeInt) == sizeof(uint64_t) && std::is_trivially_copyable_v<NativeInt>) {
+            // NativeIntegerT is one uint64_t member, no virtuals; the NativeVector storage is
+            // contiguous — range-construct = a single memcpy, no zero-init, no per-element walk.
+            const uint64_t* p = reinterpret_cast<const uint64_t*>(&vals[0]);
+            flattened.emplace_back(p, p + numElements);
+        } else {
+            std::vector<uint64_t> limb(numElements);
+            for (int i = 0; i < numElements; i++)
+                limb[i] = vals[i].ConvertToInt();
+            flattened.push_back(std::move(limb));
         }
     }
     return flattened;
@@ -175,6 +187,10 @@ FIDESlib::CKKS::RawPlainText FIDESlib::CKKS::GetRawPlainText(lbcrypto::CryptoCon
                                                              lbcrypto::Plaintext pt) {
     RawPlainText result;  //{.cc = cc};
     result.originalPlainText = pt;
+    if (pt->GetElement<DCRTPoly>().GetAllElements().empty())
+        throw std::runtime_error(
+            "GetRawPlainText: plaintext CPU payload was released after pinned staging "
+            "(FHE_STAGE_RELEASE_CPU) — a second extraction of a staged weight is a bug");
     result.numRes = pt->GetElement<DCRTPoly>().GetAllElements().size();
     result.N = ((pt->GetElement<DCRTPoly>().GetAllElements())[0].GetValues() /*.m_values*/).GetLength();
     result.sub_0 = GetRawArray(pt->GetElement<DCRTPoly>().GetAllElements());
@@ -199,6 +215,10 @@ FIDESlib::CKKS::RawPlainText FIDESlib::CKKS::GetRawPlainText(lbcrypto::CryptoCon
                                                              ReadOnlyPlaintext pt) {
     RawPlainText result;  //{.cc = cc};
     //result.originalPlainText = pt;
+    if (pt->GetElement<DCRTPoly>().GetAllElements().empty())
+        throw std::runtime_error(
+            "GetRawPlainText: plaintext CPU payload was released after pinned staging "
+            "(FHE_STAGE_RELEASE_CPU) — a second extraction of a staged weight is a bug");
     result.numRes = pt->GetElement<DCRTPoly>().GetAllElements().size();
     result.N = ((pt->GetElement<DCRTPoly>().GetAllElements())[0].GetValues() /*.m_values*/).GetLength();
     result.sub_0 = GetRawArray(pt->GetElement<DCRTPoly>().GetAllElements());

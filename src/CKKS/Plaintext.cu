@@ -110,6 +110,17 @@ void Plaintext::loadStaged(const RawPlainText& meta, const uint8_t* arena_base,
     slots = meta.slots;
 }
 
+void Plaintext::loadCoeffExpand(const RawPlainText& meta, const uint8_t* src, size_t len,
+                                int target_limbs, cudaStream_t stream) {
+    CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
+    CKKS::SetCurrentContext(cc_);
+    c0.loadCoeffExpand(src, len, target_limbs, stream);
+
+    NoiseFactor = meta.Noise;   // the TARGET level's scaling factor (set by the encoder)
+    NoiseLevel = meta.NoiseLevel;
+    slots = meta.slots;
+}
+
 void Plaintext::store(RawPlainText& raw) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc_);
