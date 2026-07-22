@@ -109,7 +109,7 @@ __forceinline__ __device__ uint64_t Shoup_mult_64(const uint64_t op1, const uint
      * Output: op1 * op2 % prime
      */
 __forceinline__ __device__ uint32_t Shoup_mult_32(const uint32_t op1, const uint32_t op2, const uint32_t psi,
-                                                  const uint32_t prime) {
+                                                   const uint32_t prime) {
     uint32_t c = __umulhi(op1, psi);
     uint32_t c_lo = op1 * op2 - c * prime;
     c_lo -= prime * (c_lo >= prime);

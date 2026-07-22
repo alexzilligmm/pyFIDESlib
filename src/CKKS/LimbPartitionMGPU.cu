@@ -365,6 +365,7 @@ void LimbPartition::doubleRescaleMGPU(LimbPartition& partition) {
             for (int i = 0; i < size; i += batch) {
                 uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(size - i));
 
+        fprintf(stderr, "[diag_inner] step=A1 INTT_first\n"); fflush(stderr);
                 NTT_<false, algo, mode><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst, bytesFirst,
                                           stream[j]->ptr()>>>(getGlobals(), ptr[j]->data, PARTITION(part[j]->id, i),
                                                               part[j]->auxptr.data + i, nullptr, *part[j]->level);
@@ -443,6 +444,7 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
 
         if (num_special + num_limbs > 0) {
             cudaMemcpyAsync(digits.data, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
+        fprintf(stderr, "[diag_inner] step=A2 KSK_dotKSK\n"); fflush(stderr);
             fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, 0, s.ptr()>>>(
                 out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits.data,
                 i, id, num_special, 0);
@@ -1132,6 +1134,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             dim3 gridSize{(uint32_t)cc.N / blockSize.x};
             int shared_bytes = sizeof(uint64_t) * (size /*DECOMPlimb[d].size()*/) * blockSize.x;
 
+        fprintf(stderr, "[diag_inner] step=B1 DecompAndModUpConv\n"); fflush(stderr);
             DecompAndModUpConv<ALGO_SHOUP><<<gridSize, blockSize, shared_bytes, stream1.ptr()>>>(
                 DECOMPlimbptr[d_].data, *level + 1, DIGITlimbptr[d_].data, digitid[d_], getGlobals());
 
@@ -1198,6 +1201,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
             if (num_special > 0) {
 
+        fprintf(stderr, "[diag_inner] step=B2 KSK_first\n"); fflush(stderr);
                 fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, 0, s.ptr()>>>(
                     out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
                     num_d, id, num_special, 0);
@@ -1427,6 +1431,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 dim3 gridSize{(uint32_t)cc.N / blockSize.x};
                 int shared_bytes = sizeof(uint64_t) * (SPECIALlimb.size()) * blockSize.x;
                 if (limb_size > 0)
+        fprintf(stderr, "[diag_inner] step=C1 ModDown2\n"); fflush(stderr);
                     ModDown2<ALGO_SHOUP><<<gridSize, blockSize, shared_bytes, stream.ptr()>>>(
                         auxLimbs.limbptr.data, limb_size, auxLimbs.SPECIALlimbptr.data, PARTITION(id, 0), getGlobals());
             }
@@ -1518,6 +1523,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             if (limb_size > 0) {
                 for (int start = 0; start < limb_size; start += cc.batch) {
                     int num = std::min(cc.batch, (int)limb_size - start);
+        fprintf(stderr, "[diag_inner] step=C2 KSK_second\n"); fflush(stderr);
                     fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, 0, stream.ptr()>>>(
                         out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data,
                         digits, i, id, num_special, num_special + start);
@@ -1550,6 +1556,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             LimbPartition& auxLimbs = i == 0 ? auxLimbs1 : auxLimbs2;
 
             if (limb_size > 0) {
+                fprintf(stderr, "[diag_inner] step=D1 NTT_MODDOWN_start\n"); fflush(stderr);
                 constexpr ALGO algo = ALGO_SHOUP;
                 constexpr int M = 4;
 
@@ -1557,20 +1564,32 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
                 int bytesFirst = 8 * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
                 int bytesSecond = 8 * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
+                fprintf(stderr, "[diag_D] limb_size=%d N=%d bdx=%d gridX=%lu bytesFirst=%d\n",
+                    limb_size, cc.N, blockDimFirst.x,
+                    (unsigned long)(cc.N / (blockDimFirst.x * M * 2)),
+                    bytesFirst);
+                fprintf(stderr, "[diag_D] auxLimbData=%p outData=%p\n",
+                    (void*)auxLimbs.limbptr.data, (void*)out.auxptr.data);
+                fflush(stderr);
 
                 {
+                    fprintf(stderr, "[diag_inner] step=D2 NTT_MODDOWN_launch\n"); fflush(stderr);
                     NTT_<false, algo, NTT_MODDOWN>
                         <<<dim3{cc.N / (blockDimFirst.x * M * 2), limb_size}, blockDimFirst, bytesFirst,
                            stream.ptr()>>>(getGlobals(), auxLimbs.limbptr.data, PARTITION(id, 0), out.auxptr.data);
+                    { cudaError_t _e = cudaDeviceSynchronize(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_false CRASHED: %s\n", cudaGetErrorString(_e)); }
+                    { cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_false ERR: %s\n", cudaGetErrorString(_e)); }
 
                     stream.wait(cc.digitStream2.at(0).at(id));
 
                     NTT_<true, algo, NTT_MODDOWN>
                         <<<dim3{cc.N / (blockDimSecond.x * M * 2), limb_size}, blockDimSecond, bytesSecond,
                            stream.ptr()>>>(getGlobals(), out.auxptr.data, PARTITION(id, 0), out.limbptr.data);
+                    { cudaError_t _e = cudaDeviceSynchronize(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_true CRASHED: %s\n", cudaGetErrorString(_e)); }
                 }
             }
         }
+        fprintf(stderr, "[diag_inner] step=D3 NTT_MODDOWN_after\n"); fflush(stderr);
         CudaCheckErrorModNoSync;
         if constexpr (PRINT) {
             if (SELECT) {

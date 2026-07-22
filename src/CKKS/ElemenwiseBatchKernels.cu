@@ -126,7 +126,7 @@ __global__ void square_(void** l, void** l1, const __grid_constant__ int primeid
         uint64_t in = ((uint64_t*)l1[blockIdx.y])[idx];
         ((uint64_t*)l[blockIdx.y])[idx] = modmult<ALGO_BARRETT>(in, in, primeid);
     } else {
-        uint32_t in = ((uint64_t*)l1[blockIdx.y])[idx];
+        uint32_t in = ((uint32_t*)l1[blockIdx.y])[idx];
         ((uint32_t*)l[blockIdx.y])[idx] = modmult<ALGO_BARRETT>(in, in, primeid);
     }
 };
@@ -208,13 +208,20 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
     constexpr ALGO algo = ALGO_BARRETT;
 
-    {
+    if (ISU64(primeid)) {
         uint64_t res = modmult<algo>(((uint64_t*)(bs[0])[blockIdx.y])[idx], w[primeid], primeid);
         for (int i = 1; i < n; ++i) {
             uint64_t temp = modmult<algo>(((uint64_t*)(bs[i])[blockIdx.y])[idx], w[i * MAXP + primeid], primeid);
             res = modadd(res, temp, primeid);
         }
         ((uint64_t*)a[blockIdx.y])[idx] = res;
+    } else {
+        uint32_t res = modmult<algo>(((uint32_t*)(bs[0])[blockIdx.y])[idx], (uint32_t)w[primeid], primeid);
+        for (int i = 1; i < n; ++i) {
+            uint32_t temp = modmult<algo>(((uint32_t*)(bs[i])[blockIdx.y])[idx], (uint32_t)(w[i * MAXP + primeid]), primeid);
+            res = modadd(res, temp, primeid);
+        }
+        ((uint32_t*)a[blockIdx.y])[idx] = res;
     }
 }
 
@@ -270,11 +277,25 @@ __global__ void fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** so
         //printf("Digit %d: in: %p, kska: %p, kskb: %p\n", i, digits[i + decomp * 3 * C_.dnum],
         //       digits[C_.dnum + i + decomp * 3 * C_.dnum], digits[2 * C_.dnum + i + decomp * 3 * C_.dnum]);
 
-        uint64_t in = ((uint64_t*)digits[i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx];
-        uint64_t add1 = modmult<ALGO_BARRETT>(
-            in, ((uint64_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
-        uint64_t add2 = modmult<ALGO_BARRETT>(
-            in, ((uint64_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+        uint64_t in;
+        if (ISU64(primeid)) {
+            in = ((uint64_t*)digits[i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx];
+        } else {
+            in = ((uint32_t*)digits[i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx];
+        }
+        uint64_t add1;
+        uint64_t add2;
+        if (ISU64(primeid)) {
+            add1 = modmult<ALGO_BARRETT>(
+                in, ((uint64_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+            add2 = modmult<ALGO_BARRETT>(
+                in, ((uint64_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+        } else {
+            add1 = modmult<ALGO_BARRETT>(
+                in, (uint64_t)((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+            add2 = modmult<ALGO_BARRETT>(
+                in, (uint64_t)((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+        }
 
         if (i == 0) {
             aux1 = add1;
@@ -286,11 +307,21 @@ __global__ void fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** so
     }
 
     if (primeid < C_.L) {
-        ((uint64_t*)out1[pos_dec])[idx] = aux1;
-        ((uint64_t*)out2[pos_dec])[idx] = aux2;
+        if (ISU64(primeid)) {
+            ((uint64_t*)out1[pos_dec])[idx] = aux1;
+            ((uint64_t*)out2[pos_dec])[idx] = aux2;
+        } else {
+            ((uint32_t*)out1[pos_dec])[idx] = (uint32_t)aux1;
+            ((uint32_t*)out2[pos_dec])[idx] = (uint32_t)aux2;
+        }
     } else {
-        ((uint64_t*)sout1[primeid - C_.L])[idx] = aux1;
-        ((uint64_t*)sout2[primeid - C_.L])[idx] = aux2;
+        if (ISU64(primeid)) {
+            ((uint64_t*)sout1[primeid - C_.L])[idx] = aux1;
+            ((uint64_t*)sout2[primeid - C_.L])[idx] = aux2;
+        } else {
+            ((uint32_t*)sout1[primeid - C_.L])[idx] = (uint32_t)aux1;
+            ((uint32_t*)sout2[primeid - C_.L])[idx] = (uint32_t)aux2;
+        }
     }
 }
 
@@ -1434,6 +1465,10 @@ __global__ void binomialMult_(const __grid_constant__ int primeid_init, void** c
 
         T aux2 = modmult<ALGO_BARRETT>(c1in, d1in, primeid);
         ((T*)(c2[blockIdx.y]))[idx] = aux2;
+        if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y < 2) {
+            printf("[diag_binom32] lid=%d c0in=%u d0in=%u c1in=%u d1in=%u -> aux0=%u aux1=%u aux2=%u p=%u\n",
+                   blockIdx.y, c0in, d0in, c1in, d1in, aux0, aux1, aux2, C_.primes[primeid]);
+        }
     }
 }
 

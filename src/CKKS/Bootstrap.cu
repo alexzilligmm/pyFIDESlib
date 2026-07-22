@@ -286,6 +286,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
             std::cout << "mult: " << constantEvalMult << std::endl;
         ctxt.multScalar(constantEvalMult, false);
 
+            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER multScalar(constantEvalMult) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
         if constexpr (PRINT) {
             std::cout << "Raise scaled ";
             for (auto& j : ctxt.c0.GPU) {
@@ -306,6 +307,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     if (ctxt.NoiseLevel == 2) {
         ctxt.rescale();
+            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER rescale(NoiseLevel==2) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
     }
 
     btsStageProbe("pre-CtS", ctxt);
@@ -523,6 +525,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                 CudaCheckErrorMod;
             }
             ctxt.multScalar(adjustmentFactor);
+            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER multScalar(adj) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
             if constexpr (PRINT) {
                 cudaDeviceSynchronize();
                 std::cout << "Initial ";

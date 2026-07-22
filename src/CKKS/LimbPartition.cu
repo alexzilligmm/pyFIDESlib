@@ -240,7 +240,7 @@ void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbI
                 offset += cc.N;
             } else
                 limbs.emplace_back(
-                    Limb<uint32_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, auxptrs ? 1 : 0));
+                    Limb<uint32_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, !auxptrs));
             cpu_ptr[i - limbs_size] = {&(std::get<U32>(limbs.back()).v.data)[0]};
             cpu_auxptr[i - limbs_size] = {&(std::get<U32>(limbs.back()).aux.data)[0]};
         }
@@ -275,6 +275,7 @@ void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbI
     }
     if (size > 0) {
         if (!noptr) {
+        if (limbs_size + size > ptrs.size) { std::cerr << "PTRS BOUNDS ERROR: ptrs.size=" << ptrs.size << " limbs_size=" << limbs_size << " size=" << size << " total=" << (limbs_size + size) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
             cudaMemcpyAsync(ptrs.data + limbs_size, cpu_ptr.data(), size * sizeof(void*), cudaMemcpyHostToDevice,
                             s.ptr());
             CudaCheckErrorModNoSync;
