@@ -35,6 +35,12 @@ endif()
 # Option to auto-install patched OpenFHE.
 option(FIDESLIB_INSTALL_OPENFHE "Set ON to install a patched version of OpenFHE." OFF)
 
+# NATIVEINT backend width of the auto-installed OpenFHE. 32 additionally applies
+# deps/openfhe-1.4.2-native32.patch (the CKKS encode fix the 32-bit build needs).
+set(FIDESLIB_OPENFHE_NATIVE_SIZE "64" CACHE STRING
+	"NATIVE_SIZE of the OpenFHE installed by FIDESLIB_INSTALL_OPENFHE (32 or 64).")
+set_property(CACHE FIDESLIB_OPENFHE_NATIVE_SIZE PROPERTY STRINGS 32 64)
+
 # Option to compile the benchmark suite.
 option(FIDESLIB_COMPILE_BENCHMARKS "Set ON to compile the FIDESlib benchmark suite." ON)
 
@@ -170,7 +176,9 @@ if (FIDESLIB_INSTALL_OPENFHE)
 	if (NOT EXISTS "${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
 		message(FATAL_ERROR "OpenFHE build script not found at ${FIDESLIB_OPENFHE_BUILD_SCRIPT}")
 	endif()
+	message(STATUS "Installing patched OpenFHE (NATIVE_SIZE=${FIDESLIB_OPENFHE_NATIVE_SIZE})")
 	execute_process(COMMAND "${FIDESLIB_OPENFHE_BUILD_SCRIPT}" "${OPENFHE_INSTALL_PREFIX}"
+					"${FIDESLIB_OPENFHE_NATIVE_SIZE}"
 					WORKING_DIRECTORY "${FIDESLIB_DEPS_DIR}"
 					COMMAND_ERROR_IS_FATAL ANY)
 endif()
