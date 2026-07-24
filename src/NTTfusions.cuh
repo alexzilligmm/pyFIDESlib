@@ -35,8 +35,8 @@ __device__ __forceinline__ void mult_and_save_fusion(char* buffer, const int log
             in2[1] = modmult<algo>(c1_[1], c0tilde_[1], primeid);
             in2[0] = modadd(in2[0], modmult<algo>(c1tilde_[0], c0_[0], primeid), primeid);
             in2[1] = modadd(in2[1], modmult<algo>(c1tilde_[1], c0_[1], primeid), primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
                                                                      /*
             if (OFFSET_2T(i) == 0 && primeid == 0)
                 printf("Mult and save c1 %lu\n", in2[0]);
@@ -52,8 +52,8 @@ __device__ __forceinline__ void mult_and_save_fusion(char* buffer, const int log
 
             in2[0] = modmult<algo>(c0_[0], c0tilde_[0], primeid);
             in2[1] = modmult<algo>(c0_[1], c0tilde_[1], primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
                                                                      /*
             if (OFFSET_2T(i) == 0 && primeid == 0)
                 printf("Mult and save c0 %lu\n", in2[0]);
@@ -65,6 +65,46 @@ __device__ __forceinline__ void mult_and_save_fusion(char* buffer, const int log
             ((int4*)res0)[OFFSET_2T(i)] = ((int4*)&in2)[0];
 
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            // res1 = P * (c0 * c1' + c1 * c0') + kska * c1 * c1'; res0 = P * c0*c0' + kskb * c1*c1'
+            c1_[0] = c1[OFFSET_T(i)];
+            c1_[1] = c1[OFFSET_T(i) | 1];
+            c1tilde_[0] = c1tilde[OFFSET_T(i)];
+            c1tilde_[1] = c1tilde[OFFSET_T(i) | 1];
+            in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
+            in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
+            A(i)[j] = in1[0];
+            A(i)[j + 1] = in1[1];
+
+            c0_[0] = c0[OFFSET_T(i)];
+            c0_[1] = c0[OFFSET_T(i) | 1];
+            c0tilde_[0] = c0tilde[OFFSET_T(i)];
+            c0tilde_[1] = c0tilde[OFFSET_T(i) | 1];
+
+            in2[0] = modmult<algo>(c1_[0], c0tilde_[0], primeid);
+            in2[1] = modmult<algo>(c1_[1], c0tilde_[1], primeid);
+            in2[0] = modadd(in2[0], modmult<algo>(c1tilde_[0], c0_[0], primeid), primeid);
+            in2[1] = modadd(in2[1], modmult<algo>(c1tilde_[1], c0_[1], primeid), primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modadd(in2[0], modmult<algo>(in1[0], ksk2[0], primeid), primeid);
+            in2[1] = modadd(in2[1], modmult<algo>(in1[1], ksk2[1], primeid), primeid);
+            res1[OFFSET_T(i)] = in2[0];
+            res1[OFFSET_T(i) | 1] = in2[1];
+
+            in2[0] = modmult<algo>(c0_[0], c0tilde_[0], primeid);
+            in2[1] = modmult<algo>(c0_[1], c0tilde_[1], primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+            in2[0] = modadd(modmult<algo>(in1[0], ksk1[0], primeid), in2[0], primeid);
+            in2[1] = modadd(modmult<algo>(in1[1], ksk1[1], primeid), in2[1], primeid);
+            res0[OFFSET_T(i)] = in2[0];
+            res0[OFFSET_T(i) | 1] = in2[1];
         }
     }
 }
@@ -90,8 +130,8 @@ __device__ __forceinline__ void rotate_and_save_fusion(char* buffer, const int l
 
             ((int4*)c0_)[0] = ((int4*)c0)[OFFSET_2T(i)];
 
-            in2[0] = modmult<algo>(c0_[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(c0_[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(c0_[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(c0_[1], (T)C_.P[primeid], primeid);  // TODO shoup
 
             ((int4*)ksk1)[0] = ((int4*)kskb)[OFFSET_2T(i)];
             in2[0] = modadd(modmult<algo>(c1_[0], ksk1[0], primeid), in2[0], primeid);
@@ -99,6 +139,31 @@ __device__ __forceinline__ void rotate_and_save_fusion(char* buffer, const int l
 
             ((int4*)res0)[OFFSET_2T(i)] = ((int4*)&in2)[0];
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            c1_[0] = c1[OFFSET_T(i)];
+            c1_[1] = c1[OFFSET_T(i) | 1];
+            A(i)[j] = c1_[0];
+            A(i)[j + 1] = c1_[1];
+
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modmult<algo>(c1_[0], ksk2[0], primeid);
+            in2[1] = modmult<algo>(c1_[1], ksk2[1], primeid);
+            res1[OFFSET_T(i)] = in2[0];
+            res1[OFFSET_T(i) | 1] = in2[1];
+
+            c0_[0] = c0[OFFSET_T(i)];
+            c0_[1] = c0[OFFSET_T(i) | 1];
+
+            in2[0] = modmult<algo>(c0_[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(c0_[1], (T)C_.P[primeid], primeid);
+
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+            in2[0] = modadd(modmult<algo>(c1_[0], ksk1[0], primeid), in2[0], primeid);
+            in2[1] = modadd(modmult<algo>(c1_[1], ksk1[1], primeid), in2[1], primeid);
+            res0[OFFSET_T(i)] = in2[0];
+            res0[OFFSET_T(i) | 1] = in2[1];
         }
     }
 }
@@ -124,8 +189,8 @@ __device__ __forceinline__ void square_and_save_fusion(char* buffer, const int l
             ((int4*)c0_)[0] = ((int4*)c0)[OFFSET_2T(i)];
             in2[0] = modmult<algo>(c0_[0], c0_[0], primeid);
             in2[1] = modmult<algo>(c0_[1], c0_[1], primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
             ((int4*)ksk1)[0] = ((int4*)kskb)[OFFSET_2T(i)];
 
             in2[0] = modadd(modmult<algo>(in1[0], ksk1[0], primeid), in2[0], primeid);
@@ -137,13 +202,49 @@ __device__ __forceinline__ void square_and_save_fusion(char* buffer, const int l
             in2[1] = modmult<algo>(c1_[1], c0_[1], primeid);
             in2[0] = modadd(in2[0], in2[0], primeid);
             in2[1] = modadd(in2[1], in2[1], primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
             in2[0] = modadd(modmult<algo>(in1[0], ksk2[0], primeid), in2[0], primeid);
             in2[1] = modadd(modmult<algo>(in1[1], ksk2[1], primeid), in2[1], primeid);
             ((int4*)res1)[OFFSET_2T(i)] = ((int4*)&in2)[0];
 
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            c1_[0] = c1[OFFSET_T(i)];
+            c1_[1] = c1[OFFSET_T(i) | 1];
+
+            in1[0] = modmult<algo>(c1_[0], c1_[0], primeid);
+            in1[1] = modmult<algo>(c1_[1], c1_[1], primeid);
+            A(i)[j] = in1[0];
+            A(i)[j + 1] = in1[1];
+
+            c0_[0] = c0[OFFSET_T(i)];
+            c0_[1] = c0[OFFSET_T(i) | 1];
+            in2[0] = modmult<algo>(c0_[0], c0_[0], primeid);
+            in2[1] = modmult<algo>(c0_[1], c0_[1], primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+
+            in2[0] = modadd(modmult<algo>(in1[0], ksk1[0], primeid), in2[0], primeid);
+            in2[1] = modadd(modmult<algo>(in1[1], ksk1[1], primeid), in2[1], primeid);
+            res0[OFFSET_T(i)] = in2[0];
+            res0[OFFSET_T(i) | 1] = in2[1];
+
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modmult<algo>(c1_[0], c0_[0], primeid);
+            in2[1] = modmult<algo>(c1_[1], c0_[1], primeid);
+            in2[0] = modadd(in2[0], in2[0], primeid);
+            in2[1] = modadd(in2[1], in2[1], primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+            in2[0] = modadd(modmult<algo>(in1[0], ksk2[0], primeid), in2[0], primeid);
+            in2[1] = modadd(modmult<algo>(in1[1], ksk2[1], primeid), in2[1], primeid);
+            res1[OFFSET_T(i)] = in2[0];
+            res1[OFFSET_T(i) | 1] = in2[1];
+
         }
     }
 }
@@ -175,8 +276,8 @@ __device__ __forceinline__ void mult_and_acc_fusion(char* buffer, const int logB
             in2[1] = modmult<algo>(c1_[1], c0tilde_[1], primeid);
             in2[0] = modadd(in2[0], modmult<algo>(c1tilde_[0], c0_[0], primeid), primeid);
             in2[1] = modadd(in2[1], modmult<algo>(c1tilde_[1], c0_[1], primeid), primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
                                                                      /*
             if (OFFSET_2T(i) == 0 && primeid == 0)
                 printf("Mult and save c1 %lu\n", in2[0]);
@@ -196,8 +297,8 @@ __device__ __forceinline__ void mult_and_acc_fusion(char* buffer, const int logB
 
             in2[0] = modmult<algo>(c0_[0], c0tilde_[0], primeid);
             in2[1] = modmult<algo>(c0_[1], c0tilde_[1], primeid);
-            in2[0] = modmult<algo>(in2[0], C_.P[primeid], primeid);  // TODO shoup
-            in2[1] = modmult<algo>(in2[1], C_.P[primeid], primeid);  // TODO shoup
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);  // TODO shoup
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);  // TODO shoup
                                                                      /*
             if (OFFSET_2T(i) == 0 && primeid == 0)
                 printf("Mult and save c0 %lu\n", in2[0]);
@@ -211,6 +312,56 @@ __device__ __forceinline__ void mult_and_acc_fusion(char* buffer, const int logB
             in2[1] = modadd(in2[1], r0[1], primeid);
             ((int4*)res0)[OFFSET_2T(i)] = ((int4*)&in2)[0];
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            // Accumulating variant: read res0/res1, add, write back.
+            c1_[0] = c1[OFFSET_T(i)];
+            c1_[1] = c1[OFFSET_T(i) | 1];
+            c1tilde_[0] = c1tilde[OFFSET_T(i)];
+            c1tilde_[1] = c1tilde[OFFSET_T(i) | 1];
+            in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
+            in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
+            A(i)[j] = in1[0];
+            A(i)[j + 1] = in1[1];
+
+            c0_[0] = c0[OFFSET_T(i)];
+            c0_[1] = c0[OFFSET_T(i) | 1];
+            c0tilde_[0] = c0tilde[OFFSET_T(i)];
+            c0tilde_[1] = c0tilde[OFFSET_T(i) | 1];
+
+            in2[0] = modmult<algo>(c1_[0], c0tilde_[0], primeid);
+            in2[1] = modmult<algo>(c1_[1], c0tilde_[1], primeid);
+            in2[0] = modadd(in2[0], modmult<algo>(c1tilde_[0], c0_[0], primeid), primeid);
+            in2[1] = modadd(in2[1], modmult<algo>(c1tilde_[1], c0_[1], primeid), primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modadd(in2[0], modmult<algo>(in1[0], ksk2[0], primeid), primeid);
+            in2[1] = modadd(in2[1], modmult<algo>(in1[1], ksk2[1], primeid), primeid);
+
+            r1[0] = res1[OFFSET_T(i)];
+            r1[1] = res1[OFFSET_T(i) | 1];
+            in2[0] = modadd(in2[0], r1[0], primeid);
+            in2[1] = modadd(in2[1], r1[1], primeid);
+            res1[OFFSET_T(i)] = in2[0];
+            res1[OFFSET_T(i) | 1] = in2[1];
+
+            in2[0] = modmult<algo>(c0_[0], c0tilde_[0], primeid);
+            in2[1] = modmult<algo>(c0_[1], c0tilde_[1], primeid);
+            in2[0] = modmult<algo>(in2[0], (T)C_.P[primeid], primeid);
+            in2[1] = modmult<algo>(in2[1], (T)C_.P[primeid], primeid);
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+            in2[0] = modadd(modmult<algo>(in1[0], ksk1[0], primeid), in2[0], primeid);
+            in2[1] = modadd(modmult<algo>(in1[1], ksk1[1], primeid), in2[1], primeid);
+
+            r0[0] = res0[OFFSET_T(i)];
+            r0[1] = res0[OFFSET_T(i) | 1];
+            in2[0] = modadd(in2[0], r0[0], primeid);
+            in2[1] = modadd(in2[1], r0[1], primeid);
+            res0[OFFSET_T(i)] = in2[0];
+            res0[OFFSET_T(i) | 1] = in2[1];
         }
     }
 }
@@ -314,6 +465,20 @@ __device__ __forceinline__ void ksk_dot_fusion(char* buffer, const int logBD, co
             ((int4*)c0)[OFFSET_2T(i)] = ((int4*)&in1)[0];
 
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            c1[OFFSET_T(i)] = in2[0];
+            c1[OFFSET_T(i) | 1] = in2[1];
+
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            c0[OFFSET_T(i)] = in1[0];
+            c0[OFFSET_T(i) | 1] = in1[1];
         }
     }
 }
@@ -346,6 +511,28 @@ __device__ __forceinline__ void ksk_dot_acc_fusion(char* buffer, const int logBD
             in1[1] = modadd(in1[1], r0[1], primeid);
             ((int4*)res0)[OFFSET_2T(i)] = ((int4*)&in1)[0];
         } else {
+            // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
+            ksk2[0] = kska[OFFSET_T(i)];
+            ksk2[1] = kska[OFFSET_T(i) | 1];
+            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            r1[0] = res1[OFFSET_T(i)];
+            r1[1] = res1[OFFSET_T(i) | 1];
+            in2[0] = modadd(in2[0], r1[0], primeid);
+            in2[1] = modadd(in2[1], r1[1], primeid);
+            res1[OFFSET_T(i)] = in2[0];
+            res1[OFFSET_T(i) | 1] = in2[1];
+
+            ksk1[0] = kskb[OFFSET_T(i)];
+            ksk1[1] = kskb[OFFSET_T(i) | 1];
+            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            r0[0] = res0[OFFSET_T(i)];
+            r0[1] = res0[OFFSET_T(i) | 1];
+            in1[0] = modadd(in1[0], r0[0], primeid);
+            in1[1] = modadd(in1[1], r0[1], primeid);
+            res0[OFFSET_T(i)] = in1[0];
+            res0[OFFSET_T(i) | 1] = in1[1];
         }
     }
 }
@@ -468,7 +655,7 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
 
         T aux_3 = ((T*)G_->inv_psi_no[primeid])[(tid & 1) * (gridDim.x * M) + M * blockIdx.x];
 
-        aux_3 = modmult<ALGO_SHOUP>(aux_3, C_.N, primeid, C_.N_shoup[primeid]);
+        aux_3 = modmult<ALGO_SHOUP>(aux_3, (T)C_.N, primeid, (T)C_.N_shoup[primeid]);
 
         T aux;
         if constexpr (algo == ALGO_SHOUP) {

@@ -70,6 +70,13 @@ uint64_t unity_root(const uint64_t q, const uint64_t order) {
 
 uint64_t shoup_precomp(uint64_t val, int primeid, Constants& host_constants_) {
     Constants& host_constants = host_constants_;
+    // The Shoup constant must match the LIMB WIDTH of prime `primeid`: Shoup_mult_32
+    // expects val*2^32/p, Shoup_mult_64 expects val*2^64/p. Hard-coding the 2^64 form and
+    // then reading it as uint32_t for a U32 prime yields garbage, so every moddown/keyswitch
+    // Shoup constant (P_inv_shoup, ModDown_*_shoup, N_shoup, root_shoup, ...) corrupted
+    // mult/rotation on NATIVEINT=32. Mirror the width-aware psi_shoup precompute below.
+    if (!HISU64(primeid))
+        return (uint64_t)((val) << 1) * (1ul << 31) / hC_.primes[primeid];
     return (__uint128_t)((val) << 1) * (1ul << 63) / hC_.primes[primeid];
 }
 

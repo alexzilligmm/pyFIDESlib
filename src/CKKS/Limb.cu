@@ -26,8 +26,14 @@ Limb<T>::Limb(ContextData& context, const int id, Stream& stream, const int prim
     : cc(context),
       primeid(primeid),
       stream(stream /*StartStream(primeid, cc.L + cc.K + 1)*/),
-      v(stream, context.N, cc.GPUid[id]),
-      aux(stream, constant ? 0 : context.N, cc.GPUid[id]),
+      // U32 limbs over-allocate to the uint64-slot size (2N elements, alloc only — logical size
+      // stays N): the U32 NTT/INTT tiling (kernel M=8, same byte-tile as u64 M=4) sweeps
+      // [0, 2N) u32 per row, so a dense N-element allocation lets the [N, 2N) tail clobber the
+      // pool neighbor (this corrupted the densely-packed keyswitch DIGIT limbs; ct limbs only
+      // survived because their interleaved aux allocations absorbed the tail).
+      v(stream, context.N, cc.GPUid[id], nullptr, sizeof(T) == 4 ? 2 * context.N : context.N),
+      aux(stream, constant ? 0 : context.N, cc.GPUid[id], nullptr,
+          constant ? 0 : (sizeof(T) == 4 ? 2 * context.N : context.N)),
       id(id),
       raw(!cc.isValidPrimeId(primeid)) {
     // TODO: CryptoContext limb tracking.

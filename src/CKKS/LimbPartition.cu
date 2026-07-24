@@ -1,6 +1,7 @@
 //
 // Created by carlosad on 27/04/24.
 //
+#include <atomic>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -389,7 +390,7 @@ template <ALGO algo, NTT_MODE mode>
 void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields, std::vector<LimbImpl>& limb,
                              VectorGPU<void*>& limbptr, VectorGPU<void*>& auxptr, ContextData& cc,
                              const int primeid_init, const int limbsize) {
-    constexpr int M = 4;
+    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
     const dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
     const dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
@@ -450,7 +451,7 @@ template <ALGO algo, INTT_MODE mode>
 void LimbPartition::ApplyINTT(int batch, LimbPartition::INTT_fusion_fields fields, std::vector<LimbImpl>& limb,
                               VectorGPU<void*>& limbptr, VectorGPU<void*>& auxptr, ContextData& cc,
                               const int primeid_init, const int limbsize) {
-    constexpr int M = 4;
+    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
     dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN - (cc.logN > 13 ? 0 : 0)) / 2 - 1))};
     dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1 + (cc.logN > 13 ? 0 : 0)) / 2 - 1))};
@@ -619,7 +620,7 @@ void LimbPartition::rescale() {
     if (aux_size == 0) {
         {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -650,7 +651,7 @@ void LimbPartition::rescale() {
         s.wait(auxLimbs.getS());
         if (limbsize > 0) {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -767,7 +768,7 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
         s_d.wait(s);
 
         {
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1420,7 +1421,7 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
             }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1461,7 +1462,7 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
         }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1524,7 +1525,7 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
                 if (size <= 0)
                     break;
 
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1611,7 +1612,7 @@ void LimbPartition::rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
             }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1652,7 +1653,7 @@ void LimbPartition::rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
         }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1713,7 +1714,7 @@ void LimbPartition::rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
                 if (size <= 0)
                     break;
 
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1790,7 +1791,7 @@ void LimbPartition::squareModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
             }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1831,7 +1832,7 @@ void LimbPartition::squareModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
         }
 
         if constexpr (1) {  // Batched
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1892,7 +1893,7 @@ void LimbPartition::squareModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
                 if (size <= 0)
                     break;
 
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1973,6 +1974,25 @@ void LimbPartition::moddown(LimbPartition& auxLimbs, bool ntt, bool free_special
 
         s.wait(auxLimbs.getS());
 
+        // n32 debug: standalone-moddown intermediates for the rotation-path offline verifier
+        // (post-INTT specials in coeff domain -> ModDown2 conv row -> fused-NTT output).
+        static std::atomic<int> md_dump_count{0};
+        static const bool md_trace_full = std::getenv("FHE_KS_TRACE_FULL") != nullptr;
+        const bool md_dump = md_trace_full && limbsize == cc.L + 1 && md_dump_count < 2;
+        if (md_dump) {
+            md_dump_count++;
+            cudaDeviceSynchronize();
+            std::cout << "MD_META call=" << (int)md_dump_count << " limbsize=" << limbsize << std::endl;
+            for (size_t k2 = 0; k2 < SPECIALlimb.size(); ++k2) {
+                std::cout << "MDFULL intt_s" << k2 << ": ";
+                SWITCH(SPECIALlimb[k2], printThisLimb(cc.N));
+                std::cout << std::endl;
+            }
+            std::cout << "MDFULL in_l0: ";
+            SWITCH(limb[0], printThisLimb(cc.N));
+            std::cout << std::endl;
+        }
+
         {
             dim3 blockSize{64, 2};  // blockSize.x * blockSize.y * blockSize.z <= 1024, blockSize.x a multiple of 32
 
@@ -1981,6 +2001,12 @@ void LimbPartition::moddown(LimbPartition& auxLimbs, bool ntt, bool free_special
 
             ModDown2<algo><<<gridSize, blockSize, shared_bytes, s.ptr()>>>(
                 auxLimbs.limbptr.data, limbsize, SPECIALlimbptr.data, PARTITION(id, 0), getGlobals());
+        }
+        if (md_dump) {
+            cudaDeviceSynchronize();
+            std::cout << "MDFULL conv_l0: ";
+            SWITCH(auxLimbs.limb[0], printThisLimb(cc.N));
+            std::cout << std::endl;
         }
 
         if constexpr (PRINT) {
@@ -1995,6 +2021,13 @@ void LimbPartition::moddown(LimbPartition& auxLimbs, bool ntt, bool free_special
         }
         if (limbsize > 0)
             NTT<algo, NTT_MODDOWN>(cc.batch, false, NTT_fusion_fields{.op2 = &auxLimbs});
+
+        if (md_dump) {
+            cudaDeviceSynchronize();
+            std::cout << "MDFULL out_l0: ";
+            SWITCH(limb[0], printThisLimb(cc.N));
+            std::cout << std::endl;
+        }
 
         if constexpr (PRINT) {
             std::cout << "Output ModDown after sub mult.";
@@ -2107,7 +2140,7 @@ void LimbPartition::modupInto(LimbPartition& partition, LimbPartition& aux_parti
         if (size <= 0)
             break;
 
-        constexpr int M = 4;
+        const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
         dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
         dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};

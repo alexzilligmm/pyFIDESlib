@@ -76,7 +76,7 @@ void LimbPartition::rescaleMGPU() {
             //SWITCH(top, INTT<ALGO_SHOUP>());
             {
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -174,7 +174,7 @@ void LimbPartition::rescaleMGPU() {
         {
             stream.wait(s);
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             const dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
             const dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
@@ -236,7 +236,7 @@ void LimbPartition::doubleRescaleMGPU(LimbPartition& partition) {
                 if (1) {
                     stream[i]->wait(part[i]->s);
                     constexpr ALGO algo = ALGO_SHOUP;
-                    constexpr int M = 4;
+                    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                     dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                     dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -352,7 +352,7 @@ void LimbPartition::doubleRescaleMGPU(LimbPartition& partition) {
         stream[j]->wait(part[j]->s);
         {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             const dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
             const dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
@@ -365,7 +365,6 @@ void LimbPartition::doubleRescaleMGPU(LimbPartition& partition) {
             for (int i = 0; i < size; i += batch) {
                 uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(size - i));
 
-        fprintf(stderr, "[diag_inner] step=A1 INTT_first\n"); fflush(stderr);
                 NTT_<false, algo, mode><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst, bytesFirst,
                                           stream[j]->ptr()>>>(getGlobals(), ptr[j]->data, PARTITION(part[j]->id, i),
                                                               part[j]->auxptr.data + i, nullptr, *part[j]->level);
@@ -444,7 +443,6 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
 
         if (num_special + num_limbs > 0) {
             cudaMemcpyAsync(digits.data, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
-        fprintf(stderr, "[diag_inner] step=A2 KSK_dotKSK\n"); fflush(stderr);
             fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, 0, s.ptr()>>>(
                 out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits.data,
                 i, id, num_special, 0);
@@ -565,6 +563,41 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
             digits.data + offset_output_c1s, digits.data + offset_output_c0, digits.data + offset_output_c0s, n,
             (int*)(digits.data + offset_indexes), digits.data, i, id, num_special, 0, src_c0.SPECIALlimbptr.data,
             c0_modup);
+
+        // n32 debug: full-vector dumps of the hoisted-rotation dot inputs/outputs at prime q0,
+        // for offline per-position verification (dot+automorph, then the moddown chain).
+        static std::atomic<int> rot_dump_count{0};
+        static const bool rot_trace_full = std::getenv("FHE_KS_TRACE_FULL") != nullptr;
+        if (rot_trace_full && n == 1 && cc.GPUid.size() == 1 && *level == cc.L && rot_dump_count++ < 1) {
+            // level filter + one-shot: only the FIRST full-chain (test) rotation — earlier
+            // unfiltered dumps flooded the log (~600MB).
+            cudaDeviceSynchronize();
+            std::cout << "ROT_META idx=" << indexes[0] << " level=" << *level
+                      << " num_special=" << num_special << " c0_modup=" << c0_modup << std::endl;
+            auto dump1 = [&](const std::string& tag, const LimbImpl& l) {
+                std::cout << "ROTFULL " << tag << ": ";
+                SWITCH(l, printThisLimb(cc.N));
+                std::cout << std::endl;
+            };
+            dump1("srcc1_l0", src_c1.limb[0]);
+            dump1("srcc0_l0", src_c0.limb[0]);
+            for (size_t d = 1; d < src.DIGITlimb.size(); ++d)
+                if (src.DIGITlimb[d].size() > (size_t)num_special)
+                    dump1("digit_q0_d" + std::to_string(d), src.DIGITlimb[d][num_special]);
+            for (size_t d = 1; d < ksk_a[0]->DIGITlimb.size(); ++d)
+                if (ksk_a[0]->DIGITlimb[d].size() > (size_t)num_special) {
+                    dump1("kska_q0_d" + std::to_string(d), ksk_a[0]->DIGITlimb[d][num_special]);
+                    dump1("kskb_q0_d" + std::to_string(d), ksk_b[0]->DIGITlimb[d][num_special]);
+                }
+            dump1("kska_q0_d0", ksk_a[0]->DECOMPlimb[0][0]);
+            dump1("kskb_q0_d0", ksk_b[0]->DECOMPlimb[0][0]);
+            dump1("out_c1_l0", c1[0]->limb[0]);
+            dump1("out_c0_l0", c0[0]->limb[0]);
+            for (size_t k2 = 0; k2 < c1[0]->SPECIALlimb.size(); ++k2)
+                dump1("out_c1_s" + std::to_string(k2), c1[0]->SPECIALlimb[k2]);
+            for (size_t k2 = 0; k2 < c0[0]->SPECIALlimb.size(); ++k2)
+                dump1("out_c0_s" + std::to_string(k2), c0[0]->SPECIALlimb[k2]);
+        }
     }
 
     src_c1.getS().wait(s);
@@ -599,13 +632,15 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
     cudaSetDevice(device);
 
-    constexpr bool PRINT = false;
-    bool SELECT = id == 1;
+    // n32 debug: runtime keyswitch stage-trace (FHE_KS_TRACE=1). The stage prints below are
+    // per-coefficient checkable in Python: every conversion between them is element-wise.
+    static const bool PRINT = std::getenv("FHE_KS_TRACE") != nullptr;
+    bool SELECT = true;
     LimbPartition& c1 = *this;
     int num_d = 0;
     {
         int start = 0;
-        if constexpr (PRINT)
+        if (PRINT)
             std::cout << "/** Compute how many digits are used at this level*/" << std::endl;
         while (num_d < cc.dnum && start < *level + 1) {
             start += DECOMPmeta.at(num_d).size();
@@ -616,7 +651,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     while (limb_size < meta.size() && meta[limb_size].id <= *level)
         limb_size++;
 
-    if constexpr (PRINT) {
+    if (PRINT) {
         if (SELECT) {
             cudaDeviceSynchronize();
             std::cout << "GPU: " << id << "Input: ";
@@ -629,7 +664,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         }
     }
 
-    if constexpr (PRINT)
+    if (PRINT)
         std::cout
             << "/** We try to pipeline the computation of each digit first, splitting independent groups of limbs*/"
             << std::endl;
@@ -637,7 +672,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     const int digits_per_it =
         MEMCPY_PEER ? 1 : 1 /*num_d*/;  //cc.logN <= 15 ? num_d : cc.logN == 16 ? std::max((num_d + 1) / 2, 1) : 1;
 
-    if constexpr (PRINT)
+    if (PRINT)
         std::cout << "GPU " << id << "compute " << num_d << " digits" << std::endl;
 
     std::vector<void**> h_digits(cc.dnum * 6, nullptr);
@@ -821,7 +856,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         while (start_d + size_d < limb_size && meta[start_d + size_d].digit < d + ds)
             size_d++;
 
-        if constexpr (PRINT)
+        if (PRINT)
             if (SELECT) {
                 std::cout << "GPU " << id << " for digits " << d << ":" << d + digits_per_it << " INTT " << size_d
                           << " limbs starting at limb " << start_d << std::endl;
@@ -829,11 +864,11 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
         Stream& stream = cc.digitStream.at(d).at(id);
         stream.wait(s);
-        if constexpr (PRINT)
+        if (PRINT)
             std::cout << "/** Intt */" << std::endl;
         if (size_d > 0) {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -859,7 +894,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             CudaCheckErrorModNoSync;
         }
 
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "Out INTT: ";
@@ -874,7 +909,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             }
         }
 
-        if constexpr (PRINT)
+        if (PRINT)
             std::cout << "/** Communicate */" << std::endl;
         {
 
@@ -936,7 +971,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                             while (start_d_i + size_d_i < limb_size_i &&
                                    cc.meta[i][start_d_i + size_d_i].digit < d + ds)
                                 size_d_i++;
-                            if constexpr (PRINT)
+                            if (PRINT)
                                 if (SELECT) {
                                     std::cout << "GPU " << i << " for digits " << d << ":" << d + digits_per_it
                                               << " communicate " << size_d_i << " limbs" << std::endl;
@@ -1051,7 +1086,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                         while (start_d_i + size_d_i < limb_size_i && cc.meta[i][start_d_i + size_d_i].digit < d + ds)
                             size_d_i++;
 
-                        if constexpr (PRINT)
+                        if (PRINT)
                             if (SELECT) {
                                 std::cout << "GPU " << i << " for digits " << d << ":" << d + digits_per_it
                                           << " communicate " << size_d_i << " limbs" << std::endl;
@@ -1075,7 +1110,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     }
 
     CudaCheckErrorModNoSync;
-    if constexpr (PRINT) {
+    if (PRINT) {
         if (SELECT) {
             cudaDeviceSynchronize();
             std::cout << "GPU: " << id << "Out INTT after communicate: ";
@@ -1084,6 +1119,13 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     std::cout << DECOMPmeta[j][i].id;
                     SWITCH(DECOMPlimb[j][i], printThisLimb(2));
                 }
+                std::cout << std::endl;
+            }
+            // Full-vector dump of limb 0 (FHE_KS_TRACE_FULL=1): lets the offline analyzer
+            // identify the U32 INTT's output permutation/scaling vs true coefficients.
+            if (std::getenv("FHE_KS_TRACE_FULL")) {
+                std::cout << "GPUFULL INTT limb0: ";
+                SWITCH(DECOMPlimb[0][0], printThisLimb(cc.N));
                 std::cout << std::endl;
             }
             cudaDeviceSynchronize();
@@ -1104,7 +1146,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
         Stream& stream = cc.digitStream.at(d).at(id);
 
-        if constexpr (PRINT)
+        if (PRINT)
             std::cout << "/** Conv */" << std::endl;
 
         for (int d_ = d; d_ < d + ds; ++d_) {
@@ -1123,7 +1165,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 exit(-1);
             }
 
-            if constexpr (PRINT)
+            if (PRINT)
                 if (SELECT) {
                     std::cout << cc.precom.constants[id].num_primeid_digit_to[d_][*level]
                               << "<- num_prime_id_digit_to: " << d_ << std::endl;
@@ -1134,17 +1176,16 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             dim3 gridSize{(uint32_t)cc.N / blockSize.x};
             int shared_bytes = sizeof(uint64_t) * (size /*DECOMPlimb[d].size()*/) * blockSize.x;
 
-        fprintf(stderr, "[diag_inner] step=B1 DecompAndModUpConv\n"); fflush(stderr);
             DecompAndModUpConv<ALGO_SHOUP><<<gridSize, blockSize, shared_bytes, stream1.ptr()>>>(
                 DECOMPlimbptr[d_].data, *level + 1, DIGITlimbptr[d_].data, digitid[d_], getGlobals());
 
             cc.digitStream2.at(d_).at(id).wait(stream1); /** Get dependency for limb NTTs later */
-            if constexpr (PRINT)
+            if (PRINT)
                 std::cout << "/** NTT special limbs */" << std::endl;
             {
                 uint32_t size = cc.splitSpecialMeta.at(id).size();
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1168,7 +1209,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     }
     CudaCheckErrorModNoSync;
 
-    if constexpr (PRINT) {
+    if (PRINT) {
         if (SELECT) {
             cudaDeviceSynchronize();
             std::cout << "GPU: " << id << "Out ModUp after NTT specials: ";
@@ -1185,11 +1226,117 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         CudaCheckErrorModNoSync;
     }
     CudaCheckErrorModNoSync;
-    if constexpr (PRINT)
+    if (PRINT)
         std::cout << "/** We ksk only special limbs and start ModDown as soon as possible */" << std::endl;
 
     CudaCheckErrorModNoSync;
-    if constexpr (PRINT)
+    if (PRINT && SELECT) {
+        // n32 debug: dump the KSK device limbs (DIGIT part = extended-basis rows the dot reads
+        // for non-native digits; DECOMP part backs ksk.limbptr for the native-digit rows) and,
+        // once, the base-conversion tables for first-principles CRT verification off-line.
+        cudaDeviceSynchronize();
+        std::cout << "KS_META level=" << *level << " limb_size=" << limb_size << " num_d=" << num_d
+                  << " L=" << cc.L << " K=" << cc.splitSpecialMeta.at(id).size() << " dnum=" << cc.dnum << std::endl;
+        // Device-pointer map: detect scratch-row aliasing between this's digit rows and c0's
+        // (the special/regular digit-NTT phases use c0.DIGITlimbptr as phase-1 scratch).
+        auto dump_ptrs = [&](const char* tag, const LimbPartition& lp) {
+            for (size_t dd = 0; dd < lp.DIGITlimb.size(); ++dd) {
+                std::cout << "KS_PTR " << tag << " DIGIT d=" << dd << " n=" << lp.DIGITlimb[dd].size() << ":";
+                for (auto& l : lp.DIGITlimb[dd]) {
+                    const void* pv = l.index() == U32 ? (const void*)std::get<U32>(l).v.data
+                                                      : (const void*)std::get<U64>(l).v.data;
+                    std::cout << " " << PRIMEID(l) << "@" << pv;
+                }
+                std::cout << std::endl;
+                // the DEVICE array is what kernels dereference — may diverge from the Limb objects
+                std::vector<void*> dev(lp.DIGITlimbptr[dd].size, nullptr);
+                cudaMemcpy(dev.data(), lp.DIGITlimbptr[dd].data, dev.size() * sizeof(void*),
+                           cudaMemcpyDeviceToHost);
+                std::cout << "KS_PTR " << tag << " DIGITDEV d=" << dd << " cap=" << dev.size() << ":";
+                for (size_t r = 0; r < dev.size(); ++r)
+                    std::cout << " " << r << "@" << dev[r];
+                std::cout << std::endl;
+            }
+            std::cout << "KS_PTR " << tag << " SPECIAL:";
+            for (auto& l : lp.SPECIALlimb) {
+                const void* pv = l.index() == U32 ? (const void*)std::get<U32>(l).v.data
+                                                  : (const void*)std::get<U64>(l).v.data;
+                std::cout << " " << PRIMEID(l) << "@" << pv;
+            }
+            std::cout << std::endl;
+        };
+        dump_ptrs("c1", c1);
+        dump_ptrs("c0", c0);
+        for (int d = 0; d < num_d; ++d) {
+            std::cout << "KSK_A_DIGIT d=" << d << ": ";
+            for (auto& l : ksk_a.DIGITlimb.at(d)) {
+                SWITCH(l, printThisLimb(2));
+            }
+            std::cout << std::endl << "KSK_B_DIGIT d=" << d << ": ";
+            for (auto& l : ksk_b.DIGITlimb.at(d)) {
+                SWITCH(l, printThisLimb(2));
+            }
+            std::cout << std::endl << "KSK_A_DECOMP d=" << d << ": ";
+            for (auto& l : ksk_a.DECOMPlimb.at(d)) {
+                SWITCH(l, printThisLimb(2));
+            }
+            std::cout << std::endl << "KSK_B_DECOMP d=" << d << ": ";
+            for (auto& l : ksk_b.DECOMPlimb.at(d)) {
+                SWITCH(l, printThisLimb(2));
+            }
+            std::cout << std::endl;
+        }
+        static bool tables_dumped = false;
+        if (!tables_dumped) {
+            tables_dumped = true;
+            const auto& hc = cc.precom.constants[id];
+            const auto& hg = *cc.precom.globals;
+            const int K = (int)cc.splitSpecialMeta.at(id).size();
+            std::cout << "KS_TABLE primes:";
+            for (int i = 0; i < cc.L + K; ++i)
+                std::cout << " " << hc.primes[i];
+            std::cout << std::endl << "KS_TABLE prime_bits:";
+            for (int i = 0; i < cc.L + K; ++i)
+                std::cout << " " << hc.prime_bits[i];
+            std::cout << std::endl << "KS_TABLE primeid_digit:";
+            for (int i = 0; i < cc.L; ++i)
+                std::cout << " " << hc.primeid_digit[i];
+            std::cout << std::endl << "KS_TABLE P_inv:";
+            for (int i = 0; i < cc.L; ++i)
+                std::cout << " " << hc.P_inv[i];
+            std::cout << std::endl << "KS_TABLE ModDown_pre_scale:";
+            for (int k = 0; k < K; ++k)
+                std::cout << " " << hg.ModDown_pre_scale[cc.L + k];
+            std::cout << std::endl;
+            for (int k = 0; k < K; ++k) {
+                std::cout << "KS_TABLE ModDown_matrix k=" << k << ":";
+                for (int j = 0; j < cc.L; ++j)
+                    std::cout << " " << hg.ModDown_matrix[k][j];
+                std::cout << std::endl;
+            }
+            for (int d = 0; d < num_d; ++d) {
+                const int n_d_n = hc.num_primeid_digit_from[d][*level];
+                std::cout << "KS_TABLE ModUp_pre_scale d=" << d << " n_d_n=" << n_d_n << ":";
+                for (int i = 0; i < n_d_n; ++i) {
+                    const int pid = hc.primeid_digit_from[d][i];
+                    std::cout << " (" << pid << "," << hg.DecompAndModUp_pre_scale[d][n_d_n - 1][pid] << ")";
+                }
+                std::cout << std::endl;
+                const int n_to = hc.num_primeid_digit_to[d][*level];
+                for (int i = 0; i < n_d_n; ++i) {
+                    const int pid = hc.primeid_digit_from[d][i];
+                    std::cout << "KS_TABLE ModUp_matrix d=" << d << " src=" << pid << ":";
+                    for (int j = 0; j < n_to; ++j) {
+                        const int pj = hc.primeid_digit_to[d][j];
+                        std::cout << " (" << pj << "," << hg.DecompAndModUp_matrix[*level][d][pid][pj] << ")";
+                    }
+                    std::cout << std::endl;
+                }
+            }
+        }
+        cudaDeviceSynchronize();
+    }
+    if (PRINT)
         std::cout << "/** ksk */" << std::endl;
     {
 
@@ -1201,14 +1348,13 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
             if (num_special > 0) {
 
-        fprintf(stderr, "[diag_inner] step=B2 KSK_first\n"); fflush(stderr);
                 fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, 0, s.ptr()>>>(
                     out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
                     num_d, id, num_special, 0);
             }
         }
 
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "Out KSK specials: ";
@@ -1233,11 +1379,11 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             Stream& stream = i == 0 ? s : c0.s;
             LimbPartition& out = i == 0 ? c1 : c0;
             LimbPartition& aux_limbs = i == 0 ? auxLimbs1 : auxLimbs2;
-            if constexpr (PRINT)
+            if (PRINT)
                 std::cout << "/** INTT specials*/" << std::endl;
             {
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1262,7 +1408,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         }
 
         CudaCheckErrorModNoSync;
-        if constexpr (PRINT)
+        if (PRINT)
             std::cout << "/** communicate */" << std::endl;
         if (cc.GPUid.size() > 1) {
             if (MEMCPY_PEER) {
@@ -1404,11 +1550,20 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     CudaCheckErrorModNoSync;
 
     if (moddown) {
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "KSK specials after INTT and communicate: ";
                 for (const auto& j : {&c1, &c0}) {
+                    for (auto& i : j->SPECIALlimb) {
+                        SWITCH(i, printThisLimb(2));
+                    }
+                    std::cout << std::endl;
+                }
+                std::cout << std::endl;
+                // the INTT actually writes auxLimbs1/2 specials — the true ModDown2 inputs
+                std::cout << "GPU: " << id << "AUX specials (ModDown2 input): ";
+                for (const auto& j : {&auxLimbs1, &auxLimbs2}) {
                     for (auto& i : j->SPECIALlimb) {
                         SWITCH(i, printThisLimb(2));
                     }
@@ -1423,7 +1578,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         for (int i = 0; i < 2; ++i) {
             Stream& stream = i == 0 ? c1.s : c0.s;
             LimbPartition& auxLimbs = i == 0 ? auxLimbs1 : auxLimbs2;
-            if constexpr (PRINT)
+            if (PRINT)
                 std::cout << "/** Conv */" << std::endl;
             {
                 dim3 blockSize{64, 2};
@@ -1431,14 +1586,13 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 dim3 gridSize{(uint32_t)cc.N / blockSize.x};
                 int shared_bytes = sizeof(uint64_t) * (SPECIALlimb.size()) * blockSize.x;
                 if (limb_size > 0)
-        fprintf(stderr, "[diag_inner] step=C1 ModDown2\n"); fflush(stderr);
                     ModDown2<ALGO_SHOUP><<<gridSize, blockSize, shared_bytes, stream.ptr()>>>(
                         auxLimbs.limbptr.data, limb_size, auxLimbs.SPECIALlimbptr.data, PARTITION(id, 0), getGlobals());
             }
         }
 
         CudaCheckErrorModNoSync;
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "Out Moddown: ";
@@ -1449,13 +1603,21 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     std::cout << std::endl;
                 }
                 std::cout << std::endl;
+                if (std::getenv("FHE_KS_TRACE_FULL")) {
+                    // conv output row (coeff domain) — the NTT_MODDOWN input for limb 0;
+                    // together with DOTQ and FINAL full dumps this solves NTT_gpu(conv) =
+                    // dot - final*P element-wise for offline forward-NTT verification.
+                    std::cout << "GPUFULL MODDOWN limb0: ";
+                    SWITCH(auxLimbs1.limb[0], printThisLimb(cc.N));
+                    std::cout << std::endl;
+                }
                 cudaDeviceSynchronize();
             }
         }
     }
 
     CudaCheckErrorModNoSync;
-    if constexpr (PRINT)
+    if (PRINT)
         std::cout << "/**We delay the call of NTTs post-modup for non special limbs to here*/" << std::endl;
     for (int d = 0; d < num_d; ++d) {
 
@@ -1466,7 +1628,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             uint32_t size = cc.precom.constants[id].num_primeid_digit_to[d][*level] - start;
             if (size > 0) {
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
@@ -1488,7 +1650,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         }
     }
     CudaCheckErrorModNoSync;
-    if constexpr (PRINT) {
+    if (PRINT) {
         if (SELECT) {
             cudaDeviceSynchronize();
             std::cout << "GPU: " << id << "Out ModUp after NTT all limbs: ";
@@ -1505,7 +1667,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         CudaCheckErrorModNoSync;
     }
 
-    if constexpr (PRINT)
+    if (PRINT)
         std::cout << "/** ksk remaining limbs*/" << std::endl;
 
     {
@@ -1523,7 +1685,6 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             if (limb_size > 0) {
                 for (int start = 0; start < limb_size; start += cc.batch) {
                     int num = std::min(cc.batch, (int)limb_size - start);
-        fprintf(stderr, "[diag_inner] step=C2 KSK_second\n"); fflush(stderr);
                     fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, 0, stream.ptr()>>>(
                         out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data,
                         digits, i, id, num_special, num_special + start);
@@ -1531,7 +1692,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             }
         }
 
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "Out KSK limbs: ";
@@ -1542,6 +1703,11 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     std::cout << std::endl;
                 }
                 std::cout << std::endl;
+                if (std::getenv("FHE_KS_TRACE_FULL")) {
+                    std::cout << "GPUFULL DOTQ limb0: ";
+                    SWITCH(out1.limb[0], printThisLimb(cc.N));
+                    std::cout << std::endl;
+                }
                 cudaDeviceSynchronize();
             }
         }
@@ -1549,49 +1715,36 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     CudaCheckErrorModNoSync;
     if (moddown) {
         for (int i = 0; i < 2; ++i) {
-            if constexpr (PRINT)
+            if (PRINT)
                 std::cout << "/** Last NTT step for moddown*/" << std::endl;
             Stream& stream = i == 0 ? c1.s : c0.s;
             LimbPartition& out = i == 0 ? c1 : c0;
             LimbPartition& auxLimbs = i == 0 ? auxLimbs1 : auxLimbs2;
 
             if (limb_size > 0) {
-                fprintf(stderr, "[diag_inner] step=D1 NTT_MODDOWN_start\n"); fflush(stderr);
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
                 int bytesFirst = 8 * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
                 int bytesSecond = 8 * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
-                fprintf(stderr, "[diag_D] limb_size=%d N=%d bdx=%d gridX=%lu bytesFirst=%d\n",
-                    limb_size, cc.N, blockDimFirst.x,
-                    (unsigned long)(cc.N / (blockDimFirst.x * M * 2)),
-                    bytesFirst);
-                fprintf(stderr, "[diag_D] auxLimbData=%p outData=%p\n",
-                    (void*)auxLimbs.limbptr.data, (void*)out.auxptr.data);
-                fflush(stderr);
 
                 {
-                    fprintf(stderr, "[diag_inner] step=D2 NTT_MODDOWN_launch\n"); fflush(stderr);
                     NTT_<false, algo, NTT_MODDOWN>
                         <<<dim3{cc.N / (blockDimFirst.x * M * 2), limb_size}, blockDimFirst, bytesFirst,
                            stream.ptr()>>>(getGlobals(), auxLimbs.limbptr.data, PARTITION(id, 0), out.auxptr.data);
-                    { cudaError_t _e = cudaDeviceSynchronize(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_false CRASHED: %s\n", cudaGetErrorString(_e)); }
-                    { cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_false ERR: %s\n", cudaGetErrorString(_e)); }
 
                     stream.wait(cc.digitStream2.at(0).at(id));
 
                     NTT_<true, algo, NTT_MODDOWN>
                         <<<dim3{cc.N / (blockDimSecond.x * M * 2), limb_size}, blockDimSecond, bytesSecond,
                            stream.ptr()>>>(getGlobals(), out.auxptr.data, PARTITION(id, 0), out.limbptr.data);
-                    { cudaError_t _e = cudaDeviceSynchronize(); if (_e != cudaSuccess) fprintf(stderr, "[diag] NTT_MODDOWN_true CRASHED: %s\n", cudaGetErrorString(_e)); }
                 }
             }
         }
-        fprintf(stderr, "[diag_inner] step=D3 NTT_MODDOWN_after\n"); fflush(stderr);
         CudaCheckErrorModNoSync;
-        if constexpr (PRINT) {
+        if (PRINT) {
             if (SELECT) {
                 cudaDeviceSynchronize();
                 std::cout << "GPU: " << id << "Out Moddown after submult: ";
@@ -1602,6 +1755,11 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     std::cout << std::endl;
                 }
                 std::cout << std::endl;
+                if (std::getenv("FHE_KS_TRACE_FULL")) {
+                    std::cout << "GPUFULL FINAL limb0: ";
+                    SWITCH(c1.limb[0], printThisLimb(cc.N));
+                    std::cout << std::endl;
+                }
                 cudaDeviceSynchronize();
             }
             CudaCheckErrorModNoSync;
@@ -1609,7 +1767,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     } else {
         s.wait(cc.digitStream2.at(0).at(id));
     }
-    if constexpr (PRINT) {
+    if (PRINT) {
         std::cout << "Going out keyswitch" << std::endl;
     }
     CudaCheckErrorModNoSync;
@@ -1913,7 +2071,7 @@ void LimbPartition::modupMGPU(LimbPartition& aux, const std::vector<uint64_t*>& 
             std::cout << "/** Intt */" << std::endl;
         if (size_d > 0) {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
             int bytesFirst = 8 * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
@@ -2163,7 +2321,7 @@ void LimbPartition::modupMGPU(LimbPartition& aux, const std::vector<uint64_t*>& 
             {
                 uint32_t size = cc.splitSpecialMeta.at(id).size();
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
                 int bytesFirst = 8 * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
@@ -2207,7 +2365,7 @@ void LimbPartition::modupMGPU(LimbPartition& aux, const std::vector<uint64_t*>& 
             uint32_t size = cc.precom.constants[id].num_primeid_digit_to[d][*level] - start;
             if (size > 0) {
                 constexpr ALGO algo = ALGO_SHOUP;
-                constexpr int M = 4;
+                const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
                 dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
                 dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
                 int bytesFirst = 8 * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
@@ -2372,7 +2530,7 @@ void LimbPartition::moddownMGPU(LimbPartition& auxLimbs, bool ntt, bool free_spe
             std::cout << "/** INTT specials*/" << std::endl;
         {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             const uint32_t limbs = cc.splitSpecialMeta.at(id).size();
             if (limbs > 0) {
@@ -2540,7 +2698,7 @@ void LimbPartition::moddownMGPU(LimbPartition& auxLimbs, bool ntt, bool free_spe
 
         if (limb_size > 0) {
             constexpr ALGO algo = ALGO_SHOUP;
-            constexpr int M = 4;
+            const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
             dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
             dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};

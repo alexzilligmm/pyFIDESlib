@@ -56,9 +56,15 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                     buff[tid + blockDim.x * i] = modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid],
                                                                primeid, G_->ModDown_pre_scale_shoup[primeid]);
                 } else {
+                    // U32 primes carry 2^32-scaled Shoup constants: the multiply must run in the
+                    // 32-bit overload. Promoting to uint64_t pairs Shoup_mult_64 with a 2^32-scaled
+                    // psi, whose __umul64hi quotient is always 0 -> buff holds the UNREDUCED product
+                    // (~2^56). Still congruent mod p (looks in-range after the final modreduce), but
+                    // base conversion needs the exact representative -> k*p excess -> the converted
+                    // limbs go mutually CRT-inconsistent.
                     buff[tid + blockDim.x * i] =
-                        modmult<algo>((uint64_t)((uint32_t*)b[i])[idx], G_->ModDown_pre_scale[primeid], primeid,
-                                      G_->ModDown_pre_scale_shoup[primeid]);
+                        modmult<algo>(((uint32_t*)b[i])[idx], (uint32_t)G_->ModDown_pre_scale[primeid], primeid,
+                                      (uint32_t)G_->ModDown_pre_scale_shoup[primeid]);
                 }
             }
             /*
@@ -196,10 +202,13 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                     ((uint64_t*)(a[pos]))[idx], G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)],
                     primeid, G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]);
             } else {
+                // See ModDown2: 2^32-scaled Shoup constants require the 32-bit multiply; the
+                // uint64_t promotion left buff unreduced (~2^56) and poisoned the digit base
+                // conversion with k*p multiples.
                 buff[tid + blockDim.x * i_] =
-                    modmult<algo>((uint64_t)((uint32_t*)a[pos])[idx],
-                                  G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid,
-                                  G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]);
+                    modmult<algo>(((uint32_t*)a[pos])[idx],
+                                  (uint32_t)G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid,
+                                  (uint32_t)G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]);
             }
         }
         /*

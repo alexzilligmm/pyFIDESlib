@@ -193,7 +193,11 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
     // Idea: calcular full_psi en función de ambos arrays psi
     // Idea: incluir N_inv en full_psi
 
-    if constexpr (sizeof(T) == 8 && second && NEGACYCLIC) {
+    // n32: the negacyclic post-scale was sizeof(T)==8-gated — the U32 INTT silently produced a
+    // non-negacyclic (wrong-basis) "coefficient" domain. Internally consistent (round trips and
+    // element-wise ops still work), but the KSK dot then mixes GPU-NTT digits with OpenFHE-eval
+    // key data in MISMATCHED bases -> keyswitch garbage. The helper is T-generic; apply for U32.
+    if constexpr (second && NEGACYCLIC) {
         backward_negacyclic_scale<T, algo, M>(buffer, primeid, psi, psi_shoup, Globals);
     }
 
@@ -226,7 +230,10 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                 aux.y = A(2 * (j & 2) + 1)[pos_res];
                 aux.z = A(2 * (j & 2) + 2)[pos_res];
                 aux.w = A(2 * (j & 2) + 3)[pos_res];
-                ((int4*)res)[pos_trasp >> 2] = aux;
+                // int4 slot = 2*(gridDim*(col)+bx) + (j&2)/2: >>1 keeps the (j&2) pair offset
+                // ((4X+(j&2))>>2 collapses both j&2 threads onto one slot — write race + half
+                // the outputs never written). Mirrors the u32 transposed LOAD in NTT__ (>>1).
+                ((int4*)res)[pos_trasp >> 1] = aux;
             }
         }
     }
@@ -363,10 +370,14 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     ((T*)&temp[2])[i] = aux.z;
                     ((T*)&temp[3])[i] = aux.w;
                 }
+                // temp[t] belongs to shared ROW 2*(j&2)+t (the r-lane), int4 slot col_init/4.
+                // The old `(int4*)A(...) + t` offset by t int4s WITHIN row 2*(j&2): rows +1..+3
+                // were never written and row 0's columns got smeared — every U32 forward NTT
+                // produced garbage while the INTT (different load path) was exact.
                 ((int4*)A(2 * (j & 2)))[col_init >> 2] = temp[0];
-                ((int4*)A(2 * (j & 2)) + 1)[col_init >> 2] = temp[1];
-                ((int4*)A(2 * (j & 2)) + 2)[col_init >> 2] = temp[2];
-                ((int4*)A(2 * (j & 2)) + 3)[col_init >> 2] = temp[3];
+                ((int4*)A(2 * (j & 2) + 1))[col_init >> 2] = temp[1];
+                ((int4*)A(2 * (j & 2) + 2))[col_init >> 2] = temp[2];
+                ((int4*)A(2 * (j & 2) + 3))[col_init >> 2] = temp[3];
             }
 
             __syncthreads();
@@ -383,7 +394,8 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 }
             }
 
-            if constexpr (sizeof(T) == 8 && !second && NEGACYCLIC) {
+            // n32: same as the INTT side — the forward negacyclic pre-scale must run for U32 too.
+            if constexpr (!second && NEGACYCLIC) {
                 forward_negacyclic_scale<T, algo, M>(buffer, primeid, psi, psi_barret, Globals);
             }
 
