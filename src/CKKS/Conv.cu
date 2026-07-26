@@ -86,6 +86,29 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
         //if (idx == 0) printf("Matrix to %d: ", j);
         int primeid = C_.primeid_flattened[primeid_init + j];
         if constexpr (1) {
+            if (C_.type == 0) {
+                // n32 speed: all-U32 chain fast path. The generic arm below accumulates in
+                // __uint128_t and finishes with `res % p` (modreduce<ALGO_NATIVE>) — an
+                // emulated 128/64 remainder, ~200 SASS instructions PER (coefficient, output
+                // limb), which made this kernel ALU-bound (~23% of bootstrap kernel time
+                // together with DecompAndModUpConv). On an all-U32 chain every buff entry and
+                // matrix value is a reduced residue < 2^28, so a per-term width-correct Shoup
+                // multiply + modadd computes the IDENTICAL canonical residue in ~9
+                // instructions/term (the *_shoup companion matrices are precomputed with the
+                // width-aware 2^32 convention — shoup_precomp, ConstantsGPU.cu). Mixed and
+                // U64 chains keep the generic arm; branch is grid-uniform (no divergence).
+                uint32_t res = 0;
+                for (int i = 0; i < C_.K; ++i) {
+                    const int m = MODDOWN_MATRIX(i, primeid);
+                    res = modadd(res,
+                                 modmult<ALGO_SHOUP>((uint32_t)buff[i * blockDim.x + tid],
+                                                     (uint32_t)G_->ModDown_matrix[m], primeid,
+                                                     (uint32_t)G_->ModDown_matrix_shoup[m]),
+                                 primeid);
+                }
+                ((uint32_t*)a[j])[idx] = res;
+                continue;
+            }
             __uint128_t res = 0;
             for (int i = 0; i < C_.K; ++i) {
                 res = res + (__uint128_t)buff[i * blockDim.x + tid] * G_->ModDown_matrix[MODDOWN_MATRIX(i, primeid)];
@@ -233,6 +256,25 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
         if (primeid_j < n || primeid_j >= C_.L) {
 
             if constexpr (1) {
+                if (C_.type == 0) {
+                    // n32 speed: all-U32 chain fast path — same rationale as ModDown2 above
+                    // (per-term width-correct Shoup vs the ~200-instr emulated u128 % p;
+                    // identical canonical residue, shoup matrices keyed on the OUTPUT prime
+                    // primeid_j). This kernel is the #1 bootstrap kernel (17.3%).
+                    uint32_t res32 = 0;
+                    for (int i_ = 0; i_ < n_d_n; ++i_) {
+                        const int primeid = C_.primeid_digit_from[d][i_];
+                        const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
+                        res32 = modadd(res32,
+                                       modmult<ALGO_SHOUP>((uint32_t)buff[i_ * blockDim.x + tid],
+                                                           (uint32_t)G_->DecompAndModUp_matrix[m], primeid_j,
+                                                           (uint32_t)G_->DecompAndModUp_matrix_shoup[m]),
+                                       primeid_j);
+                    }
+                    assert(b[j_] != nullptr);
+                    ((uint32_t*)b[j_])[idx] = res32;
+                    continue;
+                }
 
                 __uint128_t res = 0;
                 for (int i_ = 0; i_ < n_d_n; ++i_) {

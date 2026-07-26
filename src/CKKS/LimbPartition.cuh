@@ -55,6 +55,13 @@ class LimbPartition {
     std::vector<VectorGPU<void*>> DIGITlimbptr;
     // std::vector<VectorGPU<void*>> DIGITauxptr;
     VectorGPU<void*> GATHERptr;
+    // n32 speed: concatenation of all digits' DECOMPlimbptr entries (digit-major, slot-minor,
+    // i.e. entry (start_d + i) == DECOMPlimbptr[d][i]) so modup can run ONE wide INTT over all
+    // source limbs instead of dnum per-digit gy~9 launches (288 blocks = 2.3 blocks/SM on A100;
+    // measured 169 GB/s vs 465 GB/s at full width, stream overlap only 1.9x). Subview of
+    // bufferAUXptrs (a spare slot of the commented-out DECOMPauxptr region); filled once in
+    // generateAllDecompAndDigit alongside DECOMPlimbptr.
+    VectorGPU<void*> DECOMPALLptr;
 
     uint64_t* bufferDECOMPandDIGIT = nullptr;
     uint64_t* bufferSPECIAL = nullptr;

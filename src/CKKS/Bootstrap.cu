@@ -39,6 +39,33 @@ static uint32_t effCorrectionFactor(FIDESlib::CKKS::ContextData& cc, int slots) 
                : cc.GetBootPrecomputation(slots).correctionFactor;
 }
 
+// n32 speed: the composite-port debug barriers. Each BTS_DIAG site used to be an
+// UNCONDITIONAL cudaDeviceSynchronize() + cudaGetLastError() in the bootstrap hot path;
+// three of them drained the whole device per bootstrap. Now off unless FIDESLIB_BTS_DIAG is
+// set, and the env is read once (a getenv per call is itself measurable in a tight loop).
+static bool btsDiagOn() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_DIAG");
+        return e && *e && *e != '0';
+    }();
+    return v;
+}
+#define BTS_DIAG(what)                                                                              \
+    do {                                                                                            \
+        if (btsDiagOn()) {                                                                          \
+            cudaDeviceSynchronize();                                                                \
+            cudaError_t _e = cudaGetLastError();                                                    \
+            if (_e != cudaSuccess)                                                                  \
+                std::cerr << "[diag] " what " ERROR: " << cudaGetErrorString(_e) << " at "          \
+                          << __FILE__ << ":" << __LINE__ << std::endl;                              \
+        }                                                                                           \
+    } while (0)
+
+static bool btsSfDebugOn() {
+    static const bool v = [] { return std::getenv("BTS_SF_DEBUG") != nullptr; }();
+    return v;
+}
+
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
@@ -46,7 +73,7 @@ static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
         c->copy(ctxt);
         FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
     }
-    if (!std::getenv("BTS_SF_DEBUG"))
+    if (!btsSfDebugOn())
         return;
     cudaDeviceSynchronize();
     printf("[bts_stage] %s: level=%d deg=%d log2(NF)=%.3f table=%.3f\n", stage, ctxt.getLevel(), ctxt.NoiseLevel,
@@ -338,7 +365,10 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
             std::cout << "mult: " << constantEvalMult << std::endl;
         ctxt.multScalar(constantEvalMult, false);
 
-            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER multScalar(constantEvalMult) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
+        // n32 speed: this was an UNCONDITIONAL cudaDeviceSynchronize() diagnostic left over from
+        // the composite port -- a full device drain in the bootstrap hot path, right before the
+        // heaviest stages, killing cross-stage stream overlap. Now gated (FIDESLIB_BTS_DIAG=1).
+        BTS_DIAG("AFTER multScalar(constantEvalMult)");
         if constexpr (PRINT) {
             std::cout << "Raise scaled ";
             for (auto& j : ctxt.c0.GPU) {
@@ -359,7 +389,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     if (ctxt.NoiseLevel == 2) {
         ctxt.rescale();
-            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER rescale(NoiseLevel==2) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
+        BTS_DIAG("AFTER rescale(NoiseLevel==2)");
     }
 
     btsStageProbe("pre-CtS", ctxt);
@@ -600,7 +630,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                 CudaCheckErrorMod;
             }
             ctxt.multScalar(adjustmentFactor);
-            { cudaDeviceSynchronize(); cudaError_t _e = cudaGetLastError(); if (_e != cudaSuccess) std::cerr << "[diag] AFTER multScalar(adj) ERROR: " << cudaGetErrorString(_e) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
+            BTS_DIAG("AFTER multScalar(adj)");
             if constexpr (PRINT) {
                 cudaDeviceSynchronize();
                 std::cout << "Initial ";
