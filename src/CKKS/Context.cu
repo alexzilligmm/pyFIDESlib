@@ -719,6 +719,14 @@ FIDESlib::CKKS::RESCALE_TECHNIQUE ContextData::translateRescalingTechnique(lbcry
                                                                              : FIDESlib::CKKS::NO_RESCALE;
 }
 
+void ContextData::setCorrectionFactorOverride(const int cf) {
+    correctionFactorOverride = cf;
+}
+
+int ContextData::getCorrectionFactorOverride() const {
+    return correctionFactorOverride;
+}
+
 double ContextData::sfAtLimb(const int limbTop) const {
     if ((L - limbTop) % param.compositeDegree != 0) {
         std::fprintf(stderr,

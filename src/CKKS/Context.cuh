@@ -152,6 +152,19 @@ class ContextData {
     std::vector<uint64_t> ElemForEvalAddOrSub(const int level, const double operand, const int noise_deg);
     std::vector<double>& GetCoeffsChebyshev();
 
+    /** Per-call correction-factor override for Bootstrap (armed by the wrapper's
+     *  CorrectionScope): -1 = use the per-slots precomputation value. Runtime-only —
+     *  nothing precomputed (keys, CtS/StC matrices, levels) depends on the correction
+     *  factor; it materializes as the 2^-c raise adjust + the 2^c restore inside ONE
+     *  bootstrap call, so mixing values across bootstraps in one execution is safe.
+     *  OUT-OF-LINE ACCESSORS ONLY from outside the library: ContextData carries
+     *  #ifdef NCCL members, so its field offsets differ between the fideslib build and
+     *  consumers compiled without the same define — direct field access from the wrapper
+     *  silently reads/writes the wrong offset (cost a GPU-job round-trip to find). */
+    void setCorrectionFactorOverride(int cf);
+    int getCorrectionFactorOverride() const;
+    int correctionFactorOverride = -1;
+
     /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
     int compositeDegree() const { return param.compositeDegree; }
     /** Scaling factor read at a LIMB index. On composite chains OpenFHE stores a SENTINEL

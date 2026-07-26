@@ -30,6 +30,15 @@ constexpr bool PRINT = false;
 std::vector<std::pair<std::string, std::shared_ptr<FIDESlib::CKKS::Ciphertext>>>*
     FIDESlib::CKKS::g_btsStageStash = nullptr;
 
+
+// Effective correction factor for this bootstrap call: the ContextData override (armed by
+// the wrapper's CorrectionScope) wins over the per-slots precomputation value.
+static uint32_t effCorrectionFactor(FIDESlib::CKKS::ContextData& cc, int slots) {
+    return cc.correctionFactorOverride >= 0
+               ? (uint32_t)cc.correctionFactorOverride
+               : cc.GetBootPrecomputation(slots).correctionFactor;
+}
+
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
@@ -89,16 +98,16 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
     // subtraction below underflows and corFactor = 1 << garbage poisons every
     // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
-    if (deg > static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor)) {
+    if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
         throw std::runtime_error(
             "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
             " exceeds correctionFactor=" +
-            std::to_string(cc.GetBootPrecomputation(slots).correctionFactor) +
+            std::to_string(effCorrectionFactor(cc, slots)) +
             " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-    uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
+    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
     if constexpr (PRINT)
-        std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
+        std::cout << effCorrectionFactor(cc, slots) << " " << deg << std::endl;
     double post = std::pow(2, static_cast<double>(deg));
 
     double pre = 1. / post;
@@ -274,16 +283,19 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
     // subtraction below underflows and corFactor = 1 << garbage poisons every
     // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
-    if (deg > static_cast<int32_t>(cc.GetBootPrecomputation(slots).correctionFactor)) {
+    if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
         throw std::runtime_error(
             "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
             " exceeds correctionFactor=" +
-            std::to_string(cc.GetBootPrecomputation(slots).correctionFactor) +
+            std::to_string(effCorrectionFactor(cc, slots)) +
             " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-    uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
+    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
+    if (std::getenv("BTS_SF_DEBUG"))
+        fprintf(stderr, "[bts_cf] cc=%p override=%d deg=%d correction=%u\n", (void*)&cc,
+                cc.correctionFactorOverride, deg, correction);
     if constexpr (PRINT)
-        std::cout << cc.GetBootPrecomputation(slots).correctionFactor << " " << deg << std::endl;
+        std::cout << effCorrectionFactor(cc, slots) << " " << deg << std::endl;
     double post = std::pow(2, static_cast<double>(deg));
 
     double pre = 1. / post;
@@ -466,7 +478,7 @@ double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
         }
     #endif
         */
-    uint32_t correction = cc.GetBootPrecomputation(slots).correctionFactor - deg;
+    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
 
     double res = 0.0;
     if (cc.rescaleTechnique == CKKS::FLEXIBLEAUTO || cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT) {
