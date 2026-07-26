@@ -52,6 +52,10 @@ struct RawParams {
     int L;
     int K;
     int logN;
+    // COMPOSITESCALING: number of RNS primes per CKKS level (1 = classic chains). Imported
+    // from OpenFHE's CryptoParametersCKKSRNS::GetCompositeDegree(); consumed wherever one
+    // level transition must move d limbs (rescale, ModRaise, level<->limb conversions).
+    int compositeDegree = 1;
     lbcrypto::ScalingTechnique scalingTechnique;
     std::vector<uint64_t> moduli;
     std::vector<uint64_t> root_of_unity;

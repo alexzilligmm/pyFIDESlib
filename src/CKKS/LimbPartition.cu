@@ -2403,6 +2403,41 @@ void LimbPartition::broadcastLimb0() {
     assert(limbsize - 1 > 0);
     broadcastLimb0_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize - 1}, 128, 0, s.ptr()>>>(limbptr.data);
 }
+
+void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& qhatinv,
+                                      const std::vector<uint64_t>& qhat) {
+    const int limbsize = getLimbSize(*level);
+    cudaSetDevice(device);
+    assert(limbsize > d);
+    assert((int)qhatinv.size() >= d && (int)qhat.size() >= d * limbsize);
+
+    // The kernel overwrites every limb, including the d source limbs — snapshot the sources
+    // first. Slots are 8*N bytes each regardless of limb width (raw byte copies; the kernel
+    // re-reads them at prime k's width via ISU64).
+    const size_t slot = (size_t)cc.N * sizeof(uint64_t);
+    uint8_t* snap;
+    cudaMallocAsync(&snap, (size_t)d * slot + d * sizeof(void*) + (qhatinv.size() + qhat.size()) * sizeof(uint64_t),
+                    s.ptr());
+    void** srcptrs = (void**)(snap + (size_t)d * slot);
+    uint64_t* dev_qhatinv = (uint64_t*)(srcptrs + d);
+    uint64_t* dev_qhat = dev_qhatinv + qhatinv.size();
+
+    std::vector<void*> hostptrs(d);
+    for (int k = 0; k < d; ++k) {
+        hostptrs[k] = snap + (size_t)k * slot;
+        void* v = nullptr;
+        SWITCH_RET(limb.at(k), v.data, v);
+        const size_t bytes = (size_t)cc.N * (limb.at(k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
+        cudaMemcpyAsync(hostptrs[k], v, bytes, cudaMemcpyDeviceToDevice, s.ptr());
+    }
+    cudaMemcpyAsync(srcptrs, hostptrs.data(), d * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_qhatinv, qhatinv.data(), qhatinv.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_qhat, qhat.data(), qhat.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
+
+    compositeModRaise_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(limbptr.data, srcptrs, d,
+                                                                                           dev_qhatinv, dev_qhat);
+    cudaFreeAsync(snap, s.ptr());
+}
 void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights) {
     const int limbsize = getLimbSize(*level);
     cudaSetDevice(device);

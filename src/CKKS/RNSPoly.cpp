@@ -253,6 +253,13 @@ void RNSPoly::sync() {
 
 void RNSPoly::rescale() {
     //    assert(GPU.size() == 1 && "Rescale Multi-GPU not implemented.");
+    // COMPOSITESCALING: one CKKS level = cc.compositeDegree() primes, and OpenFHE's
+    // composite ModReduce is literally a d-fold loop of the single-prime drop
+    // (ckksrns-leveledshe.cpp, DropLastElementAndScale per dropped prime) — so the GPU
+    // composite rescale is the same d-fold loop of the existing kernel. The level MUST be
+    // decremented between iterations: LimbPartition::rescale() finds the top limb through
+    // *level, so two calls at the same level would drop (divide by) the same prime twice.
+    for (int r_ = 0; r_ < cc.compositeDegree(); ++r_) {
     if (GPU.size() == 1) {
         for (auto& i : GPU) {
             i.rescale();
@@ -283,10 +290,13 @@ void RNSPoly::rescale() {
         }
         level -= 1;
     }
+    }  // composite loop
 }
 
 void RNSPoly::rescaleDouble(RNSPoly& poly) {
     //    assert(GPU.size() == 1 && "Rescale Multi-GPU not implemented.");
+    // COMPOSITESCALING: d-fold loop, levels decremented between iterations (see rescale()).
+    for (int r_ = 0; r_ < cc.compositeDegree(); ++r_) {
     if (0 && GPU.size() == 1) {
         for (auto& i : GPU) {
             i.rescale();
@@ -342,6 +352,7 @@ void RNSPoly::rescaleDouble(RNSPoly& poly) {
             poly.level -= 1;
         }
     }
+    }  // composite loop
 }
 
 void RNSPoly::multPt(const RNSPoly& p, bool rescale) {
@@ -357,6 +368,22 @@ void RNSPoly::multPt(const RNSPoly& p, bool rescale) {
                 assert(omp_get_num_threads() == (int)GPU.size());
                 GPU.at(i).multElement(p.GPU.at(i));
                 GPU.at(i).rescaleMGPU();
+            }
+            --level;
+        }
+        // COMPOSITESCALING: the fused multPt/rescaleMGPU dropped ONE prime; a composite
+        // level is cc.compositeDegree() primes, so finish the remaining d-1 drops with
+        // plain rescale iterations (level decremented between drops, see rescale()).
+        for (int r_ = 1; r_ < cc.compositeDegree(); ++r_) {
+            if (GPU.size() == 1) {
+                for (auto& i : GPU)
+                    i.rescale();
+            } else {
+#pragma omp parallel for num_threads(GPU.size())
+                for (size_t i = 0; i < GPU.size(); ++i) {
+                    assert(omp_get_num_threads() == (int)GPU.size());
+                    GPU.at(i).rescaleMGPU();
+                }
             }
             --level;
         }
@@ -991,6 +1018,53 @@ void RNSPoly::broadcastLimb0() {
             assert(omp_get_num_threads() == (int)cc.GPUid.size());
             GPU.at(i).broadcastLimb0_mgpu();
         }
+    }
+}
+
+// host mulmod for the composite CRT constants (primes < 2^60, product fits __int128)
+static uint64_t host_mulmod(uint64_t a, uint64_t b, uint64_t m) {
+    return (uint64_t)(((__uint128_t)a * b) % m);
+}
+static uint64_t host_powmod(uint64_t base, uint64_t exp, uint64_t m) {
+    uint64_t r = 1;
+    base %= m;
+    while (exp) {
+        if (exp & 1)
+            r = host_mulmod(r, base, m);
+        base = host_mulmod(base, base, m);
+        exp >>= 1;
+    }
+    return r;
+}
+
+void RNSPoly::compositeModRaise() {
+    const int d = cc.compositeDegree();
+    assert(d > 1);
+    assert(cc.GPUid.size() == 1 && "composite ModRaise is single-GPU only");
+
+    const int limbsize = level + 1;
+    // qhatinv[k] = (Q0/q_k)^{-1} mod q_k, via Fermat (q_k prime);
+    // qhat[k*limbsize + i] = (Q0/q_k) mod q_i.
+    std::vector<uint64_t> qhatinv(d), qhat((size_t)d * limbsize);
+    for (int k = 0; k < d; ++k) {
+        const uint64_t qk = cc.prime[k].p;
+        uint64_t qhat_mod_qk = 1;
+        for (int j = 0; j < d; ++j)
+            if (j != k)
+                qhat_mod_qk = host_mulmod(qhat_mod_qk, cc.prime[j].p % qk, qk);
+        qhatinv[k] = host_powmod(qhat_mod_qk, qk - 2, qk);
+        for (int i = 0; i < limbsize; ++i) {
+            const uint64_t qi = cc.prime[i].p;
+            uint64_t v = 1;
+            for (int j = 0; j < d; ++j)
+                if (j != k)
+                    v = host_mulmod(v, cc.prime[j].p % qi, qi);
+            qhat[(size_t)k * limbsize + i] = v;
+        }
+    }
+
+    for (size_t i = 0; i < cc.GPUid.size(); ++i) {
+        GPU.at(i).compositeModRaise(d, qhatinv, qhat);
     }
 }
 void RNSPoly::evalLinearWSum(uint32_t n, std::vector<const RNSPoly*>& vec, std::vector<uint64_t>& elem) {

@@ -70,6 +70,14 @@ struct Constants {
     };
 };
 
+// The struct lives in CUDA __constant__ memory — a 64 KB bank. If it ever outgrows it
+// (e.g. someone raises MAXP), fail at compile time instead of at kernel-launch time.
+// NOTE for a future MAXP bump: `uint8_t table[MAXP*MAXP*8]` is DEAD (only read under
+// `if constexpr (USING_CONSTANTS_TABLE)` with the constant 0, never written) and is ~77 %
+// of the struct — delete it first. `type` is a single uint64_t (1 bit per prime id) and
+// must become an array past MAXP=64 (with ISU64/HISU64 and both setters updated).
+static_assert(sizeof(Constants) <= 65536, "Constants must fit the 64 KB __constant__ bank");
+
 constexpr int PARTITION(int id, int j) {
     return (offsetof(Constants, primeid_partition) - offsetof(Constants, primeid_partition)) / sizeof(int) + id * MAXP +
            j;

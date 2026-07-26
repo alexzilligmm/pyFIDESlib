@@ -151,6 +151,17 @@ class ContextData {
     std::vector<uint64_t> ElemForEvalMult(int level, const double operand, int level_in = -1);
     std::vector<uint64_t> ElemForEvalAddOrSub(const int level, const double operand, const int noise_deg);
     std::vector<double>& GetCoeffsChebyshev();
+
+    /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
+    int compositeDegree() const { return param.compositeDegree; }
+    /** Scaling factor read at a LIMB index. On composite chains OpenFHE stores a SENTINEL
+     *  1.0 at every index off the level grid (m_scalingFactorsReal); the import reverses
+     *  indices, so the grid condition is (L - limbTop) % d == 0. Reading off-grid is
+     *  always a bug — this accessor makes it loud instead of a silent scale of 1. */
+    double sfAtLimb(int limbTop) const;
+    /** Product of the compositeDegree ModReduceFactor entries dropped when rescaling a
+     *  ciphertext whose top limb is limbTop (single factor on classic chains). */
+    double modReduceProduct(int limbTop) const;
     int GetDoubleAngleIts();
     void AddBootPrecomputation(int slots, BootstrapPrecomputation&& precomp);
     bool HasBootPrecomputation(int slots);

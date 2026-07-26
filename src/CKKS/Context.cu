@@ -1,6 +1,9 @@
 //
 // Created by carlosad on 2/05/24.
 //
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -382,20 +385,34 @@ std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double opera
         moduli[i] = prime[i].p;
     }
 
+    const int cd = param.compositeDegree;
     double scFactor;
     if (level_in == -1 || level_in == level) {
-        scFactor = param.ScalingFactorReal[level];
+        scFactor = sfAtLimb(level);
     } else {
         /** Lets handle scale changes more efficiently!*/
-        assert(level > 0);
-        double scFactorIn = param.ScalingFactorReal[level_in];
-        double scFactorOut = param.ScalingFactorReal[level - 1];
-        double rescalingFactor = param.ModReduceFactor[level];
+        assert(level >= cd);
+        // Composite: the next level down is cd limbs lower, and the rescale divides by the
+        // product of the cd dropped primes (single prime / -1 on classic chains).
+        double scFactorIn = sfAtLimb(level_in);
+        double scFactorOut = sfAtLimb(level - cd);
+        double rescalingFactor = modReduceProduct(level);
         scFactor = scFactorOut * rescalingFactor / scFactorIn;
 
-        assert(abs(param.ScalingFactorReal[level - 1] * rescalingFactor -
-                   param.ScalingFactorReal[level] * param.ScalingFactorReal[level]) < 1e-9);
-        assert(abs(scFactorIn * scFactor / rescalingFactor - scFactorOut) < 1e-9);
+        // The FLEXIBLEAUTO invariant sf[l-1]*q_drop == sf[l]^2 is the cheapest whole-chain
+        // canary for composite level bookkeeping — keep it armed in Release builds (assert
+        // is dead under NDEBUG) with a RELATIVE tolerance (absolute 1e-9 is meaningless at
+        // sf ~ 2^54).
+        const double lhs = scFactorOut * rescalingFactor;
+        const double rhs = sfAtLimb(level) * sfAtLimb(level);
+        if (std::abs(lhs - rhs) > 1e-9 * std::abs(rhs) ||
+            std::abs(scFactorIn * scFactor / rescalingFactor - scFactorOut) > 1e-9 * std::abs(scFactorOut)) {
+            std::fprintf(stderr,
+                         "FIDESlib: ElemForEvalMult scale invariant broken at level=%d level_in=%d d=%d "
+                         "(sf[l-d]*drop=%e vs sf[l]^2=%e)\n",
+                         level, level_in, cd, lhs, rhs);
+            std::abort();
+        }
     }
 
     typedef int128_t DoubleInteger;
@@ -485,7 +502,7 @@ std::vector<uint64_t> ContextData::ElemForEvalAddOrSub(const int level, const do
         scFactor =
             param.ScalingFactorRealBig.at(level);  // cryptoParams->GetScalingFactorRealBig(ciphertext->GetLevel());
     } else {
-        scFactor = param.ScalingFactorReal.at(level);  //cryptoParams->GetScalingFactorReal(ciphertext->GetLevel());
+        scFactor = sfAtLimb(level);  //cryptoParams->GetScalingFactorReal(ciphertext->GetLevel());
     }
 
     int32_t logApprox = 0;
@@ -690,11 +707,34 @@ void ContextData::AddBootPrecomputation(int slots, BootstrapPrecomputation&& pre
 }
 
 FIDESlib::CKKS::RESCALE_TECHNIQUE ContextData::translateRescalingTechnique(lbcrypto::ScalingTechnique technique) {
+    // COMPOSITESCALING* reuses OpenFHE's FLEXIBLEAUTO scale-tracking machinery (one real
+    // scaling factor per level, auto-rescale); before this mapping it fell through to
+    // NO_RESCALE, silently disabling every auto-rescale and scale-adjust branch.
     return technique == lbcrypto::ScalingTechnique::FIXEDAUTO         ? FIDESlib::CKKS::FIXEDAUTO
            : technique == lbcrypto::ScalingTechnique::FIXEDMANUAL     ? FIDESlib::CKKS::FIXEDMANUAL
            : technique == lbcrypto::ScalingTechnique::FLEXIBLEAUTOEXT ? FIDESlib::CKKS::FLEXIBLEAUTOEXT
            : technique == lbcrypto::ScalingTechnique::FLEXIBLEAUTO    ? FIDESlib::CKKS::FLEXIBLEAUTO
-                                                                      : FIDESlib::CKKS::NO_RESCALE;
+           : technique == lbcrypto::ScalingTechnique::COMPOSITESCALINGAUTO   ? FIDESlib::CKKS::FLEXIBLEAUTO
+           : technique == lbcrypto::ScalingTechnique::COMPOSITESCALINGMANUAL ? FIDESlib::CKKS::FLEXIBLEAUTO
+                                                                             : FIDESlib::CKKS::NO_RESCALE;
+}
+
+double ContextData::sfAtLimb(const int limbTop) const {
+    if ((L - limbTop) % param.compositeDegree != 0) {
+        std::fprintf(stderr,
+                     "FIDESlib: sfAtLimb(%d) is OFF the composite level grid (L=%d, d=%d) — "
+                     "this index holds OpenFHE's sentinel 1.0, not a scaling factor\n",
+                     limbTop, L, param.compositeDegree);
+        std::abort();
+    }
+    return param.ScalingFactorReal[limbTop];
+}
+
+double ContextData::modReduceProduct(const int limbTop) const {
+    double factor = 1.0;
+    for (int j = 0; j < param.compositeDegree; ++j)
+        factor *= param.ModReduceFactor[limbTop - j];
+    return factor;
 }
 
 void ContextData::PrepareNCCLCommunication() {

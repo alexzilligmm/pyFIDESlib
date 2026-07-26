@@ -208,6 +208,10 @@ class LimbPartition {
     void dropLimb();
     void addMult(const LimbPartition& partition, const LimbPartition& partition1);
     void broadcastLimb0();
+    /** COMPOSITESCALING ModRaise: CRT-extend the bottom d limbs across ALL current limbs
+     *  (call after grow()). qhatinv[k] = (Q0/q_k)^{-1} mod q_k; qhat is the flattened
+     *  (Q0/q_k) mod q_i table with stride = current limb count. Single-GPU only. */
+    void compositeModRaise(int d, const std::vector<uint64_t>& qhatinv, const std::vector<uint64_t>& qhat);
     void evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights);
     void rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, const LimbPartition& ksk_a,
                            const LimbPartition& ksk_b);

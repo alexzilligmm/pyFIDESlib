@@ -232,7 +232,12 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 
 void FIDESlib::CKKS::multIntScalar(Ciphertext& ctxt, uint64_t op) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
-	std::vector<uint64_t> op_(ctxt.getLevel() + 1, op);
+	// n32: the scalar is consumed PER PRIME by the mult kernels, which require operands
+	// < prime. On 27-28-bit chains a raw 64-bit scalar (e.g. the bootstrap corFactor)
+	// can exceed that — reduce per prime instead of broadcasting the raw value.
+	std::vector<uint64_t> op_(ctxt.getLevel() + 1);
+	for (size_t i = 0; i < op_.size(); ++i)
+		op_[i] = op % ctxt.cc.prime[i].p;
 	ctxt.c0.multScalar(op_);
 	ctxt.c1.multScalar(op_);
 }
@@ -309,8 +314,13 @@ Ciphertext<DCRTPoly> AdvancedSHECKKSRNS::InnerEvalChebyshevPS(ConstCiphertext<DC
 					weights[i] = divcs->q[i + 1];
 				}
 
-				cu.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - level_offset);
-				cu.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - level_offset);
+				{
+					// composite: deg-alignment (+1 level) and the PS recursion offset are
+					// LEVEL counts -> d limbs each.
+					const int d_ = T2[m - 1]->cc.compositeDegree();
+					cu.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - level_offset * d_);
+					cu.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - level_offset * d_);
+				}
 
 				cu.evalLinearWSumMutable(dc, T, weights);
 			}
@@ -350,8 +360,11 @@ Ciphertext<DCRTPoly> AdvancedSHECKKSRNS::InnerEvalChebyshevPS(ConstCiphertext<DC
 					}
 				}
 
-				qu.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - level_offset);
-				qu.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - level_offset);
+				{
+					const int d_ = T2[m - 1]->cc.compositeDegree();
+					qu.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - level_offset * d_);
+					qu.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - level_offset * d_);
+				}
 				// qu.growToLevel(T[k - 1]->getLevel() + (T[k - 1]->NoiseLevel == 1 ? 1 : 0));
 
 				qu.evalLinearWSumMutable(/*bcrypto::Degree(qcopy)*/ ctxs.size(), ctxs, weights);
@@ -424,8 +437,11 @@ Ciphertext<DCRTPoly> AdvancedSHECKKSRNS::InnerEvalChebyshevPS(ConstCiphertext<DC
 					}
 				}
 
-				su.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - 1 - level_offset);
-				su.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? 1 : 0) - 1 - level_offset);
+				{
+					const int d_ = T2[m - 1]->cc.compositeDegree();
+					su.growToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - d_ - level_offset * d_);
+					su.dropToLevel(T2[m - 1]->getLevel() + (T2[m - 1]->NoiseLevel == 1 ? d_ : 0) - d_ - level_offset * d_);
+				}
 
 				su.evalLinearWSumMutable(/*lbcrypto::Degree(scopy)*/ ctxs.size(), T, weights);
 				// adds the free term (at x^0)

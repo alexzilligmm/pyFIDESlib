@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include "ConstantsGPU.cuh"
 #include "CudaUtils.cuh"
 #include "Math.cuh"
@@ -90,16 +92,19 @@ uint64_t shoup_precomp(uint64_t val, int primeid, Constants& host_constants_) {
         }                                \
     } while (false)
 
-#define free(name)                         \
-    do {                                   \
-        if (name[i] != nullptr) {          \
-            if (type & (1 << i)) {         \
-                delete (uint64_t*)name[i]; \
-            } else {                       \
-                delete (uint32_t*)name[i]; \
-            }                              \
-            name[i] = nullptr;             \
-        }                                  \
+#define free(name)                                    \
+    do {                                              \
+        if (name[i] != nullptr) {                     \
+            /* n32: (1 << i) was an int shift — UB   \
+               for i >= 31, and prime ids reach       \
+               MAXP-1 = 63. Must match ISU64. */      \
+            if (type & (((uint64_t)1) << (i))) {      \
+                delete (uint64_t*)name[i];            \
+            } else {                                  \
+                delete (uint32_t*)name[i];            \
+            }                                         \
+            name[i] = nullptr;                        \
+        }                                             \
     } while (false)
 
 Global::~Global() {
@@ -151,6 +156,19 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
         hC_.logN = (int)std::bit_width((uint32_t)N) - 1;
         hC_.L = q.size();
         hC_.K = p.size();
+
+        // n32 knife-edge: every per-prime array in Constants/Global is sized MAXP and the
+        // U32/U64 mask is one bit per prime id in a single uint64_t, so the TOTAL prime
+        // count (q towers + specials) must fit MAXP = 64. The composite-scaling prod chain
+        // (56 q + 8 specials at dnum=7) sits EXACTLY at this cap. Fail loudly in Release
+        // too — an overflow here corrupts neighbouring constants silently.
+        if (q.size() + p.size() > (size_t)MAXP) {
+            std::fprintf(stderr,
+                         "FIDESlib: chain has %zu q-primes + %zu specials = %zu > MAXP=%d — "
+                         "the constant tables cannot hold this chain (see ConstantsGPU.cuh)\n",
+                         q.size(), p.size(), q.size() + p.size(), MAXP);
+            std::abort();
+        }
 
         hC_.type = 0;
         for (auto& i : meta)

@@ -108,6 +108,10 @@ class RNSPoly {
     void dropToLevel(int level);
     void addMult(const RNSPoly& poly, const RNSPoly& poly1);
     void broadcastLimb0();
+    /** COMPOSITESCALING ModRaise (call after grow()): CRT-extend the bottom
+     *  cc.compositeDegree() limbs to the whole current basis (OpenFHE ExtendCiphertext).
+     *  Constants are derived from cc.prime on the fly (host-side, trivial cost). */
+    void compositeModRaise();
     void evalLinearWSum(uint32_t i, std::vector<const RNSPoly*>& vector1, std::vector<uint64_t>& vector2);
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2);
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2,

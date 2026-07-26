@@ -227,7 +227,7 @@ void Ciphertext::addPt(const Plaintext& b) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	if (cc.rescaleTechnique == FLEXIBLEAUTO || cc.rescaleTechnique == FLEXIBLEAUTOEXT || cc.rescaleTechnique == FIXEDAUTO) {
-		if (b.NoiseLevel == 1 && NoiseLevel == 2 && b.c0.getLevel() == getLevel() - 1) {
+		if (b.NoiseLevel == 1 && NoiseLevel == 2 && b.c0.getLevel() == getLevel() - cc.compositeDegree()) {
 			this->rescale();
 		}
 
@@ -259,7 +259,7 @@ void Ciphertext::subPt(const Plaintext& b) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	if (cc.rescaleTechnique == FLEXIBLEAUTO || cc.rescaleTechnique == FLEXIBLEAUTOEXT || cc.rescaleTechnique == FIXEDAUTO) {
-		if (b.NoiseLevel == 1 && NoiseLevel == 2 && b.c0.getLevel() == getLevel() - 1) {
+		if (b.NoiseLevel == 1 && NoiseLevel == 2 && b.c0.getLevel() == getLevel() - cc.compositeDegree()) {
 			this->rescale();
 		}
 
@@ -436,7 +436,8 @@ void Ciphertext::multPt(const Plaintext& b, bool rescale) {
 
 	this->multMetadata(*this, b);
 	if (rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL) {
-		NoiseFactor /= cc.param.ModReduceFactor.at(c0.getLevel() + 1);
+		// composite: the drop removed compositeDegree primes; divide by their product
+		NoiseFactor /= cc.modReduceProduct(c0.getLevel() + cc.compositeDegree());
 		NoiseLevel -= 1;
 	}
 }
@@ -458,7 +459,8 @@ void Ciphertext::rescale() {
 	}
 
 	// Manage metadata
-	NoiseFactor /= cc.param.ModReduceFactor.at(c0.getLevel() + 1);
+	// composite: the rescale dropped compositeDegree primes; divide by their product
+	NoiseFactor /= cc.modReduceProduct(c0.getLevel() + cc.compositeDegree());
 	NoiseLevel -= 1;
 }
 
@@ -760,7 +762,7 @@ void Ciphertext::multScalarNoPrecheck(const double c, bool rescale) {
 
 	// Manage metadata
 	NoiseLevel += 1;
-	NoiseFactor *= cc.param.ScalingFactorReal.at(c0.getLevel());
+	NoiseFactor *= cc.sfAtLimb(c0.getLevel());
 	if (rescale && cc.rescaleTechnique == FIXEDAUTO) {
 		this->rescale();
 	}
@@ -1388,7 +1390,7 @@ void Ciphertext::evalLinearWSumMutable(uint32_t n, const std::vector<Ciphertext*
 			slots = std::max(slots, ctxs[i]->slots);
 		}
 		this->NoiseLevel  = 2;
-		this->NoiseFactor = cc.param.ScalingFactorReal.at(getLevel()) * cc.param.ScalingFactorReal.at(getLevel());
+		this->NoiseFactor = cc.sfAtLimb(getLevel()) * cc.sfAtLimb(getLevel());
 	} else {
 		this->multScalar(*ctxs[0], weights[0], false);
 		for (int i = 1; i < n; ++i) {
@@ -1577,8 +1579,8 @@ bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
 				if (c2depth == 2) {
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf	= cc.param.ScalingFactorReal[c1lvl];	 // cryptoParams->GetScalingFactorReal(c1lvl);
-					double q1	= cc.param.ModReduceFactor[sizeQl1 - 1]; // cryptoParams->GetModReduceFactor(sizeQl1 - 1);
+					double scf	= cc.sfAtLimb(c1lvl);	 // cryptoParams->GetScalingFactorReal(c1lvl);
+					double q1	= cc.modReduceProduct(c1lvl); // composite: product of the d dropped primes
 					multScalarNoPrecheck(scf2 / scf1 * q1 / scf);
 					rescale();
 					if (getLevel() > b.getLevel()) {
@@ -1591,24 +1593,24 @@ bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
 					rescale();
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf = cc.param.ScalingFactorReal[c1lvl];  // cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf = cc.sfAtLimb(c1lvl);  // cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					this->dropToLevel(c2lvl);
 					//LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
 					NoiseFactor = scf2;
 */
 				} else {
-					if (c1lvl - 1 == c2lvl) {
+					if (c1lvl - cc.compositeDegree() == c2lvl) {
 						rescale();
 					} else {
 						double scf1 = NoiseFactor;
-						double scf2 = cc.param.ScalingFactorRealBig[c2lvl + 1]; // cryptoParams->GetScalingFactorRealBig(c2lvl - 1);
-						double scf	= cc.param.ScalingFactorReal[c1lvl];		// cryptoParams->GetScalingFactorReal(c1lvl);
-						double q1	= cc.param.ModReduceFactor[sizeQl1 - 1];	// cryptoParams->GetModReduceFactor(sizeQl1 - 1);
+						double scf2 = cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]; // composite: one LEVEL below target
+						double scf	= cc.sfAtLimb(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
+						double q1	= cc.modReduceProduct(c1lvl);	// composite: product of the d dropped primes
 						multScalarNoPrecheck(scf2 / scf1 * q1 / scf);
 						rescale();
-						if (getLevel() - 1 > b.getLevel()) {
-							this->dropToLevel(b.getLevel() + 1);
+						if (getLevel() - cc.compositeDegree() > b.getLevel()) {
+							this->dropToLevel(b.getLevel() + cc.compositeDegree());
 							// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl - 2);
 						}
 						rescale();
@@ -1621,7 +1623,7 @@ bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
 				if (c2depth == 2) {
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf	= cc.param.ScalingFactorReal[c1lvl]; // cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf	= cc.sfAtLimb(c1lvl); // cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					this->dropToLevel(c2lvl);
 					// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
@@ -1629,11 +1631,11 @@ bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
 					NoiseFactor = scf2;
 				} else {
 					double scf1 = NoiseFactor;
-					double scf2 = cc.param.ScalingFactorRealBig[c2lvl + 1]; // cryptoParams->GetScalingFactorRealBig(c2lvl - 1);
-					double scf	= cc.param.ScalingFactorReal[c1lvl];		// cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf2 = cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]; // composite: one LEVEL below target
+					double scf	= cc.sfAtLimb(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
-					if (c1lvl - 1 > c2lvl) {
-						this->dropToLevel(c2lvl + 1);
+					if (c1lvl - cc.compositeDegree() > c2lvl) {
+						this->dropToLevel(c2lvl + cc.compositeDegree());
 						// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl - 1);
 					}
 					rescale();

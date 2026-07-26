@@ -151,24 +151,92 @@ __global__ void binomial_square_fold_(void** c0_res, void** c2_key_switched_0, v
     }
 }
 
+// n32: this is the bootstrap's MODULUS RAISE. The old body was guarded by
+// `ISU64(primeid) && ISU64(0)` with NO else, so on a uniform-U32 chain (constants.type == 0,
+// i.e. ISU64 false for every prime) it wrote NOTHING — and the target limbs were freshly
+// allocated by RNSPoly::grow -> generate() WITHOUT being zeroed, so EvalMod consumed
+// uninitialized pool memory and the bootstrap decrypted to NaN.
+// Handle every width combination: read at the source limb's width, switch modulus in a type
+// wide enough to hold both moduli, store at the target limb's width. The mixed cases are not
+// exercised by a uniform chain but must not be silent no-ops either.
+__device__ __forceinline__ void broadcastLimb0Body(const void* src, void* dst, const int idx, const int primeid) {
+    if (ISU64(0)) {
+        uint64_t in = ((const uint64_t*)src)[idx];
+        SwitchModulus(in, 0, primeid);
+        if (ISU64(primeid))
+            ((uint64_t*)dst)[idx] = in;
+        else
+            ((uint32_t*)dst)[idx] = (uint32_t)in;
+    } else {
+        const uint32_t in32 = ((const uint32_t*)src)[idx];
+        if (ISU64(primeid)) {
+            uint64_t in = in32;
+            SwitchModulus(in, 0, primeid);
+            ((uint64_t*)dst)[idx] = in;
+        } else {
+            uint32_t in = in32;
+            SwitchModulus(in, 0, primeid);
+            ((uint32_t*)dst)[idx] = in;
+        }
+    }
+}
+
 __global__ void broadcastLimb0_(void** a) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     const int primeid = blockIdx.y + 1;
-    if (ISU64(primeid) && ISU64(0)) {
-        uint64_t in = ((uint64_t*)a[0])[idx];
-        SwitchModulus(in, 0, primeid);
-        ((uint64_t*)a[primeid])[idx] = in;
+    broadcastLimb0Body(a[0], a[primeid], idx, primeid);
+}
+
+// COMPOSITESCALING ModRaise (see header). Grid: {N/threads, limbs}; src[k] holds a SNAPSHOT
+// of source limb k's coefficients (raw device copy, width of prime k). All arithmetic is
+// width-branched per prime; the accumulator uses the TARGET prime's width.
+__global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
+                                   const uint64_t* qhat) {
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const int primeid = blockIdx.y;
+    const int limbs = gridDim.y;
+
+    if (ISU64(primeid)) {
+        uint64_t acc = 0;
+        for (int k = 0; k < d; ++k) {
+            uint64_t x;
+            if (ISU64(k)) {
+                x = ((const uint64_t*)src[k])[idx];
+                x = modmult<ALGO_BARRETT>(x, qhatinv[k], k);
+            } else {
+                uint32_t x32 = ((const uint32_t*)src[k])[idx];
+                x32 = modmult<ALGO_BARRETT>(x32, (uint32_t)qhatinv[k], k);
+                x = x32;
+            }
+            SwitchModulus(x, k, primeid);
+            acc = modadd(acc, modmult<ALGO_BARRETT>(x, qhat[k * limbs + primeid], primeid), primeid);
+        }
+        ((uint64_t*)a[primeid])[idx] = acc;
+    } else {
+        uint32_t acc = 0;
+        for (int k = 0; k < d; ++k) {
+            uint32_t x;
+            if (ISU64(k)) {
+                // wide source, narrow target: switch modulus in 64-bit, then narrow
+                uint64_t x64 = ((const uint64_t*)src[k])[idx];
+                x64 = modmult<ALGO_BARRETT>(x64, qhatinv[k], k);
+                SwitchModulus(x64, k, primeid);
+                x = (uint32_t)x64;
+            } else {
+                x = ((const uint32_t*)src[k])[idx];
+                x = modmult<ALGO_BARRETT>(x, (uint32_t)qhatinv[k], k);
+                SwitchModulus(x, k, primeid);
+            }
+            acc = modadd(acc, modmult<ALGO_BARRETT>(x, (uint32_t)qhat[k * limbs + primeid], primeid), primeid);
+        }
+        ((uint32_t*)a[primeid])[idx] = acc;
     }
 }
 
 __global__ void broadcastLimb0_mgpu(void** a, const __grid_constant__ int primeid_init, void** limb0) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
-    if (ISU64(primeid) && ISU64(0)) {
-        uint64_t in = ((uint64_t*)limb0[0])[idx];
-        SwitchModulus(in, 0, primeid);
-        ((uint64_t*)a[blockIdx.y])[idx] = in;
-    }
+    broadcastLimb0Body(limb0[0], a[blockIdx.y], idx, primeid);
 }
 
 __global__ void copy_(void** a, void** b) {
@@ -702,50 +770,66 @@ __global__ void hoistedRotateDotKSKBatched___(void*** c1, void*** din1, void*** 
 }
 */
 
-__global__ void dotProductPt_(void** c0, void** c1, void*** data, const size_t ptroffset, const int primeidInit,
-                              const int n) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    const int primeid = C_.primeid_flattened[primeidInit + blockIdx.y];
+// n32: the gStep > 8 sibling of dotProductLtBatchedPt3___, used by the non-batched linear
+// transform (LimbPartition::dotProductPt) and by CoeffsToSlots' wide steps -- at logN=16 a
+// single bootstrap exercises BOTH kernels. It was uint64_t-hardcoded with no width branch,
+// so on U32 limbs it read/wrote at twice the element size. Same treatment: templated body,
+// width branch at the top. modmult<algo> and modadd both have uint32_t overloads.
+template <typename T>
+__device__ __forceinline__ void dotProductPtBody(void** c0, void** c1, void*** data, const size_t ptroffset,
+                                                 const int n, const int idx, const int primeid) {
     constexpr ALGO algo = ALGO_BARRETT;
 
-    uint64_t out0, out1;
-    uint64_t in = ((uint64_t*)data[n * 2][ptroffset + blockIdx.y])[idx];
+    T out0, out1;
+    T in = ((T*)data[n * 2][ptroffset + blockIdx.y])[idx];
     if (PRINT && idx == 0 && blockIdx.y == 0)
-        printf("LT:, b: %d, g:, in pt: %lu \n", 0, in);
-    out0 = modmult<algo>(in, ((uint64_t*)data[0][ptroffset + blockIdx.y])[idx], primeid);
+        printf("LT:, b: %d, g:, in pt: %lu \n", 0, (unsigned long)in);
+    out0 = modmult<algo>(in, ((T*)data[0][ptroffset + blockIdx.y])[idx], primeid);
 
     if (PRINT && idx == 0 && blockIdx.y == 0)
-        printf("LT: %d, b: %d, in c0: %lu \n", -1, 0, ((uint64_t*)data[0][ptroffset + blockIdx.y])[idx]);
+        printf("LT: %d, b: %d, in c0: %lu \n", -1, 0, (unsigned long)((T*)data[0][ptroffset + blockIdx.y])[idx]);
 
-    out1 = modmult<algo>(in, ((uint64_t*)data[n][ptroffset + blockIdx.y])[idx], primeid);
+    out1 = modmult<algo>(in, ((T*)data[n][ptroffset + blockIdx.y])[idx], primeid);
 
     if (PRINT && idx == 0 && blockIdx.y == 0)
-        printf("LT: %d, b: %d, in c1: %lu \n", -1, 0, ((uint64_t*)data[n][ptroffset + blockIdx.y])[idx]);
+        printf("LT: %d, b: %d, in c1: %lu \n", -1, 0, (unsigned long)((T*)data[n][ptroffset + blockIdx.y])[idx]);
 
     for (int i = 1; i < n; ++i) {
-        in = ((uint64_t*)data[n * 2 + i][ptroffset + blockIdx.y])[idx];
+        in = ((T*)data[n * 2 + i][ptroffset + blockIdx.y])[idx];
 
         if (PRINT && idx == 0 && blockIdx.y == 0)
-            printf("LT:, b: %d, g:, in pt: %lu \n", i, in);
+            printf("LT:, b: %d, g:, in pt: %lu \n", i, (unsigned long)in);
 
-        uint64_t aux0 = modmult<algo>(in, ((uint64_t*)data[i][ptroffset + blockIdx.y])[idx], primeid);
-
-        if (PRINT && idx == 0 && blockIdx.y == 0)
-            printf("LT: %d, b: %d, in c0: %lu \n", -1, i, ((uint64_t*)data[i][ptroffset + blockIdx.y])[idx]);
-
-        uint64_t aux1 = modmult<algo>(in, ((uint64_t*)data[n + i][ptroffset + blockIdx.y])[idx], primeid);
+        T aux0 = modmult<algo>(in, ((T*)data[i][ptroffset + blockIdx.y])[idx], primeid);
 
         if (PRINT && idx == 0 && blockIdx.y == 0)
-            printf("LT: %d, b: %d, in c1: %lu \n", -1, i, ((uint64_t*)data[n + i][ptroffset + blockIdx.y])[idx]);
+            printf("LT: %d, b: %d, in c0: %lu \n", -1, i, (unsigned long)((T*)data[i][ptroffset + blockIdx.y])[idx]);
+
+        T aux1 = modmult<algo>(in, ((T*)data[n + i][ptroffset + blockIdx.y])[idx], primeid);
+
+        if (PRINT && idx == 0 && blockIdx.y == 0)
+            printf("LT: %d, b: %d, in c1: %lu \n", -1, i,
+                   (unsigned long)((T*)data[n + i][ptroffset + blockIdx.y])[idx]);
         out0 = modadd(out0, aux0, primeid);
         out1 = modadd(out1, aux1, primeid);
     }
     if (PRINT && idx == 0 && blockIdx.y == 0)
-        printf("LT: , g: , res: %lu \n", out0);
+        printf("LT: , g: , res: %lu \n", (unsigned long)out0);
     if (PRINT && idx == 0 && blockIdx.y == 0)
-        printf("LT: , g: , res: %lu \n", out1);
-    ((uint64_t*)c0[ptroffset + blockIdx.y])[idx] = out0;
-    ((uint64_t*)c1[ptroffset + blockIdx.y])[idx] = out1;
+        printf("LT: , g: , res: %lu \n", (unsigned long)out1);
+    ((T*)c0[ptroffset + blockIdx.y])[idx] = out0;
+    ((T*)c1[ptroffset + blockIdx.y])[idx] = out1;
+}
+
+__global__ void dotProductPt_(void** c0, void** c1, void*** data, const size_t ptroffset, const int primeidInit,
+                              const int n) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const int primeid = C_.primeid_flattened[primeidInit + blockIdx.y];
+
+    if (ISU64(primeid))
+        dotProductPtBody<uint64_t>(c0, c1, data, ptroffset, n, idx, primeid);
+    else
+        dotProductPtBody<uint32_t>(c0, c1, data, ptroffset, n, idx, primeid);
 }
 
 /*
@@ -904,46 +988,36 @@ __global__ void dotProductLtBatchedPt2___(void*** c0_out, void*** c1_out, void**
     }
 }
 
-__global__ void dotProductLtBatchedPt3___(void*** c0_out, void*** c1_out, void*** c0_in, void*** c1_in, void*** pts,
-                                          const int bStep, const int gStep, const int primeidInit, const int n) {
-    int idx = threadIdx.x + threadIdx.z * blockDim.x + blockIdx.x * blockDim.x * blockDim.z;
-    //int b = blockDim.z;
-    const int primeid = C_.primeid_flattened[primeidInit + blockIdx.y];
-    constexpr ALGO algo = ALGO_BARRETT;
-
-    extern __shared__ char buffer[];
-
-    // Shared required: (2*batch+1/2)*threads_per_block
+// n32: T = limb width, ACC = accumulator wide enough for bStep * (T*T).
+// U64: 60-bit primes -> 120-bit products -> __uint128_t accumulator (as before).
+// U32: 28-bit primes -> 56-bit products -> a uint64_t accumulator holds bStep up to 2^8=256
+// terms without overflow, which covers every baby-step count this kernel is launched with.
+// The host sizes the shared buffer with sizeof(__uint128_t) (LimbPartitionBatch.cu), so the
+// U32 arm's uint64_t accumulator simply under-uses it — over-allocation is the safe direction.
+template <typename T, typename ACC>
+__device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*** c1_out, void*** c0_in,
+                                                           void*** c1_in, void*** pts, const int bStep,
+                                                           const int gStep, const int n, const int idx,
+                                                           const int primeid, char* buffer) {
     const int in_stride = blockDim.x * blockDim.y * blockDim.z;
     const int block_id = (threadIdx.x + blockDim.x * threadIdx.y + blockDim.x * blockDim.y * threadIdx.z);
-    //uint64_t* in = ((uint64_t*)buffer) + block_id;
-    //uint64_t in[6];
 
-    //uint64_t* acc = ((uint64_t*)buffer) + in_stride * batch;
-    __uint128_t* acc_this_thread = ((__uint128_t*)buffer) + block_id;
-    //uint64_t* pt = acc + 2 * in_stride + (threadIdx.x + blockDim.x * threadIdx.z);
+    ACC* acc_this_thread = ((ACC*)buffer) + block_id;
 
-    //int r_init = 1 << (32 - __clz(b - 1) - 1);
-    bool im_c0 = threadIdx.y == 0;
-    const int b_idx = threadIdx.z;
-
-    uint64_t pt;
-
+    const bool im_c0 = threadIdx.y == 0;
     void*** inputs = im_c0 ? c0_in : c1_in;
     void*** outputs = im_c0 ? c0_out : c1_out;
 
     for (int k = blockIdx.z; k < n; k += gridDim.z) {
-
         for (int i = 0; i < bStep; ++i) {
-            uint64_t in = ((uint64_t*)inputs[k * bStep + i][blockIdx.y])[idx];
+            const T in = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
 
             for (int j = 0; j < gStep; ++j) {
                 void** pt_partition = pts[k * bStep * gStep + j * bStep + i];
 
-                __uint128_t mult = 0;
+                ACC mult = 0;
                 if (pt_partition != nullptr) {
-                    //pt[0] = ((uint64_t*)pt_partition[blockIdx.y])[idx];
-                    mult = (__uint128_t)in * (__uint128_t)((uint64_t*)pt_partition[blockIdx.y])[idx];
+                    mult = (ACC)in * (ACC)((T*)pt_partition[blockIdx.y])[idx];
                 }
                 if (i == 0)
                     acc_this_thread[j * in_stride] = mult;
@@ -951,12 +1025,34 @@ __global__ void dotProductLtBatchedPt3___(void*** c0_out, void*** c1_out, void**
                     acc_this_thread[j * in_stride] = acc_this_thread[j * in_stride] + mult;
 
                 if (i == bStep - 1) {
-                    uint64_t res = modreduce<ALGO_NATIVE>(acc_this_thread[j * in_stride], primeid);
-                    ((uint64_t*)outputs[k * gStep + j][blockIdx.y])[idx] = res;
+                    // modreduce(__uint128_t)->uint64_t and modreduce(uint64_t)->uint32_t both exist
+                    const T res = modreduce<ALGO_NATIVE>(acc_this_thread[j * in_stride], primeid);
+                    ((T*)outputs[k * gStep + j][blockIdx.y])[idx] = res;
                 }
             }
         }
     }
+}
+
+// n32: this is THE live CoeffsToSlots / SlotsToCoeffs / linear-transform dot product
+// (LinearTransform.cu -> RNSPoly::LTdotProductPtBatch -> LimbPartitionBatch.cu, VER2==VER3==true).
+// It was 100% uint64_t-hardcoded with no width branch, so against U32 limbs every load fused
+// coefficients 2*idx and 2*idx+1 into one word and every store splattered 8 bytes across two
+// logical coefficients — the homomorphic DFT was decorrelated from its input. It did not fault
+// only because U32 limbs are over-allocated to 2N elements (Limb.cu:34).
+__global__ void dotProductLtBatchedPt3___(void*** c0_out, void*** c1_out, void*** c0_in, void*** c1_in, void*** pts,
+                                          const int bStep, const int gStep, const int primeidInit, const int n) {
+    int idx = threadIdx.x + threadIdx.z * blockDim.x + blockIdx.x * blockDim.x * blockDim.z;
+    const int primeid = C_.primeid_flattened[primeidInit + blockIdx.y];
+
+    extern __shared__ char buffer[];
+
+    if (ISU64(primeid))
+        dotProductLtBatchedPt3Body<uint64_t, __uint128_t>(c0_out, c1_out, c0_in, c1_in, pts, bStep, gStep, n, idx,
+                                                          primeid, buffer);
+    else
+        dotProductLtBatchedPt3Body<uint32_t, uint64_t>(c0_out, c1_out, c0_in, c1_in, pts, bStep, gStep, n, idx,
+                                                       primeid, buffer);
 }
 
 __global__ void dotProductLtBatchedPt___(void*** c0_out, void*** c1_out, void*** c0_in, void*** c1_in, void*** pts,

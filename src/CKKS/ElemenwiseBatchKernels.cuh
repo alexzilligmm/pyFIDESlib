@@ -35,6 +35,13 @@ __global__ void Scalar_mult_(void** a, const uint64_t* b, const __grid_constant_
 
 __global__ void broadcastLimb0_(void** a);
 __global__ void broadcastLimb0_mgpu(void** a, const __grid_constant__ int primeid_init, void** limb0);
+/** COMPOSITESCALING ModRaise: writes, for every limb i in [0, limbs):
+ *      a[i][idx] = sum_{k<d} lift_{k->i}( src[k][idx] * qhatinv[k] mod q_k ) * qhat[k*limbs + i] mod q_i
+ *  i.e. OpenFHE's ExtendCiphertext CRT recomposition ([a]_{q0q1} = [a*q1^-1]_{q0}*q1 + ...).
+ *  src must NOT alias a (the low limbs of a are overwritten) — pass snapshot copies.
+ *  qhatinv[k] = (Q0/q_k)^{-1} mod q_k;  qhat[k*limbs+i] = (Q0/q_k) mod q_i. */
+__global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
+                                   const uint64_t* qhat);
 __global__ void copy_(void** a, void** b);
 __global__ void copy1D_(void* a, void* b);
 __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void*** bs, uint64_t* w,

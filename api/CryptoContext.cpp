@@ -1262,7 +1262,8 @@ DecryptResult CryptoContextImpl<DCRTPoly>::Decrypt(Ciphertext<DCRTPoly>& ct, con
 		if (cpu_levels < gpu_levels) {
 			// Create a fresh ciphertext at the top level with enough space
 			std::vector<double> dummy(1, 0.0);
-			auto pt_dummy = context->MakeCKKSPackedPlaintext(dummy, 1, this->multiplicative_depth - ct_gpu->getLevel());
+			// OpenFHE's encode `level` param counts primes dropped (composite-safe): cc.L - limb.
+			auto pt_dummy = context->MakeCKKSPackedPlaintext(dummy, 1, ct_gpu->cc.L - ct_gpu->getLevel());
 			auto& skImpl  = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(sk->pimpl);
 			ct_cpu		  = context->Encrypt(skImpl, pt_dummy);
 		}
@@ -2324,7 +2325,8 @@ void CryptoContextImpl<DCRTPoly>::DropToLevel(Ciphertext<DCRTPoly>& ciphertext, 
 	// REMAINING depth (device=mult_depth-host_level), so convert the OpenFHE target level.
 	this->LoadCiphertext(ciphertext);
 	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ciphertext->gpu));
-	ct_gpu->dropToLevel(static_cast<int>(this->multiplicative_depth) - static_cast<int>(level));
+	// level counts primes dropped (OpenFHE convention, composite-safe): target limb = cc.L - level.
+	ct_gpu->dropToLevel(static_cast<int>(ct_gpu->cc.L) - static_cast<int>(level));
 }
 
 void CryptoContextImpl<DCRTPoly>::SetLevel(Ciphertext<DCRTPoly>& ct, size_t level) {
