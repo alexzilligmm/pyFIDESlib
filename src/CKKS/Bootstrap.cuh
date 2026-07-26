@@ -5,10 +5,18 @@
 #ifndef GPUCKKS_BOOTSTRAP_CUH
 #define GPUCKKS_BOOTSTRAP_CUH
 
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 #include "forwardDefs.cuh"
 #include "pke/openfhe.h"
 
 namespace FIDESlib::CKKS {
+/// Stage-divergence harness hook (default nullptr = off): install a vector to receive a
+/// clone of the ciphertext at each bootstrap stage checkpoint (pre-CtS, post-CtS, pre-StC,
+/// post-StC, end). Single-threaded use only; caller must reset to nullptr afterwards.
+extern std::vector<std::pair<std::string, std::shared_ptr<Ciphertext>>>* g_btsStageStash;
 void BootstrapCPUraise(
     Ciphertext& ctxt, const int slots,
     std::shared_ptr<

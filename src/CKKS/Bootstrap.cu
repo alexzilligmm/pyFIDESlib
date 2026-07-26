@@ -24,7 +24,19 @@ constexpr bool PRINT = false;
 // Pair with FIDESLIB_DA_FOLD (ApproxModEval.cu): the 2^correction recovery is
 // folded into the last double-angle iteration, so the end-of-bootstrap integer
 // scale-back must be skipped.
+// Stage-divergence harness (default off): when a caller installs a stash vector, every
+// btsStageProbe checkpoint (pre-CtS / post-CtS / pre-StC / post-StC / end) also deposits a
+// full ciphertext clone the caller can download+decrypt offline. Zero cost when null.
+std::vector<std::pair<std::string, std::shared_ptr<FIDESlib::CKKS::Ciphertext>>>*
+    FIDESlib::CKKS::g_btsStageStash = nullptr;
+
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
+    if (FIDESlib::CKKS::g_btsStageStash) {
+        cudaDeviceSynchronize();
+        auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
+        c->copy(ctxt);
+        FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
+    }
     if (!std::getenv("BTS_SF_DEBUG"))
         return;
     cudaDeviceSynchronize();
@@ -176,6 +188,21 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         ctxt.rescale();
     }
 
+    // FIDESLIB_CORFACTOR_PRE=1: apply the correction restore BEFORE SlotsToCoeffs.
+    // StC is linear (StC(2^c x) = 2^c StC(x)) so the final value is identical, but the
+    // stage-budget harness (2026-07-26) showed StC injects a CONSTANT ~8e-5 (2^-13.5)
+    // absolute error while its EvalMod input is ~2^-25 clean: amplifying the SIGNAL
+    // through StC instead of amplifying StC's noise afterwards removes the 2^correction
+    // error blow-up entirely (the q0-headroom reason for the small message dies at
+    // EvalMod). Default off = byte-identical legacy behaviour.
+    static const bool corPre = [] {
+        const char* e = std::getenv("FIDESLIB_CORFACTOR_PRE");
+        return e && *e && *e != '0';
+    }();
+    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
+    if (corPre && !skipCorFactor() && corFactor != 1)
+        multIntScalar(ctxt, corFactor);
+
     btsStageProbe("pre-StC", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, true);
@@ -189,8 +216,7 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         ctxt.add(aux);
     }
 
-    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
-    if (!skipCorFactor() && corFactor != 1)
+    if (!corPre && !skipCorFactor() && corFactor != 1)
         multIntScalar(ctxt, corFactor);
     // Mixed-size chain: realize the pending StC rescale so the output lands
     // deg-1 exactly on the per-level table at the data scale (the lazy deg-2
@@ -356,6 +382,21 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         ctxt.rescale();
     }
 
+    // FIDESLIB_CORFACTOR_PRE=1: apply the correction restore BEFORE SlotsToCoeffs.
+    // StC is linear (StC(2^c x) = 2^c StC(x)) so the final value is identical, but the
+    // stage-budget harness (2026-07-26) showed StC injects a CONSTANT ~8e-5 (2^-13.5)
+    // absolute error while its EvalMod input is ~2^-25 clean: amplifying the SIGNAL
+    // through StC instead of amplifying StC's noise afterwards removes the 2^correction
+    // error blow-up entirely (the q0-headroom reason for the small message dies at
+    // EvalMod). Default off = byte-identical legacy behaviour.
+    static const bool corPre = [] {
+        const char* e = std::getenv("FIDESLIB_CORFACTOR_PRE");
+        return e && *e && *e != '0';
+    }();
+    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
+    if (corPre && !skipCorFactor() && corFactor != 1)
+        multIntScalar(ctxt, corFactor);
+
     btsStageProbe("pre-StC", ctxt);
     if (isLT) {
         EvalLinearTransform(ctxt, slots, true);
@@ -369,8 +410,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         ctxt.add(aux);
     }
 
-    uint64_t corFactor = (uint64_t)1 << std::llround(correction);
-    if (!skipCorFactor() && corFactor != 1)
+    if (!corPre && !skipCorFactor() && corFactor != 1)
         multIntScalar(ctxt, corFactor);
     // Mixed-size chain: realize the pending StC rescale so the output lands
     // deg-1 exactly on the per-level table at the data scale (the lazy deg-2
