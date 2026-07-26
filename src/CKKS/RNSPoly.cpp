@@ -253,6 +253,15 @@ void RNSPoly::sync() {
 
 void RNSPoly::rescale() {
     //    assert(GPU.size() == 1 && "Rescale Multi-GPU not implemented.");
+    // n32 speed: d=2 single-GPU fast path — ONE fused double-drop pass (bit-identical to the
+    // two-pass loop below; LimbPartition::rescale2 falls back by returning false when the
+    // shape doesn't fit, e.g. constant/aux-less limbs or <3 limbs).
+    if (cc.compositeDegree() == 2 && GPU.size() == 1) {
+        if (GPU[0].rescale2()) {
+            level -= 2;
+            return;
+        }
+    }
     // COMPOSITESCALING: one CKKS level = cc.compositeDegree() primes, and OpenFHE's
     // composite ModReduce is literally a d-fold loop of the single-prime drop
     // (ckksrns-leveledshe.cpp, DropLastElementAndScale per dropped prime) — so the GPU
@@ -295,6 +304,18 @@ void RNSPoly::rescale() {
 
 void RNSPoly::rescaleDouble(RNSPoly& poly) {
     //    assert(GPU.size() == 1 && "Rescale Multi-GPU not implemented.");
+    // n32 speed: d=2 single-GPU fast path — one fused double-drop pass per component (each on
+    // its own partition stream, so c0/c1 overlap). Both components have identical shape, so
+    // eligibility cannot diverge; enforce that loudly rather than continue inconsistent.
+    if (cc.compositeDegree() == 2 && GPU.size() == 1) {
+        if (GPU[0].rescale2()) {
+            if (!poly.GPU[0].rescale2())
+                throw std::runtime_error("rescaleDouble: c0 took the fused double-drop but c1 did not");
+            level -= 2;
+            poly.level -= 2;
+            return;
+        }
+    }
     // COMPOSITESCALING: d-fold loop, levels decremented between iterations (see rescale()).
     for (int r_ = 0; r_ < cc.compositeDegree(); ++r_) {
     if (0 && GPU.size() == 1) {

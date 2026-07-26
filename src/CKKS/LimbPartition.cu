@@ -408,7 +408,11 @@ void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields,
     const dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
     const int bytesFirst = (32 / M) * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == ALGO_SHOUP ? 1 : 0));
     const int bytesSecond = (32 / M) * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == ALGO_SHOUP ? 1 : 0));
-    const int size = (limbsize != -1 ? limbsize : limb.size()) - (mode == NTT_RESCALE || mode == NTT_MULTPT);
+    // NTT_RESCALE2 (n32 speed): fused composite double drop. The two top limbs are consumed
+    // (size = limbsize - 2); stage-1 dat = limbptr + size, so the kernel sees dat[0] = the qb
+    // limb and dat[1] = the qa top (both coeff domain); primeid_rescale = the TOP prime (qa).
+    const int size = (limbsize != -1 ? limbsize : limb.size()) -
+                     (mode == NTT_RESCALE || mode == NTT_MULTPT) - 2 * (mode == NTT_RESCALE2);
 
     for (int i = 0; i < size; i += batch) {
         uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(size - i));
@@ -416,17 +420,23 @@ void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields,
         NTT_<false, algo, mode><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst, bytesFirst,
                                   STREAM(limb.at(i)).ptr()>>>(
             getGlobals(),
-            (mode == NTT_RESCALE || mode == NTT_MULTPT) ? limbptr.data + size
-            : (mode == NTT_MODDOWN)                     ? fields.op2->limbptr.data + i
-                                                        : limbptr.data + i,
+            (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2) ? limbptr.data + size
+            : (mode == NTT_MODDOWN)                                             ? fields.op2->limbptr.data + i
+                                                                                : limbptr.data + i,
             primeid_init + i, auxptr.data + i, nullptr,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT) ? PRIMEID(limb[size]) : 0, nullptr, nullptr);
+            (mode == NTT_RESCALE || mode == NTT_MULTPT) ? PRIMEID(limb[size])
+            : (mode == NTT_RESCALE2)                    ? PRIMEID(limb[size + 1])
+                                                        : 0,
+            nullptr, nullptr);
 
         NTT_<true, algo, mode><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond, bytesSecond,
                                  STREAM(limb.at(i)).ptr()>>>(
             getGlobals(), auxptr.data + i, primeid_init + i, limbptr.data + i,
             mode == NTT_MULTPT ? fields.pt->limbptr.data + i : nullptr,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT) ? PRIMEID(limb[size]) : 0, nullptr, nullptr);
+            (mode == NTT_RESCALE || mode == NTT_MULTPT) ? PRIMEID(limb[size])
+            : (mode == NTT_RESCALE2)                    ? PRIMEID(limb[size + 1])
+                                                        : 0,
+            nullptr, nullptr);
     }
 }
 
@@ -697,6 +707,63 @@ void LimbPartition::rescale() {
     //    STREAM(limb.back()).wait(s);
     //    limb.pop_back();
     //}
+}
+
+// n32 speed: fused composite DOUBLE prime drop (compositeDegree()==2 chains). One gy=2
+// top-pair INTT + one NTT_RESCALE2 pass replace TWO full sequential rescale passes (each with
+// its own gy=1 top INTT + gy=(L-1) NTT_RESCALE pair) — ~half the rescale kernel work.
+// Sequential drop semantics are preserved exactly inside the kernel (rescale2_combine,
+// NTT.cu), so the result is BIT-IDENTICAL to two rescale() calls. Returns false (caller falls
+// back to the two-pass loop) when the shape doesn't fit: fewer than 3 limbs, non-consecutive
+// top primeids (multi-GPU interleaving), or aux-less (constant) limbs.
+bool LimbPartition::rescale2() {
+    const int limbsize = getLimbSize(*level);
+    if (limbsize < 3)
+        return false;
+    LimbImpl& top = limb.at(limbsize - 1);
+    LimbImpl& top2 = limb.at(limbsize - 2);
+    if (PRIMEID(top2) != PRIMEID(top) - 1)
+        return false;
+    int aux_size;
+    SWITCH_RET(top, aux.size, aux_size);
+    if (aux_size == 0)
+        return false;
+
+    cudaSetDevice(device);
+    constexpr ALGO algo = ALGO_SHOUP;
+    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8)
+
+    // 1. top-pair INTT (gy=2), in place via the limbs' own aux staging, on the partition stream.
+    {
+        dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+        dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
+        int bytesFirst = (32 / M) * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
+        int bytesSecond = (32 / M) * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
+
+        INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), 2}, blockDimFirst, bytesFirst,
+                                        s.ptr()>>>(getGlobals(), limbptr.data + limbsize - 2,
+                                                   PARTITION(id, limbsize - 2), auxptr.data + limbsize - 2);
+        INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), 2}, blockDimSecond, bytesSecond,
+                                       s.ptr()>>>(getGlobals(), auxptr.data + limbsize - 2,
+                                                  PARTITION(id, limbsize - 2), limbptr.data + limbsize - 2);
+    }
+
+    // 2. the fused double-drop pass (gy = limbsize-2), also on the partition stream.
+    {
+        dim3 blockDimFirst{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
+        dim3 blockDimSecond = dim3{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+        int bytesFirst = (32 / M) * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == ALGO_SHOUP ? 1 : 0));
+        int bytesSecond = (32 / M) * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == ALGO_SHOUP ? 1 : 0));
+        const int size = limbsize - 2;
+
+        NTT_<false, algo, NTT_RESCALE2><<<dim3{cc.N / (blockDimFirst.x * M * 2), (uint32_t)size}, blockDimFirst,
+                                          bytesFirst, s.ptr()>>>(getGlobals(), limbptr.data + size, PARTITION(id, 0),
+                                                                 auxptr.data, nullptr, PRIMEID(top));
+        NTT_<true, algo, NTT_RESCALE2><<<dim3{cc.N / (blockDimSecond.x * M * 2), (uint32_t)size}, blockDimSecond,
+                                         bytesSecond, s.ptr()>>>(getGlobals(), auxptr.data, PARTITION(id, 0),
+                                                                 limbptr.data, nullptr, PRIMEID(top));
+    }
+    return true;
 }
 
 void LimbPartition::multPt(const LimbPartition& p) {

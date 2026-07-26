@@ -392,6 +392,28 @@ __device__ __forceinline__ void rescale_fusion(char* buffer, const int logBD, co
     }
 }
 
+// n32 speed (NTT_RESCALE2 stage 2): fused composite double drop — the shared value A[j]
+// already carries the full combined K-weighted top contribution (built by rescale2_combine at
+// stage-1 load), so the store-side x_j coefficient is qinv[a->j]*qinv[b->j] and A adds with
+// weight 1. Exactly the composition of two rescale_fusion applications.
+template <typename T, ALGO algo_, int M>
+__device__ __forceinline__ void rescale2_fusion(char* buffer, const int logBD, const int j, const int primeid,
+                                                const int primeid_rescale, const T* res,
+                                                const Global::Globals* Globals) {
+    constexpr ALGO algo = algo_ == ALGO_SHOUP ? ALGO_BARRETT : algo_;
+
+    const int ra = primeid_rescale, rb = primeid_rescale - 1;
+    const T c0 = modmult<algo>((T)G_->q_inv[MAXP * ra + primeid], (T)G_->q_inv[MAXP * rb + primeid], primeid);
+
+    for (int i = 0; i < M; i += 1) {
+        T* A = (T*)(buffer + (i << (logBD)));
+
+        T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
+        A[j] = modadd(modmult<algo>(c0, in[0], primeid), A[j], primeid);
+        A[j | 1] = modadd(modmult<algo>(c0, in[1], primeid), A[j | 1], primeid);
+    }
+}
+
 template <typename T, ALGO algo, int M>
 __device__ __forceinline__ void moddown_fusion(char* buffer, const int logBD, const int j, const int primeid,
                                                const T* res) {

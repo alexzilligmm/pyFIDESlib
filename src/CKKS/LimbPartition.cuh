@@ -125,6 +125,10 @@ class LimbPartition {
     void moddown(LimbPartition& auxLimbs, bool ntt, bool free_special_limbs);
 
     void rescale();
+    /** n32 speed: fused composite DOUBLE prime drop (bit-identical to two rescale() calls,
+     * ~half the kernel work). Returns false if the shape doesn't fit — caller must then fall
+     * back to the sequential per-prime loop. See the definition for the eligibility rules. */
+    bool rescale2();
 
     void freeSpecialLimbs();
 

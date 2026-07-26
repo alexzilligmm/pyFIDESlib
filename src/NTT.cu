@@ -296,6 +296,28 @@ __global__ void INTT_(const Global::Globals* Globals, void** __restrict__ dat, c
 
 //#define COOPERATIVE_GROUPS 1
 
+// n32 speed (NTT_RESCALE2): per-coefficient combine for the fused composite double drop.
+// Inputs are coeff-domain residues: x2c mod q_b (the second-from-top limb), va mod q_a (top).
+// Reproduces the two sequential OpenFHE drops exactly:
+//   w = qinv[a->b]*x2c + K[a->b]*SwitchMod_{a->b}(va)   (the once-divided q_b top — bit-equal
+//       to INTT(drop-1's output at limb b), because the drop formula is elementwise-linear and
+//       the modular NTT is exact)
+//   u = (K[a->j]*qinv[b->j])*SwitchMod_{a->j}(va) + K[b->j]*SwitchMod_{b->j}(w)
+// so that NTT(u) + qinv[a->j]*qinv[b->j]*x_j equals drop2(drop1(x))_j exactly (per-prime
+// scalars commute with the NTT). K = QlQlInvModqlDivqlModq. Constants are block-uniform.
+template <typename T, ALGO algo_>
+__device__ __forceinline__ T rescale2_combine(const T x2c, const T va, const int ra, const int rb, const int pj,
+                                              const T qinv_ab, const T K_ab, const T C1, const T K_bj) {
+    constexpr ALGO algo = algo_ == ALGO_SHOUP ? ALGO_BARRETT : algo_;
+    T va_b = va;
+    CKKS::SwitchModulus(va_b, ra, rb);
+    T w = modadd(modmult<algo>(qinv_ab, x2c, rb), modmult<algo>(K_ab, va_b, rb), rb);
+    T va_j = va;
+    CKKS::SwitchModulus(va_j, ra, pj);
+    CKKS::SwitchModulus(w, rb, pj);
+    return modadd(modmult<algo>(C1, va_j, pj), modmult<algo>(K_bj, w, pj), pj);
+}
+
 template <typename T, bool second, ALGO algo, NTT_MODE mode>
 __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restrict__ dat, const int primeid,
                                       T* __restrict__ res, const T* __restrict__ pt, const int primeid_rescale,
@@ -322,6 +344,21 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
     assert(((uint64_t)G_->psi[primeid] & 0b1111ul) == 0);
     assert(G_->psi_shoup[primeid] != nullptr);
     assert(((uint64_t)G_->psi_shoup[primeid] & 0b1111ul) == 0);
+
+    // n32 speed (NTT_RESCALE2 stage 1): block-uniform constants for the fused double drop.
+    // ra = top prime (primeid_rescale), rb = ra - 1 (level-ordered q ids, asserted host-side).
+    [[maybe_unused]] const int r2_ra = primeid_rescale, r2_rb = primeid_rescale - 1;
+    [[maybe_unused]] T r2_qinv_ab{}, r2_K_ab{}, r2_C1{}, r2_K_bj{};
+    if constexpr (mode == NTT_RESCALE2 && !second) {
+        constexpr ALGO algo_c = algo == ALGO_SHOUP ? ALGO_BARRETT : algo;
+        assert(primeid_rescale >= 1 && primeid < r2_rb);
+        r2_qinv_ab = (T)G_->q_inv[MAXP * r2_ra + r2_rb];
+        r2_K_ab = (T)G_->QlQlInvModqlDivqlModq[MAXP * r2_ra + r2_rb];
+        const T qinv_bj = (T)G_->q_inv[MAXP * r2_rb + primeid];
+        const T K_aj = (T)G_->QlQlInvModqlDivqlModq[MAXP * r2_ra + primeid];
+        r2_K_bj = (T)G_->QlQlInvModqlDivqlModq[MAXP * r2_rb + primeid];
+        r2_C1 = modmult<algo_c>(K_aj, qinv_bj, primeid);
+    }
 #ifdef COOPERATIVE_GROUPS
     cg::grid_group grid = cg::this_grid();
     for (int second_ = 0; second_ < 2; ++second_) {
@@ -342,6 +379,15 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     aux = ((int4*)dat)[pos_transp >> 1];
                     //aux[0] = dat[pos_transp];
                     //aux[1] = dat[pos_transp + 1];
+                    if constexpr (mode == NTT_RESCALE2 && !second) {
+                        // fused double drop: dat = qb limb (x2c), pt = qa top (va), both coeff
+                        // domain, loaded with the identical transposed pattern (coalesced).
+                        const int4 aux2 = ((const int4*)pt)[pos_transp >> 1];
+                        ((T*)&aux)[0] = rescale2_combine<T, algo>(((T*)&aux)[0], ((const T*)&aux2)[0], r2_ra, r2_rb,
+                                                                  primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
+                        ((T*)&aux)[1] = rescale2_combine<T, algo>(((T*)&aux)[1], ((const T*)&aux2)[1], r2_ra, r2_rb,
+                                                                  primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
+                    }
                     if constexpr (1) {
                         A(j & 2)[pos_res] = ((uint64_t*)&aux)[0];
                         A((j & 2) + 1)[pos_res] = ((uint64_t*)&aux)[1];
@@ -365,6 +411,19 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     const int pos_transp = (M / 2) * (gridDim.x * (col_init + i) + blockIdx.x) + (j & 2);
                     //                   const int pos_res = (col_init + i);
                     aux = ((int4*)dat)[pos_transp >> 1];
+                    if constexpr (mode == NTT_RESCALE2 && !second) {
+                        // fused double drop: dat = qb limb (x2c), pt = qa top (va), both coeff
+                        // domain, loaded with the identical transposed pattern (coalesced).
+                        const int4 aux2 = ((const int4*)pt)[pos_transp >> 1];
+                        aux.x = (int)rescale2_combine<T, algo>((T)aux.x, (T)aux2.x, r2_ra, r2_rb, primeid, r2_qinv_ab,
+                                                               r2_K_ab, r2_C1, r2_K_bj);
+                        aux.y = (int)rescale2_combine<T, algo>((T)aux.y, (T)aux2.y, r2_ra, r2_rb, primeid, r2_qinv_ab,
+                                                               r2_K_ab, r2_C1, r2_K_bj);
+                        aux.z = (int)rescale2_combine<T, algo>((T)aux.z, (T)aux2.z, r2_ra, r2_rb, primeid, r2_qinv_ab,
+                                                               r2_K_ab, r2_C1, r2_K_bj);
+                        aux.w = (int)rescale2_combine<T, algo>((T)aux.w, (T)aux2.w, r2_ra, r2_rb, primeid, r2_qinv_ab,
+                                                               r2_K_ab, r2_C1, r2_K_bj);
+                    }
                     ((T*)&temp[0])[i] = aux.x;
                     ((T*)&temp[1])[i] = aux.y;
                     ((T*)&temp[2])[i] = aux.z;
@@ -640,6 +699,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 if constexpr (mode == NTT_RESCALE) {
                     rescale_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, Globals);
                 }
+                if constexpr (mode == NTT_RESCALE2) {
+                    rescale2_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, Globals);
+                }
                 if constexpr (mode == NTT_MULTPT) {
                     multpt_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, pt, Globals);
                 }
@@ -695,19 +757,29 @@ __global__ void NTT_(const Global::Globals* Globals, void** __restrict__ dat, co
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
 
     assert(primeid >= 0 && primeid < MAXP);
+    // NTT_RESCALE2 stage 1 reads BOTH coeff-domain top limbs: dat[0] = qb limb, dat[1] = qa
+    // top (rides the otherwise-unused pt slot into NTT__).
     if (ISU64(primeid)) {
         NTT__<uint64_t, second, algo, mode>(
             Globals,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT) && !second ? (uint64_t*)dat[0] : (uint64_t*)dat[blockIdx.y],
-            primeid, (uint64_t*)res[blockIdx.y], pt ? (uint64_t*)pt[blockIdx.y] : nullptr, primeid_rescale,
-            res2 ? (uint64_t*)res2[blockIdx.y] : nullptr, kskb ? (uint64_t*)kskb[blockIdx.y] : nullptr);
+            (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2) && !second ? (uint64_t*)dat[0]
+                                                                                           : (uint64_t*)dat[blockIdx.y],
+            primeid, (uint64_t*)res[blockIdx.y],
+            (mode == NTT_RESCALE2 && !second) ? (uint64_t*)dat[1]
+                                              : (pt ? (uint64_t*)pt[blockIdx.y] : nullptr),
+            primeid_rescale, res2 ? (uint64_t*)res2[blockIdx.y] : nullptr,
+            kskb ? (uint64_t*)kskb[blockIdx.y] : nullptr);
 
     } else {
         NTT__<uint32_t, second, algo, mode>(
             Globals,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT) && !second ? (uint32_t*)dat[0] : (uint32_t*)dat[blockIdx.y],
-            primeid, (uint32_t*)res[blockIdx.y], pt ? (uint32_t*)pt[blockIdx.y] : nullptr, primeid_rescale,
-            res2 ? (uint32_t*)res2[blockIdx.y] : nullptr, kskb ? (uint32_t*)kskb[blockIdx.y] : nullptr);
+            (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2) && !second ? (uint32_t*)dat[0]
+                                                                                           : (uint32_t*)dat[blockIdx.y],
+            primeid, (uint32_t*)res[blockIdx.y],
+            (mode == NTT_RESCALE2 && !second) ? (uint32_t*)dat[1]
+                                              : (pt ? (uint32_t*)pt[blockIdx.y] : nullptr),
+            primeid_rescale, res2 ? (uint32_t*)res2[blockIdx.y] : nullptr,
+            kskb ? (uint32_t*)kskb[blockIdx.y] : nullptr);
     }
 }
 
