@@ -86,6 +86,26 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
         //if (idx == 0) printf("Matrix to %d: ", j);
         int primeid = C_.primeid_flattened[primeid_init + j];
         if constexpr (1) {
+            if (ISU64(primeid)) {
+                // n32 speed follow-up, WIDTH-NEUTRAL: the same per-term Shoup replacement for
+                // U64 output primes — valid on ANY chain (uniform-64 or mixed): buff entries
+                // are canonical u64 residues (< their source prime), Shoup_mult_64 accepts an
+                // arbitrary 64-bit multiplicand, and the *_shoup companion matrix carries the
+                // width-aware 2^64-scaled constant keyed on this output prime. Replaces the
+                // ~200-instruction emulated __uint128_t % p per (coefficient, output limb)
+                // below; identical canonical residue by construction (reduce-then-add vs
+                // sum-then-reduce), so bit-exact vs CPU OpenFHE.
+                uint64_t res = 0;
+                for (int i = 0; i < C_.K; ++i) {
+                    const int m = MODDOWN_MATRIX(i, primeid);
+                    res = modadd(res,
+                                 modmult<ALGO_SHOUP>(buff[i * blockDim.x + tid], G_->ModDown_matrix[m], primeid,
+                                                     G_->ModDown_matrix_shoup[m]),
+                                 primeid);
+                }
+                ((uint64_t*)a[j])[idx] = res;
+                continue;
+            }
             if (C_.type == 0) {
                 // n32 speed: all-U32 chain fast path. The generic arm below accumulates in
                 // __uint128_t and finishes with `res % p` (modreduce<ALGO_NATIVE>) — an
@@ -256,6 +276,23 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
         if (primeid_j < n || primeid_j >= C_.L) {
 
             if constexpr (1) {
+                if (ISU64(primeid_j)) {
+                    // WIDTH-NEUTRAL u64 fast path — same rationale as ModDown2 above: per-term
+                    // Shoup vs the emulated u128 % p, valid on any chain, bit-exact.
+                    uint64_t res64 = 0;
+                    for (int i_ = 0; i_ < n_d_n; ++i_) {
+                        const int primeid = C_.primeid_digit_from[d][i_];
+                        const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
+                        res64 = modadd(res64,
+                                       modmult<ALGO_SHOUP>(buff[i_ * blockDim.x + tid],
+                                                           G_->DecompAndModUp_matrix[m], primeid_j,
+                                                           G_->DecompAndModUp_matrix_shoup[m]),
+                                       primeid_j);
+                    }
+                    assert(b[j_] != nullptr);
+                    ((uint64_t*)b[j_])[idx] = res64;
+                    continue;
+                }
                 if (C_.type == 0) {
                     // n32 speed: all-U32 chain fast path — same rationale as ModDown2 above
                     // (per-term width-correct Shoup vs the ~200-instr emulated u128 % p;
