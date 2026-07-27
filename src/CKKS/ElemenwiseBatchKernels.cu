@@ -3,6 +3,8 @@
 //
 
 #include <printf.h>
+#include <stdexcept>
+#include <string>
 #include "CKKS/ElemenwiseBatchKernels.cuh"
 #include "CKKS/Rescale.cuh"
 #include "Rotation.cuh"
@@ -293,12 +295,47 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
     }
 }
 
+// Lever 1b-i: funnelshift extraction of coefficient idx from a bits-per-coefficient packed
+// stream. Reads two overlapping 32-bit words; warp neighbors overlap so the extra word is
+// L1-served and DRAM sees ~bits/32 of the dense stream. The producer (packKsk_) zeroes one
+// guard word past the stream so the idx==N-1 speculative q[1] read is always in-bounds.
+__device__ __forceinline__ uint32_t kskUnpack(const void* p, const uint32_t idx, const uint32_t bits,
+                                              const uint32_t mask) {
+    const uint32_t bitoff = idx * bits;
+    const uint32_t* q = (const uint32_t*)p + (bitoff >> 5);
+    return __funnelshift_r(q[0], q[1], bitoff & 31) & mask;
+}
+
+__global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const int bits) {
+    const uint32_t total = (uint32_t)(((uint64_t)N * bits + 31) >> 5);
+    const uint32_t w = threadIdx.x + blockIdx.x * blockDim.x;
+    if (w > total)
+        return;
+    if (w == total) {  // zeroed guard word for the consumer funnelshift
+        out[w] = 0;
+        return;
+    }
+    const uint32_t mask = (1u << bits) - 1u;
+    const uint64_t bit0 = (uint64_t)w << 5;
+    uint32_t k = (uint32_t)(bit0 / bits);
+    const uint32_t off = (uint32_t)(bit0 - (uint64_t)k * bits);
+    uint64_t acc = (uint64_t)(in[k] & mask) >> off;
+    for (uint32_t filled = bits - off; filled < 32 && k + 1 < (uint32_t)N; filled += bits)
+        acc |= (uint64_t)(in[++k] & mask) << filled;
+    out[w] = (uint32_t)acc;
+}
+
 // Lever 1 (2026-07-27, ncu job 50417213): these dot kernels are REGISTER-occupancy-limited,
 // not DRAM-bound — occupancy_limit_registers=8 blocks/SM (>40 regs/thread) ⇒ only ~49% warps
 // active, DRAM at 41-47% of peak, SM ~50%. __launch_bounds__(128, 12) caps regs at ~42 and
 // raises residency to 12 blocks/SM (+50% warps) so the streamed KSK reads have latency cover.
 // Gated by wrapper bitcmp (numerics untouched) + wall A/B; revert if spills outweigh it.
-__global__ void __launch_bounds__(128, 12)
+// Lever 1b-i: KSK_BITS is the COMPILE-TIME packed width (0 = dense). A runtime-bits variant
+// measured +2.4% (gate 50427306 / ncu 50428101): the extra bits/mask registers dropped the
+// packed arm 16 -> 12 blocks/SM (warps 93.8 -> 73%, DRAM 72 -> 52%). Compile-time width makes
+// the mask/shift immediates, and packed arms pin min-blocks 16 to hold the occupancy tier.
+template <int KSK_BITS>
+__global__ void __launch_bounds__(128, KSK_BITS ? 16 : 12)
     fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
                    int num_special, int init) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -328,10 +365,18 @@ __global__ void __launch_bounds__(128, 12)
             const int pos = C_.pos_in_digit[i][primeid];
             const int p = decomp ? pos_dec : pos;
             const uint32_t in = ((uint32_t*)digits[i + decomp * 3 * C_.dnum][p])[idx];
-            const uint32_t m1 =
-                modmult<ALGO_BARRETT>(in, ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][p])[idx], primeid);
-            const uint32_t m2 =
-                modmult<ALGO_BARRETT>(in, ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx], primeid);
+            uint32_t kska, kskb;
+            if constexpr (KSK_BITS) {
+                kska = kskUnpack(digits[C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                                 (1u << KSK_BITS) - 1u);
+                kskb = kskUnpack(digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                                 (1u << KSK_BITS) - 1u);
+            } else {
+                kska = ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                kskb = ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+            }
+            const uint32_t m1 = modmult<ALGO_BARRETT>(in, kska, primeid);
+            const uint32_t m2 = modmult<ALGO_BARRETT>(in, kskb, primeid);
             if (i == 0) {
                 a1 = m1;
                 a2 = m2;
@@ -433,10 +478,37 @@ __global__ void __launch_bounds__(128, 12)
     }
 }
 
+// Same-TU launcher (see the .cuh note: cross-TU template-kernel launches hit
+// 'invalid device function' — the launch must live in the defining TU). Supported packed
+// widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
+void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
+                         void** sout2, void*** digits, int num_d, int id, int num_special, int init,
+                         int ksk_pack_bits) {
+    switch (ksk_pack_bits) {
+        case 0:
+            fusedDotKSK_2_<0><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
+                                                          init);
+            break;
+        case 27:
+            fusedDotKSK_2_<27><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
+                                                           init);
+            break;
+        case 28:
+            fusedDotKSK_2_<28><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
+                                                           init);
+            break;
+        default:
+            throw std::runtime_error("launchFusedDotKSK_2: unsupported ksk_pack_bits " +
+                                     std::to_string(ksk_pack_bits));
+    }
+}
+
 constexpr bool PRINT = false;
 
 // Lever 1: same register-occupancy treatment as fusedDotKSK_2_ above (ncu 50417213).
-__global__ void __launch_bounds__(128, 12)
+// Lever 1b-i: same compile-time KSK_BITS treatment as fusedDotKSK_2_ above (ncu 50428101).
+template <int KSK_BITS>
+__global__ void __launch_bounds__(128, KSK_BITS ? 16 : 12)
     hoistedRotateDotKSK_2_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2,
                            void*** sout2, const int n, const int* indexes, void*** digits, int num_d,
                            int id, int num_special, int init, void** sc0, bool c0_modup) {
@@ -474,8 +546,16 @@ __global__ void __launch_bounds__(128, 12)
                 const bool decomp = (i == primeid_digit);
                 const int pos = C_.pos_in_digit[i][primeid];
                 const int p = decomp ? pos_dec : pos;
-                const uint32_t kska = ((uint32_t*)digits[offset + C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
-                const uint32_t kskb = ((uint32_t*)digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                uint32_t kska, kskb;
+                if constexpr (KSK_BITS) {
+                    kska = kskUnpack(digits[offset + C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                                     (1u << KSK_BITS) - 1u);
+                    kskb = kskUnpack(digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                                     (1u << KSK_BITS) - 1u);
+                } else {
+                    kska = ((uint32_t*)digits[offset + C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                    kskb = ((uint32_t*)digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                }
                 const uint32_t add1 = modmult<ALGO_BARRETT>(in1s[i], kska, primeid);
                 const uint32_t add2 = modmult<ALGO_BARRETT>(in1s[i], kskb, primeid);
                 if (i == 0) {
@@ -603,6 +683,32 @@ __global__ void __launch_bounds__(128, 12)
                 ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = (uint32_t)aux2;
             }
         }
+    }
+}
+
+void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
+                                 void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
+                                 void*** digits, int num_d, int id, int num_special, int init, void** sc0,
+                                 bool c0_modup, int ksk_pack_bits) {
+    switch (ksk_pack_bits) {
+        case 0:
+            hoistedRotateDotKSK_2_<0><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
+                                                                      digits, num_d, id, num_special, init, sc0,
+                                                                      c0_modup);
+            break;
+        case 27:
+            hoistedRotateDotKSK_2_<27><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
+                                                                       digits, num_d, id, num_special, init, sc0,
+                                                                       c0_modup);
+            break;
+        case 28:
+            hoistedRotateDotKSK_2_<28><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
+                                                                       digits, num_d, id, num_special, init, sc0,
+                                                                       c0_modup);
+            break;
+        default:
+            throw std::runtime_error("launchHoistedRotateDotKSK_2: unsupported ksk_pack_bits " +
+                                     std::to_string(ksk_pack_bits));
     }
 }
 

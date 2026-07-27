@@ -443,9 +443,10 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
 
         if (num_special + num_limbs > 0) {
             cudaMemcpyAsync(digits.data, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
-            fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, 0, s.ptr()>>>(
-                out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits.data,
-                i, id, num_special, 0);
+            assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
+            launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, s.ptr(),
+                                out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
+                                out2.SPECIALlimbptr.data, digits.data, i, id, num_special, 0, ksk_a.key_pack_bits);
         }
     }
     cudaFreeAsync(digits.data, s.ptr());
@@ -510,6 +511,8 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
                     throw std::runtime_error("hoistedRotateDotKSK: banded key (band " +
                                              std::to_string(ksk_a[k]->key_q_band) + ") used at limbsize " +
                                              std::to_string(limbsize));
+                assert(ksk_a[k]->key_pack_bits == ksk_a[0]->key_pack_bits &&
+                       ksk_b[k]->key_pack_bits == ksk_a[0]->key_pack_bits);
                 h_digits[k * cc.dnum * 6 + i + cc.dnum] = ksk_a[k]->DIGITlimbptr.at(i).data;
                 h_digits[k * cc.dnum * 6 + i + 2 * cc.dnum] = ksk_b[k]->DIGITlimbptr.at(i).data;
                 //h_digits[offset_c1 + i + 3 * cc.dnum] = src_c1.limbptr.data;
@@ -557,12 +560,13 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
 
         cudaMemcpyAsync(digits.data, h_digits.data(), h_digits.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
 
-        hoistedRotateDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128,
-                                 sizeof(uint64_t) * 128 * i, s.ptr()>>>(
+        const int kpb = ksk_a.empty() ? 0 : ksk_a[0]->key_pack_bits;
+        launchHoistedRotateDotKSK_2(
+            dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, sizeof(uint64_t) * 128 * i, s.ptr(),
             digits.data + offset_c1, src_c0.limbptr.data, digits.data + offset_output_c1,
             digits.data + offset_output_c1s, digits.data + offset_output_c0, digits.data + offset_output_c0s, n,
             (int*)(digits.data + offset_indexes), digits.data, i, id, num_special, 0, src_c0.SPECIALlimbptr.data,
-            c0_modup);
+            c0_modup, kpb);
 
         // n32 debug: full-vector dumps of the hoisted-rotation dot inputs/outputs at prime q0,
         // for offline per-position verification (dot+automorph, then the moddown chain).
@@ -584,13 +588,15 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
             for (size_t d = 1; d < src.DIGITlimb.size(); ++d)
                 if (src.DIGITlimb[d].size() > (size_t)num_special)
                     dump1("digit_q0_d" + std::to_string(d), src.DIGITlimb[d][num_special]);
-            for (size_t d = 1; d < ksk_a[0]->DIGITlimb.size(); ++d)
-                if (ksk_a[0]->DIGITlimb[d].size() > (size_t)num_special) {
-                    dump1("kska_q0_d" + std::to_string(d), ksk_a[0]->DIGITlimb[d][num_special]);
-                    dump1("kskb_q0_d" + std::to_string(d), ksk_b[0]->DIGITlimb[d][num_special]);
-                }
-            dump1("kska_q0_d0", ksk_a[0]->DECOMPlimb[0][0]);
-            dump1("kskb_q0_d0", ksk_b[0]->DECOMPlimb[0][0]);
+            if (ksk_a[0]->key_pack_bits == 0) {  // packed keys freed their dense limbs — skip
+                for (size_t d = 1; d < ksk_a[0]->DIGITlimb.size(); ++d)
+                    if (ksk_a[0]->DIGITlimb[d].size() > (size_t)num_special) {
+                        dump1("kska_q0_d" + std::to_string(d), ksk_a[0]->DIGITlimb[d][num_special]);
+                        dump1("kskb_q0_d" + std::to_string(d), ksk_b[0]->DIGITlimb[d][num_special]);
+                    }
+                dump1("kska_q0_d0", ksk_a[0]->DECOMPlimb[0][0]);
+                dump1("kskb_q0_d0", ksk_b[0]->DECOMPlimb[0][0]);
+            }
             dump1("out_c1_l0", c1[0]->limb[0]);
             dump1("out_c0_l0", c0[0]->limb[0]);
             for (size_t k2 = 0; k2 < c1[0]->SPECIALlimb.size(); ++k2)
@@ -1396,10 +1402,10 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             int num_special = cc.splitSpecialMeta.at(id).size();
 
             if (num_special > 0) {
-
-                fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, 0, s.ptr()>>>(
-                    out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
-                    num_d, id, num_special, 0);
+                assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
+                launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, s.ptr(), out1.limbptr.data,
+                                    out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
+                                    num_d, id, num_special, 0, ksk_a.key_pack_bits);
             }
         }
 
@@ -1747,9 +1753,10 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             if (limb_size > 0) {
                 for (int start = 0; start < limb_size; start += cc.batch) {
                     int num = std::min(cc.batch, (int)limb_size - start);
-                    fusedDotKSK_2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, 0, stream.ptr()>>>(
-                        out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data,
-                        digits, i, id, num_special, num_special + start);
+                    launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, stream.ptr(),
+                                        out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
+                                        out2.SPECIALlimbptr.data, digits, i, id, num_special, num_special + start,
+                                        ksk_a.key_pack_bits);
                 }
             }
         }

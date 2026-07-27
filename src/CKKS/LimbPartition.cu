@@ -67,6 +67,11 @@ LimbPartition::LimbPartition(LimbPartition&& l) noexcept
       bufferGATHER(l.bufferGATHER),
       bufferDECOMPandDIGIT_handle(l.bufferDECOMPandDIGIT_handle),
       bufferGATHER_handle(l.bufferGATHER_handle) {
+    key_q_band = l.key_q_band;
+    key_pack_bits = l.key_pack_bits;
+    bufferKSKPACK = l.bufferKSKPACK;
+    bufferKSKPACKbytes = l.bufferKSKPACKbytes;
+    l.bufferKSKPACK = nullptr;
     l.bufferSPECIAL = nullptr;
     l.bufferLIMB = nullptr;
     l.bufferDECOMPandDIGIT = nullptr;
@@ -187,6 +192,8 @@ LimbPartition::~LimbPartition() {
     if (bufferSPECIAL)
         GPUfree(bufferSPECIAL, id, 0, s.ptr());
     //cudaFreeAsync(bufferSPECIAL, s.ptr());
+    if (bufferKSKPACK)
+        GPUfree(bufferKSKPACK, id, (int)bufferKSKPACKbytes, s.ptr());
     if (bufferLIMB) {
         GPUfree(bufferLIMB, id, 0, s.ptr());
         //cudaFreeAsync(bufferLIMB, s.ptr());
@@ -351,6 +358,74 @@ void LimbPartition::generateAllDigitLimb(uint64_t* pInt, size_t offset, int q_ba
         offset += cc.N * DIGITmeta.at(i).size();
         decomp_start += (int)DECOMPmeta[i].size();
     }
+}
+
+/* Lever 1b-i (KSK bit-packing): repack this KEY partition's loaded DECOMP/DIGIT limbs into
+ * dense `bits`-per-coefficient bitstreams, point the SAME device pointer tables (limbptr /
+ * DIGITlimbptr[i]) at the packed streams, and free the dense u32 Limb storage back to the
+ * pool. Consumers must launch the KSK_PACKED=true dot-kernel arms (selected via
+ * key_pack_bits at the launch sites); any other reader of these tables is stale by
+ * construction — the only such paths are dead (per-limb dotKSK, *ModupDotKSK, the batched
+ * hoisted rotate) or guarded (FHE_KS_TRACE_FULL). Lossless: residues are canonical < p < 2^bits.
+ * All-u32 single-GPU chains only; composes with key_q_band (packs whatever limbs exist). */
+void LimbPartition::packKeyLimbs(const int bits) {
+    cudaSetDevice(device);
+    assert(cc.GPUid.size() == 1);
+    assert(bits > 0 && bits < 32);
+    if (key_pack_bits)
+        return;
+    const size_t words = ((size_t)cc.N * bits + 31) / 32;
+    const size_t slotBytes = ((words * 4 + 4) + 15) & ~15ull;  // +1 guard word, 16B-aligned slots
+    size_t nlimbs = 0;
+    for (auto& d : DECOMPlimb)
+        nlimbs += d.size();
+    for (auto& d : DIGITlimb)
+        nlimbs += d.size();
+    if (nlimbs == 0)
+        return;
+    bufferKSKPACKbytes = nlimbs * slotBytes;
+    bufferKSKPACK = (uint64_t*)GPUmalloc(device, bufferKSKPACKbytes, s.ptr());
+
+    size_t slot = 0;
+    const uint32_t grid = (uint32_t)((words + 1 + 127) / 128);
+    auto pack_one = [&](LimbImpl& l) -> void* {
+        assert(l.index() == U32);
+        void* dst = (char*)bufferKSKPACK + slot * slotBytes;
+        ++slot;
+        s.wait(STREAM(l));
+        packKsk_<<<dim3{grid}, 128, 0, s.ptr()>>>((uint32_t*)dst, std::get<U32>(l).v.data, cc.N, bits);
+        return dst;
+    };
+
+    // limbptr mirrors loadDecompDigit's mapping: entry k = the DECOMP limb with meta[k].id.
+    // Key partitions never fill `limb`, so unmatched entries are nullptr by construction.
+    std::vector<void*> h_limbptr(limbptr.size, nullptr);
+    for (size_t i = 0; i < DECOMPlimb.size(); ++i) {
+        for (auto& j : DECOMPlimb.at(i)) {
+            void* p = pack_one(j);
+            for (size_t k = 0; k < meta.size(); ++k)
+                if (PRIMEID(j) == meta.at(k).id)
+                    h_limbptr[k] = p;
+        }
+    }
+    cudaMemcpyAsync(limbptr.data, h_limbptr.data(), limbptr.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    for (size_t i = 0; i < DIGITlimb.size(); ++i) {
+        if (DIGITlimb[i].empty())
+            continue;
+        std::vector<void*> h(DIGITlimb[i].size(), nullptr);
+        for (size_t j = 0; j < DIGITlimb[i].size(); ++j)
+            h[j] = pack_one(DIGITlimb[i][j]);
+        cudaMemcpyAsync(DIGITlimbptr[i].data, h.data(), h.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    }
+    CudaCheckErrorModNoSync;
+    // The pack kernels must complete before the dense storage returns to the pool (a later
+    // allocation could recycle and overwrite a block a pack kernel is still reading).
+    cudaDeviceSynchronize();
+    for (auto& d : DECOMPlimb)
+        d.clear();
+    for (auto& d : DIGITlimb)
+        d.clear();
+    key_pack_bits = bits;
 }
 
 void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_communication) {
@@ -1302,6 +1377,8 @@ void LimbPartition::dotKSK(const LimbPartition& src, const LimbPartition& ksk, c
     if (ksk.key_q_band >= 0 && limbsize > ksk.key_q_band + 1)
         throw std::runtime_error("dotKSK: banded key (band " + std::to_string(ksk.key_q_band) +
                                  ") used at limbsize " + std::to_string(limbsize));
+    if (ksk.key_pack_bits)
+        throw std::runtime_error("dotKSK: per-limb path is not packed-key aware (FIDESLIB_KSK_PACK=0 to disable)");
 
     if constexpr (0) {
         std::map<int, int> used;
@@ -1520,6 +1597,9 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
     constexpr bool PRINT = false;
     assert(c0.SPECIALlimb.size() == SPECIALmeta.size());
     assert(c1.SPECIALlimb.size() == SPECIALmeta.size());
+    if (ksk_a.key_pack_bits)
+        throw std::runtime_error(
+            "*ModupDotKSK: NTT_KSK_DOT paths are not packed-key aware (FIDESLIB_KSK_PACK=0 to disable)");
     cudaSetDevice(device);
 
     //std::map<int, int> used;
@@ -1713,6 +1793,9 @@ void LimbPartition::rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
     constexpr bool PRINT = false;
     assert(c0.SPECIALlimb.size() == SPECIALmeta.size());
     assert(c1.SPECIALlimb.size() == SPECIALmeta.size());
+    if (ksk_a.key_pack_bits)
+        throw std::runtime_error(
+            "*ModupDotKSK: NTT_KSK_DOT paths are not packed-key aware (FIDESLIB_KSK_PACK=0 to disable)");
     cudaSetDevice(device);
 
     //std::map<int, int> used;
@@ -1892,6 +1975,9 @@ void LimbPartition::squareModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
     constexpr bool PRINT = false;
     assert(c0.SPECIALlimb.size() == SPECIALmeta.size());
     assert(c1.SPECIALlimb.size() == SPECIALmeta.size());
+    if (ksk_a.key_pack_bits)
+        throw std::runtime_error(
+            "*ModupDotKSK: NTT_KSK_DOT paths are not packed-key aware (FIDESLIB_KSK_PACK=0 to disable)");
     cudaSetDevice(device);
 
     //std::map<int, int> used;

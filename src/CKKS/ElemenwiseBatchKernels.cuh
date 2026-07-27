@@ -47,11 +47,25 @@ __global__ void copy1D_(void* a, void* b);
 __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void*** bs, uint64_t* w,
                                    const __grid_constant__ int primeid_init);
 
-__global__ void fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
-                               int num_special, int init);
-__global__ void hoistedRotateDotKSK_2_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2,
-                                       void*** sout2, int n, const int* indexes, void*** digits, int num_d, int id,
-                                       int num_special, int init, void** sc0, bool c0_modup);
+/* Lever 1b-i (KSK bit-packing): the two dot kernels are template<int KSK_BITS> PRIVATE to
+ * ElemenwiseBatchKernels.cu — KSK_BITS>0 reads the kska/kskb streams as KSK_BITS-bit packed
+ * bitstreams (funnelshift unpack, ciphertext-side rows stay dense), 0 is the historical dense
+ * kernel with untouched codegen. The width is COMPILE-TIME (instantiated set {27,28}; a
+ * runtime-bits variant cost registers -> 16->12 blocks/SM -> +2.4% wall, ncu 50428101).
+ * Cross-TU launches go through these host launchers (a __global__ template launched from a TU
+ * that only sees its declaration gets a weak local stub with no device code in that TU's
+ * fatbin => 'invalid device function' — learned the hard way, job 50426241). ksk_pack_bits==0
+ * selects the dense instantiation; unsupported widths throw. */
+void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
+                         void** sout2, void*** digits, int num_d, int id, int num_special, int init,
+                         int ksk_pack_bits);
+void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
+                                 void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
+                                 void*** digits, int num_d, int id, int num_special, int init, void** sc0,
+                                 bool c0_modup, int ksk_pack_bits);
+/* Packs N canonical u32 residues (< 2^bits) into a dense bits-per-coefficient bitstream.
+ * out must have ceil(N*bits/32) words + 1 zeroed guard word (for the consumer funnelshift). */
+__global__ void packKsk_(uint32_t* out, const uint32_t* in, int N, int bits);
 __global__ void hoistedRotateDotKSKBatched___(void*** in1, void*** din1, void*** c0, void*** sc0, void*** out1,
                                               void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                               void*** digits, int num_d, int id, int num_special, int init,

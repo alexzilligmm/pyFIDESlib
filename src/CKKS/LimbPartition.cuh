@@ -186,6 +186,15 @@ class LimbPartition {
     // q_band (chain position), digits unused at ct level <= q_band skipped.
     // -1 = full key. Guarded in dotKSK.
     int key_q_band = -1;
+    // Lever 1b-i (KSK bit-packing): when >0, this partition holds KEY material whose
+    // limbptr/DIGITlimbptr device tables point at key_pack_bits-bit packed streams carved
+    // from bufferKSKPACK; the dense DECOMP/DIGIT Limb storage is freed (DECOMPlimb/DIGITlimb
+    // cleared). Only the fusedDotKSK_2_/hoistedRotateDotKSK_2_ KSK_PACKED=true arms may read
+    // these tables. All-u32 (type==0) single-GPU chains only.
+    int key_pack_bits = 0;
+    uint64_t* bufferKSKPACK = nullptr;
+    size_t bufferKSKPACKbytes = 0;
+    void packKeyLimbs(int bits);
 
     void mult1AddMult23Add4(const LimbPartition& partition1, const LimbPartition& partition2,
                             const LimbPartition& partition3, const LimbPartition& partition4);

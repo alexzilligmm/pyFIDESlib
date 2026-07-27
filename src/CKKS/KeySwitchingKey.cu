@@ -2,6 +2,8 @@
 // Created by carlosad on 26/09/24.
 //
 
+#include <algorithm>
+#include <cstdlib>
 #include <source_location>
 #include "CKKS/Context.cuh"
 #include "CKKS/KeySwitchingKey.cuh"
@@ -17,6 +19,37 @@ constexpr int PREFIX_SIZE = 23;
 #endif
 
 namespace FIDESlib::CKKS {
+
+namespace {
+/* Lever 1b-i (KSK bit-packing): uniform packed width for this chain's keys, or 0 = dense.
+ * DEFAULT OFF — measured wall-NEUTRAL(+0.5 ms) on the n32 composite chain (gates 50427306 /
+ * 50428528 after the compile-time-width + min-blocks-16 register fix, ncu 50428101): the
+ * -12.5% KSK DRAM saving is eaten by the funnelshift unpack at ~94% warp occupancy. Bit-exact
+ * ([bitcmp] 0 mismatches) with -12.5% key device memory, so FIDESLIB_KSK_PACK=1 remains the
+ * memory-pressure opt-in; the packed plumbing is the substrate for Lever 1b-ii (seed-expanded
+ * `a` — regeneration has no unpack tax). Eligible: single-GPU, all-u32 (type==0) chains with
+ * max prime width in the instantiated set — the packed dot-kernel arms are u32-only, and n64
+ * keys would need a uint2-straddling unpack that is not built. Lossless by construction. */
+int kskPackBitsPolicy(Context& cc) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_PACK");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    if (!enabled || cc->GPUid.size() != 1)
+        return 0;
+    const auto& hc = cc->precom.constants[0];
+    if (hc.type != 0)
+        return 0;
+    const int K = (int)cc->splitSpecialMeta.at(0).size();
+    int W = 0;
+    for (int i = 0; i < cc->L + K; ++i)
+        W = std::max<int>(W, (int)hc.prime_bits[i]);
+    // Widths are compile-time in the dot kernels (register economy, ncu 50428101) — arm only
+    // the instantiated set; other chains fall back dense (add an instantiation to extend).
+    return (W == 27 || W == 28) ? W : 0;
+}
+}  // namespace
+
 void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     CKKS::SetCurrentContext(cc);
@@ -32,6 +65,11 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
     }
     a.loadDecompDigit(rkk.r_key[0], rkk.r_key_moduli[0]);
     b.loadDecompDigit(rkk.r_key[1], rkk.r_key_moduli[1]);
+
+    if (const int W = kskPackBitsPolicy(cc)) {
+        a.GPU.at(0).packKeyLimbs(W);
+        b.GPU.at(0).packKeyLimbs(W);
+    }
 
     cudaDeviceSynchronize();
 }

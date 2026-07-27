@@ -3,6 +3,7 @@
 //
 #include <algorithm>
 #include <array>
+#include <stdexcept>
 #include <variant>
 #include <vector>
 
@@ -539,6 +540,11 @@ void LimbPartition::fusedHoistedRotateBatch(std::vector<LimbPartition*>& out, co
     assert(out.size() == in.size() * n);
     assert(ksk_a.size() * in.size() == out.size());
     assert(ksk_b.size() * in.size() == out.size());
+    for (auto* k : ksk_a)
+        if (k && k->key_pack_bits)
+            throw std::runtime_error(
+                "fusedHoistedRotateBatch: hoistedRotateDotKSKBatched___ is not packed-key aware "
+                "(FIDESLIB_KSK_PACK=0 to disable)");
 
     int size = 2 * out.size() + in.size() + (num_d + 1) * in.size() / 2 + (num_d + 1) * (ksk_a.size() + ksk_b.size()) +
                (indexes.size() + 1) / 2;
