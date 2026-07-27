@@ -94,6 +94,11 @@ struct RawKeySwitchKey {
     std::vector<std::vector<std::vector<std::vector<uint64_t>>>> r_key;
     std::vector<std::vector<std::vector<uint64_t>>> dcrt_keys;
     std::string keyid;
+    // KSKA seed expansion (Lever 1b-ii): the 256-bit ChaCha12 seed r_key[0] (the `a`
+    // component) was expanded from (KskSeedExpand.cuh FROZEN SPEC). Empty = seedless key
+    // (unpatched OpenFHE / OPENFHE_KSKA_SEED=0 / threshold HE) — consumers must fall back
+    // to the dense `a`.
+    std::vector<uint32_t> a_seed;
 };
 
 std::vector<std::vector<uint64_t>> GetRawArray(std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys);

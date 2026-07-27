@@ -3,8 +3,10 @@
 //
 #include <bit>
 #include <cassert>
+#include <cstdlib>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/Context.cuh"
+#include "CKKS/KskSeedExpand.cuh"
 #include "CKKS/openfhe-interface/ParameterSwitch.cuh"
 #include "CKKS/openfhe-interface/RawCiphertext.cuh"
 #include "Math.cuh"
@@ -492,7 +494,43 @@ FIDESlib::CKKS::RawKeySwitchKey FIDESlib::CKKS::GetKeySwitchKey(
     }
     keytag = ek->GetKeyTag();
 
-    return RawKeySwitchKey(std::move(a_moduli), std::move(a), std::move(b), std::move(keytag));
+    RawKeySwitchKey raw(std::move(a_moduli), std::move(a), std::move(b), std::move(keytag));
+#ifdef OPENFHE_HAS_KSKA_SEED
+    // KSKA seed expansion (Lever 1b-ii): carry the seed; optionally re-derive `a` from it
+    // and compare against what OpenFHE stored — the CPU-vs-CPU half of the parity story
+    // (the GPU half is test_ksk_seed_expand). FIDESLIB_KSK_SEED_VERIFY=1 spot-checks the
+    // first digit's first+last limb per key; =2 verifies EVERYTHING (slow, gate use).
+    raw.a_seed = ek->GetASeed();
+    static const int verify = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_SEED_VERIFY");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (verify && !raw.a_seed.empty()) {
+        const auto& av = raw.r_key[0];
+        const auto& mod = raw.r_key_moduli[0];
+        uint64_t checked = 0, bad = 0;
+        for (size_t part = 0; part < av.size(); ++part) {
+            for (size_t limb = 0; limb < av[part].size(); ++limb) {
+                if (verify < 2 && !(part == 0 && (limb == 0 || limb + 1 == av[part].size())))
+                    continue;
+                const uint32_t p = (uint32_t)mod[part][limb];
+                const uint32_t N = (uint32_t)av[part][limb].size();
+                for (uint32_t s = 0; s < N; ++s) {
+                    const uint32_t want = FIDESlib::CKKS::kskexpand::expand_coeff(raw.a_seed.data(), (uint32_t)part,
+                                                                                  p, s, N >> 4);
+                    checked++;
+                    if ((uint64_t)want != av[part][limb][s])
+                        bad++;
+                }
+            }
+        }
+        std::cout << "[kska_seed] verify key=" << raw.keyid.substr(0, 8) << " checked=" << checked << " bad=" << bad
+                  << std::endl;
+        if (bad)
+            throw std::runtime_error("[kska_seed] CPU `a` != seed expansion — SPEC drift between the expander copies");
+    }
+#endif
+    return raw;
 }
 
 FIDESlib::CKKS::RawKeySwitchKey FIDESlib::CKKS::GetEvalKeySwitchKey(const lbcrypto::KeyPair<lbcrypto::DCRTPoly>& keys) {
