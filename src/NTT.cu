@@ -8,14 +8,20 @@
 #include "ModMult.cuh"
 #include "NTT.cuh"
 
-//#include <cooperative_groups.h>
+#include <cooperative_groups.h>
+#include <algorithm>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
+#include <map>
+#include <mutex>
+#include <tuple>
 
 #include "NTTfusions.cuh"
 #include "NTThelper.cuh"
 
-//namespace cg = cooperative_groups;
+namespace cg = cooperative_groups;
 
 namespace FIDESlib {
 
@@ -791,6 +797,161 @@ __global__ void NTT_(const Global::Globals* Globals, void** __restrict__ dat, co
 #include "ntt_types.inc"
 
 #undef VVV
+
+// ===================== E1 (Phase 3b): fused two-stage NTT/INTT =====================
+// One cooperative launch runs stage 1 and stage 2 of the 4-step transform with a
+// grid-wide sync between them, instead of two back-to-back kernels. The transposed
+// intermediate still crosses blocks through the aux buffer, but a launch's working set
+// (gy limbs × N × sizeof(T)) is kept L2-resident by the host chunking below, so the
+// intermediate round-trip stops paying HBM: ~4·N·W → ~2·N·W DRAM bytes per transform.
+// Phase A scope: plain NTT_NONE/INTT_NONE, ALGO_SHOUP only — every fusion mode stays
+// two-pass. The stage bodies are the UNCHANGED NTT__/INTT__ device functions, so the
+// fused kernel is bit-identical to the two-pass path by construction. Note the fused
+// kernels drop the wrapper's __restrict__: dat and res swap roles across the stages
+// (each inlined stage still sees distinct objects, which is what restrict promises).
+// The grid sync sits at ONE program point reached by every thread (the per-limb width
+// branches converge before it) — required for grid_group::sync validity.
+// Host preconditions (launchFusedNTTPair): FIDESLIB_FUSED_NTT != 0 (default on), even
+// logN (equal blockDim/gridDim across stages — asserted by the caller passing one
+// grid/block), cooperative-launch device support, stream not capturing, and
+// gridDim.x·gy ≤ resident capacity (occupancy-queried, gy chunked).
+
+template <ALGO algo>
+__global__ void NTT_fused_(const Global::Globals* Globals, void** dat, const int __grid_constant__ primeid_init,
+                           void** aux, void** out) {
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    if (ISU64(primeid))
+        NTT__<uint64_t, false, algo, NTT_NONE>(Globals, (uint64_t*)dat[blockIdx.y], primeid,
+                                               (uint64_t*)aux[blockIdx.y], nullptr, 0, nullptr, nullptr);
+    else
+        NTT__<uint32_t, false, algo, NTT_NONE>(Globals, (uint32_t*)dat[blockIdx.y], primeid,
+                                               (uint32_t*)aux[blockIdx.y], nullptr, 0, nullptr, nullptr);
+    cg::this_grid().sync();
+    if (ISU64(primeid))
+        NTT__<uint64_t, true, algo, NTT_NONE>(Globals, (uint64_t*)aux[blockIdx.y], primeid,
+                                              (uint64_t*)out[blockIdx.y], nullptr, 0, nullptr, nullptr);
+    else
+        NTT__<uint32_t, true, algo, NTT_NONE>(Globals, (uint32_t*)aux[blockIdx.y], primeid,
+                                              (uint32_t*)out[blockIdx.y], nullptr, 0, nullptr, nullptr);
+}
+
+template __global__ void NTT_fused_<ALGO_SHOUP>(const Global::Globals* Globals, void** dat,
+                                                const int __grid_constant__ primeid_init, void** aux, void** out);
+
+template <ALGO algo>
+__global__ void INTT_fused_(const Global::Globals* Globals, void** dat, const int __grid_constant__ primeid_init,
+                            void** aux, void** out) {
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    if (ISU64(primeid))
+        INTT__<uint64_t, false, algo, INTT_NONE>(Globals, (uint64_t*)dat[blockIdx.y], primeid,
+                                                 (uint64_t*)aux[blockIdx.y], nullptr, nullptr, nullptr, nullptr,
+                                                 nullptr, nullptr, nullptr);
+    else
+        INTT__<uint32_t, false, algo, INTT_NONE>(Globals, (uint32_t*)dat[blockIdx.y], primeid,
+                                                 (uint32_t*)aux[blockIdx.y], nullptr, nullptr, nullptr, nullptr,
+                                                 nullptr, nullptr, nullptr);
+    cg::this_grid().sync();
+    if (ISU64(primeid))
+        INTT__<uint64_t, true, algo, INTT_NONE>(Globals, (uint64_t*)aux[blockIdx.y], primeid,
+                                                (uint64_t*)out[blockIdx.y], nullptr, nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr);
+    else
+        INTT__<uint32_t, true, algo, INTT_NONE>(Globals, (uint32_t*)aux[blockIdx.y], primeid,
+                                                (uint32_t*)out[blockIdx.y], nullptr, nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, nullptr);
+}
+
+template __global__ void INTT_fused_<ALGO_SHOUP>(const Global::Globals* Globals, void** dat,
+                                                 const int __grid_constant__ primeid_init, void** aux, void** out);
+
+namespace {
+
+bool fusedNTTEnvEnabled() {
+    // DEFAULT OFF (measured 2026-07-27, jobs 50415087/50415089): the fused path is bit-exact
+    // ([bitcmp] 0 mismatches) but 103.8 vs 96.8 ms/bts — cooperative launches cannot run
+    // concurrently with each other, so fusing trades the ~1.8x cross-stream overlap that hid
+    // the aux round-trip for an L2 saving that does not cover the loss (the ModUp-merge
+    // lesson at kernel scale). Kept as an opt-in research knob: FIDESLIB_FUSED_NTT=1.
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_FUSED_NTT");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+bool coopLaunchSupported() {
+    int dev = -1;
+    cudaGetDevice(&dev);
+    static std::mutex mu;
+    static std::map<int, bool> cache;
+    std::lock_guard<std::mutex> g(mu);
+    auto it = cache.find(dev);
+    if (it != cache.end())
+        return it->second;
+    int v = 0;
+    cudaDeviceGetAttribute(&v, cudaDevAttrCooperativeLaunch, dev);
+    cache[dev] = (v != 0);
+    return v != 0;
+}
+
+// resident-block capacity for a fused kernel instance at the given block/smem shape,
+// cached per (device, kernel, blockThreads, smem)
+int fusedResidentBlocks(const void* func, int blockThreads, int smemBytes) {
+    int dev = -1;
+    cudaGetDevice(&dev);
+    static std::mutex mu;
+    static std::map<std::tuple<int, const void*, int, int>, int> cache;
+    std::lock_guard<std::mutex> g(mu);
+    auto key = std::make_tuple(dev, func, blockThreads, smemBytes);
+    auto it = cache.find(key);
+    if (it != cache.end())
+        return it->second;
+    int perSM = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&perSM, func, blockThreads, smemBytes);
+    int numSM = 0;
+    cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, dev);
+    const int total = perSM * numSM;
+    cache[key] = total;
+    return total;
+}
+
+}  // namespace
+
+bool launchFusedNTTPair(bool inverse, const Global::Globals* Globals, void** dat, int primeid_init, int num_limbs,
+                        dim3 grid_x_only, dim3 block, int bytes, void** aux, void** out, cudaStream_t stream) {
+    if (!fusedNTTEnvEnabled() || !coopLaunchSupported())
+        return false;
+    cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess || cap != cudaStreamCaptureStatusNone)
+        return false;
+    const void* func = inverse ? (const void*)&INTT_fused_<ALGO_SHOUP> : (const void*)&NTT_fused_<ALGO_SHOUP>;
+    const int capacity = fusedResidentBlocks(func, (int)block.x * (int)(block.y ? block.y : 1), bytes);
+    const int gy_max = capacity / (int)grid_x_only.x;
+    if (gy_max < 1)
+        return false;
+    for (int off = 0; off < num_limbs; off += gy_max) {
+        const unsigned int gy = (unsigned int)std::min(gy_max, num_limbs - off);
+        void** dat_off = dat + off;
+        void** aux_off = aux + off;
+        void** out_off = out + off;
+        int pinit = primeid_init + off;
+        void* args[5] = {(void*)&Globals, (void*)&dat_off, (void*)&pinit, (void*)&aux_off, (void*)&out_off};
+        const dim3 grid{grid_x_only.x, gy};
+        const cudaError_t err = cudaLaunchCooperativeKernel(func, grid, block, args, (size_t)bytes, stream);
+        if (err != cudaSuccess) {
+            if (off == 0)
+                return false;  // nothing ran yet — clean two-pass fallback
+            // A later chunk failed after earlier chunks were enqueued: a two-pass fallback
+            // would re-transform those limbs (silent corruption). Die loudly instead; the
+            // capacity/support checks above make this unreachable short of a real driver
+            // error, which would kill the two-pass path just the same.
+            std::fprintf(stderr, "FIDESlib: fused NTT chunk launch failed mid-batch (%s) — aborting\n",
+                         cudaGetErrorString(err));
+            std::abort();
+        }
+    }
+    return true;
+}
 
 template <typename T, int WARP_SIZE>
 __global__ void NTT_1D(const Global::Globals* Globals, T* dat, const T* psi_dat, const int __grid_constant__ N,

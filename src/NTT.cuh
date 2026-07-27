@@ -74,6 +74,16 @@ __global__ void NTT_(const Global::Globals* Globals, void** __restrict__ dat, co
                      const int __grid_constant__ primeid_rescale = -1, void** __restrict__ res2 = nullptr,
                      void** __restrict__ kskb = nullptr);
 
+// E1 (Phase 3b): fused two-stage NTT/INTT via one cooperative launch (plain
+// NTT_NONE/INTT_NONE, ALGO_SHOUP only — see NTT.cu). Returns true iff the fused pair was
+// launched (possibly gy-chunked to respect cooperative residency); false = caller must run
+// the classic two-pass launches. Preconditions checked inside: FIDESLIB_FUSED_NTT != 0
+// (default on), cooperative-launch support, stream not capturing, capacity ≥ gridDim.x.
+// The CALLER must only offer stage-shape-equal transforms (even logN: blockDim and
+// gridDim.x identical across stages) — pass that single grid.x/block/bytes.
+bool launchFusedNTTPair(bool inverse, const Global::Globals* Globals, void** dat, int primeid_init, int num_limbs,
+                        dim3 grid_x_only, dim3 block, int bytes, void** aux, void** out, cudaStream_t stream);
+
 // ------------------------------------- 1D NTT version ----------------------------------------
 
 template <typename T, int WARP_SIZE = 32>

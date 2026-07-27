@@ -417,6 +417,17 @@ void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields,
     for (int i = 0; i < size; i += batch) {
         uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(size - i));
 
+        // E1 (Phase 3b): plain SHOUP transforms take the fused single-launch path when the
+        // stage shapes agree (even logN) and the cooperative preconditions hold; falls
+        // through to the classic two-pass pair otherwise. Bit-identical either way.
+        if constexpr (mode == NTT_NONE && algo == ALGO_SHOUP) {
+            if (blockDimFirst.x == blockDimSecond.x &&
+                launchFusedNTTPair(false, getGlobals(), limbptr.data + i, primeid_init + i, (int)num_limbs,
+                                   dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst, auxptr.data + i,
+                                   limbptr.data + i, STREAM(limb.at(i)).ptr()))
+                continue;
+        }
+
         NTT_<false, algo, mode><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst, bytesFirst,
                                   STREAM(limb.at(i)).ptr()>>>(
             getGlobals(),
@@ -482,6 +493,17 @@ void LimbPartition::ApplyINTT(int batch, LimbPartition::INTT_fusion_fields field
 
     for (int i = 0; i < limbsize; i += batch) {
         uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(limbsize - i));
+
+        // E1 (Phase 3b): fused single-launch path for the plain SHOUP inverse transform;
+        // see ApplyNTT above. (This helper always runs INTT_NONE — the mode template arg
+        // is not forwarded to the kernels.)
+        if constexpr (algo == ALGO_SHOUP) {
+            if (blockDimFirst.x == blockDimSecond.x &&
+                launchFusedNTTPair(true, getGlobals(), limbptr.data + i, primeid_init + i, (int)num_limbs,
+                                   dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst, auxptr.data + i,
+                                   limbptr.data + i, STREAM(limb.at(i)).ptr()))
+                continue;
+        }
 
         INTT_<false, algo, INTT_NONE>
             <<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst, bytesFirst,
@@ -740,12 +762,19 @@ bool LimbPartition::rescale2() {
         int bytesFirst = (32 / M) * blockDimFirst.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
         int bytesSecond = (32 / M) * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
 
-        INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), 2}, blockDimFirst, bytesFirst,
-                                        s.ptr()>>>(getGlobals(), limbptr.data + limbsize - 2,
-                                                   PARTITION(id, limbsize - 2), auxptr.data + limbsize - 2);
-        INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), 2}, blockDimSecond, bytesSecond,
-                                       s.ptr()>>>(getGlobals(), auxptr.data + limbsize - 2,
-                                                  PARTITION(id, limbsize - 2), limbptr.data + limbsize - 2);
+        if (blockDimFirst.x == blockDimSecond.x &&
+            launchFusedNTTPair(true, getGlobals(), limbptr.data + limbsize - 2, PARTITION(id, limbsize - 2), 2,
+                               dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst,
+                               auxptr.data + limbsize - 2, limbptr.data + limbsize - 2, s.ptr())) {
+            // E1: fused pair
+        } else {
+            INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), 2}, blockDimFirst, bytesFirst,
+                                            s.ptr()>>>(getGlobals(), limbptr.data + limbsize - 2,
+                                                       PARTITION(id, limbsize - 2), auxptr.data + limbsize - 2);
+            INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), 2}, blockDimSecond, bytesSecond,
+                                           s.ptr()>>>(getGlobals(), auxptr.data + limbsize - 2,
+                                                      PARTITION(id, limbsize - 2), limbptr.data + limbsize - 2);
+        }
     }
 
     // 2. the fused double-drop pass (gy = limbsize-2), also on the partition stream.
@@ -844,13 +873,20 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
             STREAM(limb.at(i)).wait(s);
             uint32_t num_limbs = std::min((uint32_t)cc.batch, (uint32_t)(limbsize - i));
 
-            INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
-                                            bytesFirst, STREAM(limb.at(i)).ptr()>>>(
-                getGlobals(), limbptr.data + i, PARTITION(id, i), auxptr.data + i);
+            if (blockDimFirst.x == blockDimSecond.x &&
+                launchFusedNTTPair(true, getGlobals(), limbptr.data + i, PARTITION(id, i), (int)num_limbs,
+                                   dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst, auxptr.data + i,
+                                   DECOMPALLptr.data + i, STREAM(limb.at(i)).ptr())) {
+                // E1: fused pair
+            } else {
+                INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
+                                                bytesFirst, STREAM(limb.at(i)).ptr()>>>(
+                    getGlobals(), limbptr.data + i, PARTITION(id, i), auxptr.data + i);
 
-            INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
-                                           bytesSecond, STREAM(limb.at(i)).ptr()>>>(
-                getGlobals(), auxptr.data + i, PARTITION(id, i), DECOMPALLptr.data + i);
+                INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
+                                               bytesSecond, STREAM(limb.at(i)).ptr()>>>(
+                    getGlobals(), auxptr.data + i, PARTITION(id, i), DECOMPALLptr.data + i);
+            }
         }
         for (int i = 0; i < limbsize; i += cc.batch) {
             s.wait(STREAM(limb.at(i)));
@@ -2240,13 +2276,22 @@ void LimbPartition::modupInto(LimbPartition& partition, LimbPartition& aux_parti
             STREAM(limb.at(start + i)).wait(s);
             uint32_t num_limbs = std::min((uint32_t)cc.batch, (uint32_t)(size - i));
 
-            INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
-                                            bytesFirst, STREAM(limb.at(start + i)).ptr()>>>(
-                getGlobals(), limbptr.data + start + i, PARTITION(id, start + i), auxptr.data + start + i);
+            if (blockDimFirst.x == blockDimSecond.x &&
+                launchFusedNTTPair(true, getGlobals(), limbptr.data + start + i, PARTITION(id, start + i),
+                                   (int)num_limbs, dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst,
+                                   auxptr.data + start + i, partition.DECOMPlimbptr[d].data + i,
+                                   STREAM(limb.at(start + i)).ptr())) {
+                // E1: fused pair
+            } else {
+                INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
+                                                bytesFirst, STREAM(limb.at(start + i)).ptr()>>>(
+                    getGlobals(), limbptr.data + start + i, PARTITION(id, start + i), auxptr.data + start + i);
 
-            INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
-                                           bytesSecond, STREAM(limb.at(start + i)).ptr()>>>(
-                getGlobals(), auxptr.data + start + i, PARTITION(id, start + i), partition.DECOMPlimbptr[d].data + i);
+                INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
+                                               bytesSecond, STREAM(limb.at(start + i)).ptr()>>>(
+                    getGlobals(), auxptr.data + start + i, PARTITION(id, start + i),
+                    partition.DECOMPlimbptr[d].data + i);
+            }
         }
         for (size_t i = 0; i < size; i += cc.batch) {
             s.wait(STREAM(limb.at(start + i)));
