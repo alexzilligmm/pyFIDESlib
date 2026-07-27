@@ -595,6 +595,11 @@ class Ciphertext {
      * @return `true` on successful adjustment.
      */
     bool adjustForAddOrSub(const Ciphertext& ciphertext);
+    /** The untraced bodies of adjustForAddOrSub/adjustForMult; the public entry points are
+     *  thin wrappers recording the E3a histogram under FIDESLIB_ADJUST_TRACE (default off,
+     *  byte-identical behavior). Call the public names, not these. */
+    bool adjustForAddOrSubBody(const Ciphertext& ciphertext);
+    bool adjustForMultBody(const Ciphertext& ciphertext);
 
     /**
      * @brief Adjusts scaling factors to enable multiplication with `ciphertext`.

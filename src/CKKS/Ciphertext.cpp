@@ -7,6 +7,11 @@
 #include "CKKS/KeySwitchingKey.cuh"
 #include "CKKS/Plaintext.cuh"
 #include <omp.h>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <string>
 #if defined(__clang__)
 #include <experimental/source_location>
 using sc				  = std::experimental::source_location;
@@ -21,6 +26,52 @@ namespace FIDESlib::CKKS {
 
 bool hoistRotateFused		  = true;
 constexpr bool RESCALE_DOUBLE = true;
+
+/** E3a (FIDESLIB_ADJUST_TRACE=1, default off = zero-cost): histogram of the lazy-rescale
+ *  bookkeeping. Every adjustForAddOrSub/adjustForMult call records its ENTRY state tuple
+ *  (this level/depth, other level/depth) plus the state-changing work its body actually
+ *  fired (rescale / scalar-mult / dropToLevel, counted via thread_local deltas hooked at
+ *  those three entry points). Purpose: decide, per state class, whether the second call of
+ *  the symmetric ApproxModEval pairs (a.adjustForMult(b); b.adjustForMult(a);) does real
+ *  FLEXIBLEAUTO work or is a foldable no-op re-traversal. Dumped to stderr at process exit
+ *  as "[adjust_trace]" lines. Analysis-only — never fold work this histogram shows firing. */
+namespace {
+struct AdjustWorkCounters {
+	long rescale = 0, scalar = 0, drop = 0;
+};
+thread_local AdjustWorkCounters t_adjust_work;
+
+class AdjustTrace {
+   public:
+	static bool on() {
+		static const bool v = [] {
+			const char* e = std::getenv("FIDESLIB_ADJUST_TRACE");
+			return e != nullptr && std::atoi(e) != 0;
+		}();
+		return v;
+	}
+	static AdjustTrace& get() {
+		static AdjustTrace t;
+		return t;
+	}
+	void record(const char* fn, int lvlA, int nlA, int lvlB, int nlB, bool ret, const AdjustWorkCounters& delta) {
+		char key[160];
+		std::snprintf(key, sizeof(key), "fn=%s lvlA=%d nlA=%d lvlB=%d nlB=%d -> ret=%d rescale=%ld scalar=%ld drop=%ld",
+					  fn, lvlA, nlA, lvlB, nlB, (int)ret, delta.rescale, delta.scalar, delta.drop);
+		std::lock_guard<std::mutex> g(mu_);
+		++recs_[key];
+	}
+	~AdjustTrace() {
+		std::lock_guard<std::mutex> g(mu_);
+		for (const auto& [k, count] : recs_)
+			std::fprintf(stderr, "[adjust_trace] %s : count=%ld\n", k.c_str(), count);
+	}
+
+   private:
+	std::mutex mu_;
+	std::map<std::string, long> recs_;
+};
+}  // namespace
 
 enum OPS {
 	NOP,
@@ -445,6 +496,8 @@ void Ciphertext::multPt(const Plaintext& b, bool rescale) {
 void Ciphertext::rescale() {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	if (AdjustTrace::on())
+		++t_adjust_work.rescale;
 	// assert(this->NoiseLevel == 2);
 	if (cc.rescaleTechnique != FIXEDMANUAL) {
 		// this wouldn't do anything in OpenFHE
@@ -754,6 +807,8 @@ void Ciphertext::square(bool rescale) {
 void Ciphertext::multScalarNoPrecheck(const double c, bool rescale) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	if (AdjustTrace::on())
+		++t_adjust_work.scalar;
 	op_count[OPS::MULTSCALAR]++;
 
 	auto elem = cc.ElemForEvalMult(c0.getLevel(), c);
@@ -1322,6 +1377,8 @@ void Ciphertext::square(const Ciphertext& src, bool rescale) {
 void Ciphertext::dropToLevel(int level) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	if (AdjustTrace::on())
+		++t_adjust_work.drop;
 	c0.dropToLevel(level);
 	c1.dropToLevel(level);
 }
@@ -1537,6 +1594,19 @@ void Ciphertext::sub(const Ciphertext& ciphertext, const Ciphertext& ciphertext1
 }
 
 bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
+	if (!AdjustTrace::on())
+		return adjustForAddOrSubBody(b);
+	const int e_lvlA = getLevel(), e_nlA = (int)NoiseLevel;
+	const int e_lvlB = b.getLevel(), e_nlB = (int)b.NoiseLevel;
+	const AdjustWorkCounters w0 = t_adjust_work;
+	const bool ret = adjustForAddOrSubBody(b);
+	AdjustTrace::get().record("afas", e_lvlA, e_nlA, e_lvlB, e_nlB, ret,
+							  { t_adjust_work.rescale - w0.rescale, t_adjust_work.scalar - w0.scalar,
+								t_adjust_work.drop - w0.drop });
+	return ret;
+}
+
+bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 
@@ -1660,6 +1730,19 @@ bool Ciphertext::adjustForAddOrSub(const Ciphertext& b) {
 }
 
 bool Ciphertext::adjustForMult(const Ciphertext& ciphertext) {
+	if (!AdjustTrace::on())
+		return adjustForMultBody(ciphertext);
+	const int e_lvlA = getLevel(), e_nlA = (int)NoiseLevel;
+	const int e_lvlB = ciphertext.getLevel(), e_nlB = (int)ciphertext.NoiseLevel;
+	const AdjustWorkCounters w0 = t_adjust_work;
+	const bool ret = adjustForMultBody(ciphertext);
+	AdjustTrace::get().record("afm", e_lvlA, e_nlA, e_lvlB, e_nlB, ret,
+							  { t_adjust_work.rescale - w0.rescale, t_adjust_work.scalar - w0.scalar,
+								t_adjust_work.drop - w0.drop });
+	return ret;
+}
+
+bool Ciphertext::adjustForMultBody(const Ciphertext& ciphertext) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 

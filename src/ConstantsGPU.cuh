@@ -165,6 +165,19 @@ struct Global {
         uint64_t DecompAndModUp_pre_scale_shoup[MAXD * MAXP * MAXP];
         uint64_t DecompAndModUp_matrix[MAXP * MAXD * MAXP * MAXP];
         uint64_t DecompAndModUp_matrix_shoup[MAXP * MAXD * MAXP * MAXP];
+
+        // Width-typed (u32) shadow copies of the conversion matrices, filled ONLY on
+        // all-U32 chains (hC_.type == 0) and read ONLY by the C_.type == 0 fast paths in
+        // Conv.cu. On such chains every matrix entry is a residue < 2^28 and every *_shoup
+        // companion carries the 2^32-scaled convention, so the narrow copy is exact; the
+        // u64 originals stay authoritative for u64/mixed chains and debug dumps. Halves
+        // the constant stream pulled through L2 by the two hottest base-conversion
+        // kernels (DecompAndModUpConv / ModDown2). Cost: +~16 MB device per GPU
+        // (allocated for every chain; unfilled off the U32 path).
+        uint32_t ModDown_matrix32[MAXP * MAXP];
+        uint32_t ModDown_matrix_shoup32[MAXP * MAXP];
+        uint32_t DecompAndModUp_matrix32[MAXP * MAXD * MAXP * MAXP];
+        uint32_t DecompAndModUp_matrix_shoup32[MAXP * MAXD * MAXP * MAXP];
     };
 
     Globals* globals[MAXD];

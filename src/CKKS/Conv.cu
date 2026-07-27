@@ -117,13 +117,15 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                 // instructions/term (the *_shoup companion matrices are precomputed with the
                 // width-aware 2^32 convention — shoup_precomp, ConstantsGPU.cu). Mixed and
                 // U64 chains keep the generic arm; branch is grid-uniform (no divergence).
+                // E4: matrix reads go through the u32 shadow copies (filled iff type==0) —
+                // halves the constant stream this kernel pulls through L2 per output limb.
                 uint32_t res = 0;
                 for (int i = 0; i < C_.K; ++i) {
                     const int m = MODDOWN_MATRIX(i, primeid);
                     res = modadd(res,
                                  modmult<ALGO_SHOUP>((uint32_t)buff[i * blockDim.x + tid],
-                                                     (uint32_t)G_->ModDown_matrix[m], primeid,
-                                                     (uint32_t)G_->ModDown_matrix_shoup[m]),
+                                                     G_->ModDown_matrix32[m], primeid,
+                                                     G_->ModDown_matrix_shoup32[m]),
                                  primeid);
                 }
                 ((uint32_t*)a[j])[idx] = res;
@@ -298,14 +300,16 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                     // (per-term width-correct Shoup vs the ~200-instr emulated u128 % p;
                     // identical canonical residue, shoup matrices keyed on the OUTPUT prime
                     // primeid_j). This kernel is the #1 bootstrap kernel (17.3%).
+                    // E4: u32 shadow matrices (see ModDown2) — this kernel is the #1
+                    // bootstrap kernel, its matrix stream is the largest constant reader.
                     uint32_t res32 = 0;
                     for (int i_ = 0; i_ < n_d_n; ++i_) {
                         const int primeid = C_.primeid_digit_from[d][i_];
                         const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
                         res32 = modadd(res32,
                                        modmult<ALGO_SHOUP>((uint32_t)buff[i_ * blockDim.x + tid],
-                                                           (uint32_t)G_->DecompAndModUp_matrix[m], primeid_j,
-                                                           (uint32_t)G_->DecompAndModUp_matrix_shoup[m]),
+                                                           G_->DecompAndModUp_matrix32[m], primeid_j,
+                                                           G_->DecompAndModUp_matrix_shoup32[m]),
                                        primeid_j);
                     }
                     assert(b[j_] != nullptr);

@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include "ConstantsGPU.cuh"
 #include "CudaUtils.cuh"
 #include "Math.cuh"
@@ -566,6 +567,27 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                                hG_.ModDown_matrix_shoup, bytes, cudaMemcpyHostToDevice);
                     CudaCheckErrorMod;
                 }
+
+                if (hC_.type == 0) {
+                    // u32 shadow for the all-U32 fast path (see Globals decl): exact narrow
+                    // copies — residues < 2^28, shoup already 2^32-scaled via shoup_precomp.
+                    constexpr size_t n = sizeof(Global::ModDown_matrix) / sizeof(uint64_t);
+                    std::vector<uint32_t> m32(n), s32(n);
+                    const uint64_t* m = &hG_.ModDown_matrix[0][0];
+                    const uint64_t* s = &hG_.ModDown_matrix_shoup[0][0];
+                    for (size_t j = 0; j < n; ++j) {
+                        m32[j] = (uint32_t)m[j];
+                        s32[j] = (uint32_t)s[j];
+                    }
+                    for (int i = 0; i < GPUid.size(); ++i) {
+                        cudaSetDevice(GPUid[i]);
+                        cudaMemcpy(((char*)hG_.globals[i]) + offsetof(Global::Globals, ModDown_matrix32), m32.data(),
+                                   n * sizeof(uint32_t), cudaMemcpyHostToDevice);
+                        cudaMemcpy(((char*)hG_.globals[i]) + offsetof(Global::Globals, ModDown_matrix_shoup32),
+                                   s32.data(), n * sizeof(uint32_t), cudaMemcpyHostToDevice);
+                        CudaCheckErrorMod;
+                    }
+                }
             }
 
             {
@@ -646,6 +668,19 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
 
                 constexpr int bytes = sizeof(Global::DecompAndModUp_matrix);
                 assert(bytes == 8 * 64 * 64 * 64 * 8);
+                // u32 shadow for the all-U32 fast path — converted once, uploaded per GPU below.
+                constexpr size_t nn = sizeof(Global::DecompAndModUp_matrix) / sizeof(uint64_t);
+                std::vector<uint32_t> m32, s32;
+                if (hC_.type == 0) {
+                    m32.resize(nn);
+                    s32.resize(nn);
+                    const uint64_t* m = &hG_.DecompAndModUp_matrix[0][0][0][0];
+                    const uint64_t* s = &hG_.DecompAndModUp_matrix_shoup[0][0][0][0];
+                    for (size_t j = 0; j < nn; ++j) {
+                        m32[j] = (uint32_t)m[j];
+                        s32[j] = (uint32_t)s[j];
+                    }
+                }
                 for (int i = 0; i < GPUid.size(); ++i) {
                     cudaSetDevice(GPUid[i]);
                     /*
@@ -659,6 +694,13 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                     cudaMemcpy(((char*)hG_.globals[i]) + offsetof(Global::Globals, DecompAndModUp_matrix_shoup),
                                hG_.DecompAndModUp_matrix_shoup, bytes, cudaMemcpyHostToDevice);
                     CudaCheckErrorMod;
+                    if (hC_.type == 0) {
+                        cudaMemcpy(((char*)hG_.globals[i]) + offsetof(Global::Globals, DecompAndModUp_matrix32),
+                                   m32.data(), nn * sizeof(uint32_t), cudaMemcpyHostToDevice);
+                        cudaMemcpy(((char*)hG_.globals[i]) + offsetof(Global::Globals, DecompAndModUp_matrix_shoup32),
+                                   s32.data(), nn * sizeof(uint32_t), cudaMemcpyHostToDevice);
+                        CudaCheckErrorMod;
+                    }
                     /*
                     cudaMemcpyFromSymbol(hG_.DecompAndModUp_matrix, hG_.globals[i].DecompAndModUp_matrix, bytes, 0,
                                          cudaMemcpyDeviceToHost);

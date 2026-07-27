@@ -14,6 +14,8 @@
 #include <cassert>
 #include <iostream>
 #include <list>
+#include <mutex>
+#include <unordered_map>
 
 #ifdef NCCL
 #include "nccl.h"
@@ -208,6 +210,30 @@ class ContextData {
     friend void DeregisterCryptoContextGPU(Context cc);
     friend Context GetCurrentContext();
     friend void SetCurrentContext(Context&);
+
+    /** Memo for ElemForEvalMult: the per-scalar bigint CRT expansion is pure given
+     *  (level, level_in, operand) plus context-construction-time state (primes, scaling
+     *  factors, compositeDegree), so entries live for the context lifetime with no
+     *  invalidation. The operand is keyed on its EXACT bit pattern — the output is a
+     *  bit-exact CRT residue vector, any tolerance-matching would silently break the
+     *  bit-exactness-vs-OpenFHE property. level_in is normalized (-1 -> level) before
+     *  hashing so the two spellings of the same branch share an entry. Appended at the
+     *  END of the class: library-internal only (out-of-line-accessor rule above). */
+    struct ElemMemoKey {
+        int level;
+        int level_in;
+        uint64_t operand_bits;
+        bool operator==(const ElemMemoKey&) const = default;
+    };
+    struct ElemMemoKeyHash {
+        size_t operator()(const ElemMemoKey& k) const {
+            uint64_t h = k.operand_bits ^ ((uint64_t(uint32_t(k.level)) << 32) | uint32_t(k.level_in));
+            h *= 0x9E3779B97F4A7C15ull;
+            return size_t(h ^ (h >> 32));
+        }
+    };
+    std::mutex elem_memo_mutex;
+    std::unordered_map<ElemMemoKey, std::vector<uint64_t>, ElemMemoKeyHash> elem_memo;
 };
 
 Context GenCryptoContextGPU(const Parameters& param, const std::vector<int>& devs);

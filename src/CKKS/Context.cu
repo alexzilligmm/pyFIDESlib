@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -379,6 +380,21 @@ RNSPoly& ContextData::getModdownAux(const int num) {
 }
 std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double operand, int level_in) {
 
+    // Memoized: the Chebyshev evaluator calls this once per weight per bootstrap with a
+    // recurring (level, weight) set, and each call is a full bigint CRT expansion. After
+    // the first bootstrap every lookup hits. Mutex: cheap vs the expansion, and RNSPoly
+    // paths run under omp on multi-GPU.
+    uint64_t operand_bits;
+    static_assert(sizeof(operand_bits) == sizeof(operand));
+    std::memcpy(&operand_bits, &operand, sizeof(operand_bits));
+    const ElemMemoKey memo_key{level, (level_in == -1 ? level : level_in), operand_bits};
+    {
+        std::lock_guard<std::mutex> g(elem_memo_mutex);
+        auto it = elem_memo.find(memo_key);
+        if (it != elem_memo.end())
+            return it->second;
+    }
+
     uint32_t numTowers = level + 1;
     std::vector<lbcrypto::DCRTPoly::Integer> moduli(numTowers);
     for (usint i = 0; i < numTowers; i++) {
@@ -476,6 +492,10 @@ std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double opera
         result[i] = result[i] % prime[i].p;
     }
 
+    {
+        std::lock_guard<std::mutex> g(elem_memo_mutex);
+        elem_memo.emplace(memo_key, result);
+    }
     return result;
 }
 
