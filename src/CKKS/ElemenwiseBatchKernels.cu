@@ -293,8 +293,14 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
     }
 }
 
-__global__ void fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
-                               int num_special, int init) {
+// Lever 1 (2026-07-27, ncu job 50417213): these dot kernels are REGISTER-occupancy-limited,
+// not DRAM-bound — occupancy_limit_registers=8 blocks/SM (>40 regs/thread) ⇒ only ~49% warps
+// active, DRAM at 41-47% of peak, SM ~50%. __launch_bounds__(128, 12) caps regs at ~42 and
+// raises residency to 12 blocks/SM (+50% warps) so the streamed KSK reads have latency cover.
+// Gated by wrapper bitcmp (numerics untouched) + wall A/B; revert if spills outweigh it.
+__global__ void __launch_bounds__(128, 12)
+    fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
+                   int num_special, int init) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
     const int blky = blockIdx.y + init;
@@ -395,9 +401,11 @@ __global__ void fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** so
 
 constexpr bool PRINT = false;
 
-__global__ void hoistedRotateDotKSK_2_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2,
-                                       void*** sout2, const int n, const int* indexes, void*** digits, int num_d,
-                                       int id, int num_special, int init, void** sc0, bool c0_modup) {
+// Lever 1: same register-occupancy treatment as fusedDotKSK_2_ above (ncu 50417213).
+__global__ void __launch_bounds__(128, 12)
+    hoistedRotateDotKSK_2_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2,
+                           void*** sout2, const int n, const int* indexes, void*** digits, int num_d,
+                           int id, int num_special, int init, void** sc0, bool c0_modup) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
     const int blky = blockIdx.y + init;
 
