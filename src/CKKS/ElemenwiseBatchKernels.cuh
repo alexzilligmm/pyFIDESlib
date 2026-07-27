@@ -66,6 +66,14 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
 /* Packs N canonical u32 residues (< 2^bits) into a dense bits-per-coefficient bitstream.
  * out must have ceil(N*bits/32) words + 1 zeroed guard word (for the consumer funnelshift). */
 __global__ void packKsk_(uint32_t* out, const uint32_t* in, int N, int bits);
+
+/* Lever 1b-ii (load-time expansion): fill one KSK `a` limb from its 256-bit seed
+ * (KskSeedExpand.cuh FROZEN SPEC v1) — bit-identical to what the patched OpenFHE keygen
+ * stored, so this replaces the H2D copy of that limb. Seed passed by value. */
+struct KskSeedWords {
+    uint32_t k[8];
+};
+__global__ void expandKskA_(uint32_t* out, KskSeedWords seed, int digit, uint32_t p, uint32_t n16, int N);
 __global__ void hoistedRotateDotKSKBatched___(void*** in1, void*** din1, void*** c0, void*** sc0, void*** out1,
                                               void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                               void*** digits, int num_d, int id, int num_special, int init,

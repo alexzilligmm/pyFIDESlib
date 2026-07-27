@@ -428,6 +428,52 @@ void LimbPartition::packKeyLimbs(const int bits) {
     key_pack_bits = bits;
 }
 
+/* Lever 1b-ii (load-time expansion): fill this KEY partition's `a` limbs on-GPU from the
+ * 256-bit ChaCha12 seed — bit-identical to the host arrays the patched OpenFHE keygen
+ * stored (stage-2 gate: 95/95 keys verify), so this REPLACES loadDecompDigit for `a`
+ * and skips its ~half of the key H2D upload. Mirrors loadDecompDigit's single-GPU
+ * structure exactly: per-limb fill on the limb stream + the limbptr decomp mapping. */
+void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
+    cudaSetDevice(device);
+    assert(cc.GPUid.size() == 1);
+    assert(seed.size() == 8);
+    KskSeedWords sw;
+    for (int i = 0; i < 8; ++i)
+        sw.k[i] = seed[i];
+    const uint32_t n16 = (uint32_t)cc.N >> 4;
+    const uint32_t grid = (uint32_t)((cc.N + 127) / 128);
+
+    auto expand_one = [&](LimbImpl& l, int digit) {
+        assert(l.index() == U32);
+        const uint32_t p = (uint32_t)cc.precom.constants[id].primes[PRIMEID(l)];
+        STREAM(l).wait(s);
+        expandKskA_<<<dim3{grid}, 128, 0, STREAM(l).ptr()>>>(std::get<U32>(l).v.data, sw, digit, p, n16, cc.N);
+    };
+    for (size_t i = 0; i < DECOMPlimb.size(); ++i)
+        for (auto& j : DECOMPlimb.at(i))
+            expand_one(j, (int)i);
+    for (size_t i = 0; i < DIGITlimb.size(); ++i)
+        for (auto& j : DIGITlimb.at(i))
+            expand_one(j, (int)i);
+    CudaCheckErrorModNoSync;
+
+    // The decomp-row pointer mapping the dot kernels read — same as loadDecompDigit's.
+    std::vector<void*> cpu_ptr(MAXP, nullptr);
+    for (size_t i = 0; i < DECOMPlimb.size(); ++i)
+        for (auto& j : DECOMPlimb.at(i))
+            for (size_t k = 0; k < meta.size(); ++k)
+                if (PRIMEID(j) == meta.at(k).id)
+                    cpu_ptr[k] = std::get<U32>(j).v.data;
+    cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+
+    for (auto& d : DECOMPlimb)
+        for (auto& j : d)
+            s.wait(STREAM(j));
+    for (auto& d : DIGITlimb)
+        for (auto& j : d)
+            s.wait(STREAM(j));
+}
+
 void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_communication) {
     cudaSetDevice(device);
     if ((for_communication && cc.GPUid.size() > 0 && bufferSPECIAL == nullptr && SPECIALmeta.size() > 0) ||

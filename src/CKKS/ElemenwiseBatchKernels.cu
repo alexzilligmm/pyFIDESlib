@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include "CKKS/ElemenwiseBatchKernels.cuh"
+#include "CKKS/KskSeedExpand.cuh"
 #include "CKKS/Rescale.cuh"
 #include "Rotation.cuh"
 
@@ -304,6 +305,13 @@ __device__ __forceinline__ uint32_t kskUnpack(const void* p, const uint32_t idx,
     const uint32_t bitoff = idx * bits;
     const uint32_t* q = (const uint32_t*)p + (bitoff >> 5);
     return __funnelshift_r(q[0], q[1], bitoff & 31) & mask;
+}
+
+__global__ void expandKskA_(uint32_t* out, const KskSeedWords seed, const int digit, const uint32_t p,
+                            const uint32_t n16, const int N) {
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < N)
+        out[idx] = kskexpand::expand_coeff(seed.k, (uint32_t)digit, p, (uint32_t)idx, n16);
 }
 
 __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const int bits) {

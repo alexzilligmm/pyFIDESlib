@@ -63,7 +63,18 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
         a.grow(cc->L, false, true);
         b.grow(cc->L, false, true);
     }
-    a.loadDecompDigit(rkk.r_key[0], rkk.r_key_moduli[0]);
+    // Lever 1b-ii (load-time expansion, default ON; FIDESLIB_KSK_EXPAND_LOAD=0 restores the
+    // H2D copy): a seeded key's `a` component is regenerated on-GPU from its 256-bit seed —
+    // bit-identical to rkk.r_key[0] (stage-2 gate 50433073: 95/95 keys verify), skipping
+    // that half of the key upload. `b` (and seedless keys entirely) load as before.
+    static const bool expand_on_load = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_EXPAND_LOAD");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    if (expand_on_load && !rkk.a_seed.empty() && cc->GPUid.size() == 1 && cc->precom.constants[0].type == 0)
+        a.GPU.at(0).expandKskADigits(rkk.a_seed);
+    else
+        a.loadDecompDigit(rkk.r_key[0], rkk.r_key_moduli[0]);
     b.loadDecompDigit(rkk.r_key[1], rkk.r_key_moduli[1]);
 
     if (const int W = kskPackBitsPolicy(cc)) {

@@ -195,6 +195,10 @@ class LimbPartition {
     uint64_t* bufferKSKPACK = nullptr;
     size_t bufferKSKPACKbytes = 0;
     void packKeyLimbs(int bits);
+    // Lever 1b-ii (load-time expansion): fill this KEY partition's `a` DECOMP/DIGIT limbs
+    // on-GPU from the 256-bit seed instead of H2D-copying them (bit-identical by the
+    // stage-2 gate; builds the same limbptr mapping loadDecompDigit would).
+    void expandKskADigits(const std::vector<uint32_t>& seed);
 
     void mult1AddMult23Add4(const LimbPartition& partition1, const LimbPartition& partition2,
                             const LimbPartition& partition3, const LimbPartition& partition4);
