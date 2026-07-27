@@ -316,6 +316,40 @@ __global__ void __launch_bounds__(128, 12)
 
     int pos_dec = blky - num_special;
 
+    if (C_.type == 0) {
+        // n32 (Lever 1 fix 2): all-U32 chain fast path — the generic arm below promotes every
+        // operand to uint64_t and runs 64-bit Barrett per term on 27-bit primes. 32-bit Barrett
+        // (Neal_mult_32) + u32 accumulators compute the IDENTICAL canonical residues (same
+        // reduce-then-add order) in ~1/3 the instructions AND fewer registers — registers are
+        // the measured occupancy limiter of this kernel (ncu 50417213). Grid-uniform branch.
+        uint32_t a1, a2;
+        for (int i = 0; i < num_d; ++i) {
+            const bool decomp = (i == primeid_digit);
+            const int pos = C_.pos_in_digit[i][primeid];
+            const int p = decomp ? pos_dec : pos;
+            const uint32_t in = ((uint32_t*)digits[i + decomp * 3 * C_.dnum][p])[idx];
+            const uint32_t m1 =
+                modmult<ALGO_BARRETT>(in, ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][p])[idx], primeid);
+            const uint32_t m2 =
+                modmult<ALGO_BARRETT>(in, ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx], primeid);
+            if (i == 0) {
+                a1 = m1;
+                a2 = m2;
+            } else {
+                a1 = modadd(a1, m1, primeid);
+                a2 = modadd(a2, m2, primeid);
+            }
+        }
+        if (primeid < C_.L) {
+            ((uint32_t*)out1[pos_dec])[idx] = a1;
+            ((uint32_t*)out2[pos_dec])[idx] = a2;
+        } else {
+            ((uint32_t*)sout1[primeid - C_.L])[idx] = a1;
+            ((uint32_t*)sout2[primeid - C_.L])[idx] = a2;
+        }
+        return;
+    }
+
     /*
     int i = 0;
     bool decomp = (i == primeid_digit);
@@ -416,6 +450,53 @@ __global__ void __launch_bounds__(128, 12)
     const int pos_dec = blky - num_special;
 
     extern __shared__ char buffer[];
+
+    if (C_.type == 0) {
+        // n32 (Lever 1 fix 2): u32 fast path — see fusedDotKSK_2_ above. The shared digit
+        // cache is reinterpreted as u32 (uses half the allocation; layout self-consistent
+        // within this arm); residues and store order identical to the generic arm => bit-exact.
+        uint32_t* in1s = ((uint32_t*)buffer) + num_d * threadIdx.x;
+        for (int i = 0; i < num_d; ++i) {
+            const bool decomp = (i == primeid_digit);
+            const int pos = C_.pos_in_digit[i][primeid];
+            in1s[i] = ((uint32_t*)din1[i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx];
+        }
+        uint32_t in2 = 0;
+        if (c0_modup || primeid < C_.L) {
+            in2 = primeid < C_.L ? ((uint32_t*)c0[pos_dec])[idx] : ((uint32_t*)sc0[primeid - C_.L])[idx];
+            if (!c0_modup && primeid < C_.L)
+                in2 = modmult<ALGO_SHOUP>(in2, (uint32_t)C_.P[primeid], primeid, (uint32_t)C_.P_shoup[primeid]);
+        }
+        for (int j = 0; j < n; ++j) {
+            const int offset = j * 3 * 2 * C_.dnum;
+            uint32_t aux1, aux2;
+            for (int i = 0; i < num_d; ++i) {
+                const bool decomp = (i == primeid_digit);
+                const int pos = C_.pos_in_digit[i][primeid];
+                const int p = decomp ? pos_dec : pos;
+                const uint32_t kska = ((uint32_t*)digits[offset + C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                const uint32_t kskb = ((uint32_t*)digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                const uint32_t add1 = modmult<ALGO_BARRETT>(in1s[i], kska, primeid);
+                const uint32_t add2 = modmult<ALGO_BARRETT>(in1s[i], kskb, primeid);
+                if (i == 0) {
+                    aux1 = add1;
+                    aux2 = (c0_modup || primeid < C_.L) ? modadd(in2, add2, primeid) : add2;
+                } else {
+                    aux1 = modadd(aux1, add1, primeid);
+                    aux2 = modadd(aux2, add2, primeid);
+                }
+            }
+            const uint32_t out_idx = automorph_slot(C_.logN, indexes[j], idx);
+            if (primeid < C_.L) {
+                ((uint32_t*)out1[j][pos_dec])[out_idx] = aux1;
+                ((uint32_t*)out2[j][pos_dec])[out_idx] = aux2;
+            } else {
+                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = aux1;
+                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = aux2;
+            }
+        }
+        return;
+    }
 
     uint64_t* in1 = ((uint64_t*)buffer) + num_d * threadIdx.x;
 
