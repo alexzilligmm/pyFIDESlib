@@ -2,6 +2,7 @@
 // Created by carlosad on 25/03/24.
 //
 
+#include <cstdlib>
 #include "AddSub.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/ElemenwiseBatchKernels.cuh"
@@ -11,6 +12,25 @@
 #include "Rotation.cuh"
 
 namespace FIDESlib::CKKS {
+
+namespace {
+// E5 (Phase 3b): the U32 2N over-allocation below was belt-and-braces added in the same
+// commit as the host-side width-aware NTT grid fix (M = type==0 ? 8 : 4) — the REAL bug.
+// With the corrected M every NTT/INTT global access tops out at exactly index N (transposed
+// int4 stores included), so the pad is dead weight that costs every U32 limb the same 512 KB
+// as a U64 limb at logN=16. Default = NO pad (u32 limb pool halves); FIDESLIB_U32_LIMB_PAD=1
+// restores the old allocation for A/B or emergency revert. Gated by the wrapper [bitcmp] +
+// composite-bootstrap suite — the original corruption class (keyswitch DIGIT limb clobber)
+// fails those loudly.
+inline bool u32LimbPad() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_U32_LIMB_PAD");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+}  // namespace
+
 template <typename T>
 Limb<T>::Limb(Limb<T>&& l) noexcept
     : cc(l.cc), primeid(l.primeid), stream(l.stream), v(std::move(l.v)), aux(std::move(l.aux)), id(l.id), raw(l.raw) {}
@@ -26,14 +46,13 @@ Limb<T>::Limb(ContextData& context, const int id, Stream& stream, const int prim
     : cc(context),
       primeid(primeid),
       stream(stream /*StartStream(primeid, cc.L + cc.K + 1)*/),
-      // U32 limbs over-allocate to the uint64-slot size (2N elements, alloc only — logical size
-      // stays N): the U32 NTT/INTT tiling (kernel M=8, same byte-tile as u64 M=4) sweeps
-      // [0, 2N) u32 per row, so a dense N-element allocation lets the [N, 2N) tail clobber the
-      // pool neighbor (this corrupted the densely-packed keyswitch DIGIT limbs; ct limbs only
-      // survived because their interleaved aux allocations absorbed the tail).
-      v(stream, context.N, cc.GPUid[id], nullptr, sizeof(T) == 4 ? 2 * context.N : context.N),
+      // E5: the historical U32 2N pad is now OPT-IN (see u32LimbPad above) — the [N, 2N)
+      // tail sweep it guarded against was the host-M grid bug, fixed separately; the audit
+      // says nothing writes past N anymore.
+      v(stream, context.N, cc.GPUid[id], nullptr,
+        (sizeof(T) == 4 && u32LimbPad()) ? 2 * context.N : context.N),
       aux(stream, constant ? 0 : context.N, cc.GPUid[id], nullptr,
-          constant ? 0 : (sizeof(T) == 4 ? 2 * context.N : context.N)),
+          constant ? 0 : ((sizeof(T) == 4 && u32LimbPad()) ? 2 * context.N : context.N)),
       id(id),
       raw(!cc.isValidPrimeId(primeid)) {
     // TODO: CryptoContext limb tracking.
@@ -171,7 +190,9 @@ template void Limb<uint64_t>::load_with_stream<uint64_t>(const std::vector<uint6
 
 template <typename T>
 void Limb<T>::load(const VectorGPU<T>& dat) {
-    cudaMemcpyAsync(v.data, dat.data, v.size, cudaMemcpyDeviceToDevice, stream.ptr());
+    // E5 latent-bug fix: the size argument was `v.size` ELEMENTS passed as BYTES — a silent
+    // 1/sizeof(T) under-copy for every caller of this overload.
+    cudaMemcpyAsync(v.data, dat.data, v.size * sizeof(T), cudaMemcpyDeviceToDevice, stream.ptr());
 }
 
 template <typename T>
