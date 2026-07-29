@@ -1143,13 +1143,57 @@ void LimbPartition::freeSpecialLimbs() {
  * Bootstrap wall effect of shipping copy_v4_: n32 47.775 -> 47.333 ms (-0.93%, consistent
  * across 3 alternating pairs); n64 neutral (its saving overlaps off the critical path).
  * Precision unchanged — the width predicate is byte-identical to copy_'s. */
-static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst) {
+/* bytes_per_limb == 0 means "unknown or non-uniform widths" -> fall back to the typed
+ * kernels, which branch per limb. See uniform_limb_bytes(). */
+static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst,
+                                     size_t bytes_per_limb = 0) {
     if (nlimbs == 0)
         return;
+    /* Type-unaware byte copy at 16 B/thread — THE path when the width is known.
+     *
+     * Identical geometry to copy_v4_ (bytes/2048 x nlimbs blocks, 128 threads, 16 B each);
+     * the only difference is that it does not branch on ISU64. That alone is worth -2.2%
+     * (11.91 -> 11.65 us/call, 1.512 -> 1.479 ms/bts on n32), and it removes the
+     * slot-vs-primeid hazard from the copy path: ISU64 wants a PRIME ID but copy_/copy_v4_
+     * pass blockIdx.y, a limb SLOT — harmless only while chains are width-uniform. Mixed
+     * widths are now correct by construction.
+     *
+     * WIDER PER-THREAD WORK IS NOT USED, AND THE ISOLATED MEASUREMENT SAYING IT SHOULD BE IS
+     * WRONG. A standalone sweep shows both chains peaking at 64 B/thread (ops=4): n32 1240
+     * GB/s vs 1204 at 16 B, n64 1302 vs 1256. In production it is a 26% REGRESSION —
+     * 15.00 us/call vs 11.65, i.e. 1.744 vs 1.479 ms/bts. Two reasons the microbenchmark
+     * missed it, both worth remembering before trusting any isolated kernel sweep here:
+     *   1. It fixed the limb count at the operating-band value. grid.y == nlimbs, so wider
+     *      work means proportionally fewer blocks; a limb-count sweep shows 64 B LOSING
+     *      ~1-1.5% at 8 limbs and only winning from ~16 up. Special-limb copies run at
+     *      nlimbs == K (4-6), squarely in the losing regime.
+     *   2. More fundamentally, it ran the kernel ALONE. In situ these copies are
+     *      co-scheduled with other work, and a kernel with 4x fewer blocks takes a smaller
+     *      share of the machine under contention. A block-count floor recovered almost
+     *      nothing (1.744 -> 1.725), which is what pointed at concurrency rather than
+     *      occupancy.
+     * launchCopyBytes still accepts ops in {1,2,4} so this can be re-probed cheaply, but do
+     * not raise it on an isolated benchmark alone. */
+    if (bytes_per_limb && bytes_per_limb % 2048 == 0) {
+        launchCopyBytes(dim3{(uint32_t)(bytes_per_limb / 2048), nlimbs}, dim3{128}, stream, src, dst, 1);
+        return;
+    }
     if ((N % 512) == 0)
         copy_v4_<<<dim3{N / 512, nlimbs}, 128, 0, stream>>>(src, dst);
     else
         copy_<<<dim3{N / 128, nlimbs}, 128, 0, stream>>>(src, dst);
+}
+
+/* Bytes per limb IF every limb in [begin, begin+n) has the same element width; 0 otherwise,
+ * which routes the caller to the typed fallback. Cheap (n <= ~54) and called once per copy. */
+static inline size_t uniform_limb_bytes(const std::vector<LimbRecord>& meta, size_t begin, size_t n, int N) {
+    if (n == 0 || begin + n > meta.size())
+        return 0;
+    const auto t = meta[begin].type;
+    for (size_t k = begin + 1; k < begin + n; ++k)
+        if (meta[k].type != t)
+            return 0;
+    return (size_t)N * (t == U32 ? 4u : 8u);
 }
 
 void LimbPartition::copyLimb(const LimbPartition& partition) {
@@ -1159,7 +1203,8 @@ void LimbPartition::copyLimb(const LimbPartition& partition) {
     assert(*level == *partition.level);
     //std::cout << "GPU: " << id << " copy " << limbsize << "limbs" << std::endl;
     if (limbsize > 0)
-        launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
+        launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data,
+                          uniform_limb_bytes(meta, 0, (size_t)limbsize, cc.N));
     /*
     for (size_t i = 0; i < partition.limb.size(); ++i) {
         STREAM(limb.at(i)).wait(s);
@@ -1185,7 +1230,8 @@ void LimbPartition::copySpecialLimb(const LimbPartition& p) {
         launch_copy_limbs(
             (uint32_t)cc.N, size, STREAM(SPECIALlimb[i - (SPECIALmeta.size() > SPECIALlimb.size()) * start]).ptr(),
             p.SPECIALlimbptr.data + i - (SPECIALmeta.size() > p.SPECIALlimb.size()) * start,
-            SPECIALlimbptr.data + i - (SPECIALmeta.size() > SPECIALlimb.size()) * start);
+            SPECIALlimbptr.data + i - (SPECIALmeta.size() > SPECIALlimb.size()) * start,
+            uniform_limb_bytes(SPECIALmeta, (size_t)i, (size_t)size, cc.N));
     }
     for (size_t i = start; i < start + num_limbs; i += cc.batch) {
         s.wait(STREAM(SPECIALlimb[i - (SPECIALmeta.size() > SPECIALlimb.size()) * start]));
@@ -2631,11 +2677,13 @@ void LimbPartition::add(const LimbPartition& a, const LimbPartition& b, const bo
             if (!ext_a && ext_b) {
                 // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
                 launch_copy_limbs((uint32_t)cc.N, size, STREAM(SPECIALlimb[i]).ptr(), b.SPECIALlimbptr.data + i,
-                                  SPECIALlimbptr.data + i);
+                                  SPECIALlimbptr.data + i,
+                                  uniform_limb_bytes(SPECIALmeta, (size_t)i, (size_t)size, cc.N));
             } else if (!ext_b && ext_a) {
                 // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
                 launch_copy_limbs((uint32_t)cc.N, size, STREAM(SPECIALlimb[i]).ptr(), a.SPECIALlimbptr.data + i,
-                                  SPECIALlimbptr.data + i);
+                                  SPECIALlimbptr.data + i,
+                                  uniform_limb_bytes(SPECIALmeta, (size_t)i, (size_t)size, cc.N));
             } else {
                 add_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
                     SPECIALlimbptr.data + i, a.SPECIALlimbptr.data + i, b.SPECIALlimbptr.data + i,
