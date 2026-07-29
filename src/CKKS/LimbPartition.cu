@@ -1095,13 +1095,15 @@ void LimbPartition::freeSpecialLimbs() {
     }
 }
 
-/* THE limb-copy path. copy_v4_ (4 elements/thread) is now unconditional; scalar copy_ is
- * kept ONLY as the correctness fallback for rings where N % 512 != 0, since neither kernel
- * takes a length and the grid must cover N exactly.
+/* FALLBACK limb-copy path. Since 2026-07-29 THE copy is the type-unaware copy_bytes_ (see
+ * the dispatch below and ElemenwiseBatchKernels.cu); copy_v4_ and scalar copy_ survive only
+ * for when the limb width is unknown or non-uniform, or the limb does not tile the requested
+ * per-thread width. Neither takes a length, so the grid must cover N exactly.
  *
  * Settled 2026-07-29 on RTX PRO 6000 Blackwell. Three strategies were implemented and
- * measured end to end; the switch that selected between them (FIDESLIB_COPY_VEC) has been
- * removed now that the answer is known. Recorded here so it is not re-litigated:
+ * measured end to end; the temporary FIDESLIB_COPY_VEC selector that A/B'd them is gone (the
+ * surviving knob is FIDESLIB_COPY_BYTES, at the dispatch below). Recorded so it is not
+ * re-litigated:
  *
  *   copy_ (1 elem/thread)   n32 19.18 us/call, n64 13.25   — warp count tracked ELEMENT
  *                           count, not bytes, so the 32-bit chain (~2x the limbs at equal
