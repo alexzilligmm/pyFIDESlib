@@ -43,8 +43,11 @@ __global__ void broadcastLimb0_mgpu(void** a, const __grid_constant__ int primei
 __global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
                                    const uint64_t* qhat);
 __global__ void copy_(void** a, void** b);
-/* 4-elements-per-thread copy_; launch via LimbPartition's launch_copy_limbs helper, which
- * picks it when N % 512 == 0 and honours FIDESLIB_COPY_VEC. See the definition for why. */
+/* 4-elements-per-thread copy_ — THE limb-copy kernel since 2026-07-29. Launch via
+ * LimbPartition's launch_copy_limbs helper, which uses it whenever N % 512 == 0 and falls
+ * back to scalar copy_ otherwise (neither kernel takes a length, so the grid must cover N
+ * exactly). copy_ is retained ONLY for that fallback. See launch_copy_limbs for the
+ * measurements that settled this. */
 __global__ void copy_v4_(void** a, void** b);
 __global__ void copy1D_(void* a, void* b);
 __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void*** bs, uint64_t* w,

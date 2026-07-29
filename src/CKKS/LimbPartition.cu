@@ -2,8 +2,6 @@
 // Created by carlosad on 27/04/24.
 //
 #include <atomic>
-#include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_VEC
-#include <type_traits>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -1096,42 +1094,39 @@ void LimbPartition::freeSpecialLimbs() {
     }
 }
 
-/* Limb copies go through here so the vectorized kernel is picked in one place.
+/* THE limb-copy path. copy_v4_ (4 elements/thread) is now unconditional; scalar copy_ is
+ * kept ONLY as the correctness fallback for rings where N % 512 != 0, since neither kernel
+ * takes a length and the grid must cover N exactly.
  *
- * copy_ moves ONE element per thread, so its warp count tracks element count rather than
- * bytes. A 32-bit chain carries ~2x the limbs of a 64-bit chain at equal logQ, so for the
- * same bytes it launches ~1.83x the warps — and a pure copy has no arithmetic to hide the
- * issue cost. Measured on Blackwell: 17.91 us/call on n32 composite vs 12.72 on n64 THOR
- * (1.41x), while the arithmetic siblings add_/sub_ sit at only 1.07-1.16x. copy_v4_ moves
- * four elements per thread (16 B via uint4 / 32 B via ulonglong4) so both widths are
- * bandwidth-bound instead of issue-bound.
+ * Settled 2026-07-29 on RTX PRO 6000 Blackwell. Three strategies were implemented and
+ * measured end to end; the switch that selected between them (FIDESLIB_COPY_VEC) has been
+ * removed now that the answer is known. Recorded here so it is not re-litigated:
  *
- * Neither kernel takes a length, so the grid must cover N exactly -> require N % 512 == 0
- * (grid.x = N/512 with 128 threads x 4 elements). FIDESLIB_COPY_VEC=0 restores the scalar
- * kernel for back-to-back A/B on one binary. Limbs are separately allocated (see
- * LimbPartition::generate: each Limb owns its storage), which is why this cannot simply be
- * one flat cudaMemcpyAsync. */
-// FIDESLIB_COPY_VEC selects the limb-copy strategy, for back-to-back A/B on ONE binary:
-//   0 = scalar copy_    (1 element/thread, the historical kernel)
-//   1 = copy_v4_        (4 elements/thread) — DEFAULT
-//   2 = per-limb cudaMemcpyAsync (no layout change needed: each limb is already a
-//       contiguous N*width block). Isolated microbenchmark says 4-8x WORSE than either
-//       kernel — 3.5 us of API overhead per call, paid nlimbs times — but it is wired up
-//       so the cost can be re-measured on real primitives rather than argued.
-//       Arm 2 covers the MAIN limb copy only; special-limb copies stay on arm 1's kernel
-//       (they need the SPECIALlimb host vectors, and the main path is what a clone hits).
-static int copy_mode() {
-    static const int v = [] {
-        const char* e = std::getenv("FIDESLIB_COPY_VEC");
-        return (e && *e) ? std::atoi(e) : 1;
-    }();
-    return v;
-}
-
+ *   copy_ (1 elem/thread)   n32 19.18 us/call, n64 13.25   — warp count tracked ELEMENT
+ *                           count, not bytes, so the 32-bit chain (~2x the limbs at equal
+ *                           logQ) launched ~1.83x the warps for the same bytes, with no
+ *                           arithmetic to hide the issue cost. It was the outlier among
+ *                           pointwise kernels: 1.41x n32/n64 vs add_ 1.07x, sub_ 1.16x.
+ *   copy_v4_ (4/thread)     n32 11.91 us/call (-38%), n64 10.54 (-20%)   <-- SHIPPED
+ *                           1203 GB/s, within 6% of what a driver memcpy achieves for the
+ *                           same bytes, so this path is at its practical ceiling.
+ *   per-limb cudaMemcpyAsync  4-8x WORSE. 3.5 us of API overhead PER CALL on both chains
+ *                           (0.077/22 = 0.042/12), paid nlimbs times — the same
+ *                           cost-tracks-limb-count failure as copy_, moved to the host.
+ *                           Worse on every primitive of both chains (+27%..+700%). Dead;
+ *                           do not re-try.
+ *
+ * A single whole-buffer memcpy would beat copy_v4_ by only 4-6%, and needs every limb of a
+ * poly contiguous — that is Lever 6 in HANDOFF_bts_next_levers.md, measured dead separately
+ * (layout is null in both order AND alignment).
+ *
+ * Bootstrap wall effect of shipping copy_v4_: n32 47.775 -> 47.333 ms (-0.93%, consistent
+ * across 3 alternating pairs); n64 neutral (its saving overlaps off the critical path).
+ * Precision unchanged — the width predicate is byte-identical to copy_'s. */
 static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst) {
     if (nlimbs == 0)
         return;
-    if (copy_mode() != 0 && (N % 512) == 0)
+    if ((N % 512) == 0)
         copy_v4_<<<dim3{N / 512, nlimbs}, 128, 0, stream>>>(src, dst);
     else
         copy_<<<dim3{N / 128, nlimbs}, 128, 0, stream>>>(src, dst);
@@ -1143,27 +1138,8 @@ void LimbPartition::copyLimb(const LimbPartition& partition) {
     int limbsize = getLimbSize(*level);
     assert(*level == *partition.level);
     //std::cout << "GPU: " << id << " copy " << limbsize << "limbs" << std::endl;
-    if (limbsize > 0) {
-        if (copy_mode() == 2) {
-            // ARM 2: one cudaMemcpyAsync per limb (see copy_mode above).
-            const int n = std::min({limbsize, (int)limb.size(), (int)partition.limb.size()});
-            for (int i = 0; i < n; ++i) {
-                void* dst = nullptr;
-                void* src = nullptr;
-                size_t bytes = 0;
-                std::visit(
-                    [&](auto& x) {
-                        dst = (void*)x.v.data;
-                        bytes = (size_t)cc.N * sizeof(std::remove_pointer_t<decltype(x.v.data)>);
-                    },
-                    limb.at(i));
-                std::visit([&](const auto& x) { src = (void*)x.v.data; }, partition.limb.at(i));
-                cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, s.ptr());
-            }
-        } else {
-            launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
-        }
-    }
+    if (limbsize > 0)
+        launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
     /*
     for (size_t i = 0; i < partition.limb.size(); ++i) {
         STREAM(limb.at(i)).wait(s);
