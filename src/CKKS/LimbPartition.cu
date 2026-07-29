@@ -2,6 +2,7 @@
 // Created by carlosad on 27/04/24.
 //
 #include <atomic>
+#include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_OPS
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -1174,9 +1175,22 @@ static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t s
      *      occupancy.
      * launchCopyBytes still accepts ops in {1,2,4} so this can be re-probed cheaply, but do
      * not raise it on an isolated benchmark alone. */
-    if (bytes_per_limb && bytes_per_limb % 2048 == 0) {
-        launchCopyBytes(dim3{(uint32_t)(bytes_per_limb / 2048), nlimbs}, dim3{128}, stream, src, dst, 1);
-        return;
+    if (bytes_per_limb) {
+        // FIDESLIB_COPY_OPS overrides the 16 B/thread default (ops=1) for tuning/A-B; see the
+        // warning above before raising it on isolated-benchmark evidence. Falls back to a
+        // narrower ops if the limb does not tile exactly.
+        static const int req = [] {
+            const char* e = std::getenv("FIDESLIB_COPY_OPS");
+            const int v = (e && *e) ? std::atoi(e) : 1;
+            return (v == 1 || v == 2 || v == 4) ? v : 1;
+        }();
+        for (int ops = req; ops >= 1; ops >>= 1) {
+            const size_t tile = (size_t)16 * ops * 128;
+            if (bytes_per_limb % tile != 0)
+                continue;
+            launchCopyBytes(dim3{(uint32_t)(bytes_per_limb / tile), nlimbs}, dim3{128}, stream, src, dst, ops);
+            return;
+        }
     }
     if ((N % 512) == 0)
         copy_v4_<<<dim3{N / 512, nlimbs}, 128, 0, stream>>>(src, dst);
