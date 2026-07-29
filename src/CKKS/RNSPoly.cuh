@@ -131,6 +131,12 @@ class RNSPoly {
     // Ciphertext (no special/modup) only: asserts numRes == limbsize.
     void loadStaged(const uint8_t* base, const std::vector<size_t>& off, const std::vector<size_t>& len,
                     const std::vector<uint64_t>& moduli, cudaStream_t stream);
+    // COEFF-mode weight load: the pinned source holds ONE q0 (prime-0) EVAL limb of a plaintext
+    // encoded 1-limb on the host; the per-limb CRT+NTT the host used to do moves to the GPU as
+    // the proven ModRaise sequence: upload limb0 → INTT → grow(target) → broadcastLimb0
+    // (centered SwitchModulus from q0) → NTT. Limbs grow NON-constant (aux needed for NTT).
+    // Requires |coeff| < q0/2 (the encoder guards). Single-GPU only.
+    void loadCoeffExpand(const uint8_t* src, size_t len, int target_limbs, cudaStream_t stream);
     void rotateModupDotKSK(RNSPoly& poly, RNSPoly& poly1, const KeySwitchingKey& key);
     void squareModupDotKSK(RNSPoly& c0, RNSPoly& c1, const KeySwitchingKey& key);
     void generatePartialSpecialLimbs();

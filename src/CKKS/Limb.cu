@@ -121,14 +121,16 @@ void Limb<T>::load(const std::vector<Q>& dat_) {
     int device = -1;
     cudaGetDevice(&device);
     // std::cout << v.device << " " << device << ",";
+    if constexpr (std::is_same<T, Q>().value) {
+        cudaMemcpyAsync(v.data, dat_.data(), dat_.size() * sizeof(T),
+                        cudaMemcpyHostToDevice, stream.ptr());
+        return;
+    }
+
     std::vector<T> dat;
-    if constexpr (!std::is_same<T, Q>().value) {
-        dat.assign(v.size, 0);
-        for (size_t i = 0; i < dat.size(); ++i) {
-            dat[i] = dat_[i];
-        }
-    } else {
-        dat = dat_;
+    dat.assign(v.size, 0);
+    for (size_t i = 0; i < dat.size(); ++i) {
+        dat[i] = dat_[i];
     }
 
     //cudaHostRegister((void *) dat.data(), dat.size() * sizeof(T), cudaHostRegisterDefault);
@@ -142,14 +144,20 @@ template <typename T>
 template <typename Q>
 void Limb<T>::load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream_override) {
     assert(dat_.size() <= v.size);
+    // Same-type fast path, mirroring load(): upload straight from the caller's buffer.
+    // `dat = dat_` was a full 512 KB host copy per limb whose only purpose was to give
+    // cudaMemcpyAsync a different pointer, and the local it copied into died at return
+    // just as this parameter's source does. Byte-identical transfer.
+    if constexpr (std::is_same<T, Q>().value) {
+        cudaMemcpyAsync(v.data, dat_.data(), dat_.size() * sizeof(T), cudaMemcpyHostToDevice,
+                        stream_override);
+        return;
+    }
+
     std::vector<T> dat;
-    if constexpr (!std::is_same<T, Q>().value) {
-        dat.assign(v.size, 0);
-        for (size_t i = 0; i < dat.size(); ++i) {
-            dat[i] = dat_[i];
-        }
-    } else {
-        dat = dat_;
+    dat.assign(v.size, 0);
+    for (size_t i = 0; i < dat.size(); ++i) {
+        dat[i] = dat_[i];
     }
 
     cudaMemcpyAsync(v.data, dat.data(), dat.size() * sizeof(T), cudaMemcpyHostToDevice, stream_override);
@@ -199,6 +207,13 @@ template <typename T>
 template <typename Q>
 void Limb<T>::load_convert(const std::vector<Q>& dat_raw) {
     assert(dat_raw.size() <= v.size);
+    // Nothing to convert when the types already match — the elementwise loop and
+    // its 512 KB temporary were a no-op copy (load() then copied a SECOND time).
+    if constexpr (std::is_same<T, Q>().value) {
+        load(dat_raw);
+        return;
+    }
+
     std::vector<T> dat(dat_raw.size());
 
     for (size_t i = 0; i < dat.size(); ++i)
@@ -211,6 +226,13 @@ template <typename T>
 template <typename Q>
 void Limb<T>::load_convert_with_stream(const std::vector<Q>& dat_raw, cudaStream_t stream_override) {
     assert(dat_raw.size() <= v.size);
+    // Nothing to convert when the types already match — the loop and its temporary were
+    // a no-op copy, and load_with_stream then copied a SECOND time. Mirrors load_convert().
+    if constexpr (std::is_same<T, Q>().value) {
+        load_with_stream(dat_raw, stream_override);
+        return;
+    }
+
     std::vector<T> dat(dat_raw.size());
 
     for (size_t i = 0; i < dat.size(); ++i)

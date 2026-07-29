@@ -1028,6 +1028,36 @@ void RNSPoly::loadStaged(const uint8_t* base, const std::vector<size_t>& off,
     }
 }
 
+void RNSPoly::loadCoeffExpand(const uint8_t* src, size_t len, int target_limbs, cudaStream_t stream) {
+    // See RNSPoly.cuh. Mirrors ModRaise's raise mechanic (INTT → grow → broadcastLimb0 → NTT),
+    // sourcing limb 0 from the pinned arena instead of an existing ciphertext limb.
+    assert(cc.GPUid.size() == 1);
+    assert(level == -1 && "loadCoeffExpand expects a freshly constructed poly");
+    assert(target_limbs >= 1 && target_limbs - 1 <= cc.L);
+    assert(len == sizeof(uint64_t) * static_cast<size_t>(cc.N));
+
+    grow(0, false, /*constant=*/false);   // limb 0 (q0) WITH aux — NTT/INTT need the scratch
+    cudaSetDevice(GPU[cc.limbGPUid[0].x].device);
+    SWITCH(GPU[cc.limbGPUid[0].x].limb[cc.limbGPUid[0].y], load_async_ptr(src, len, stream));
+
+    // The limb kernels below run on the partition stream — bridge the upload once.
+    cudaStream_t ps = GPU.at(0).s.ptr();
+    if (stream != ps) {
+        cudaEvent_t ev = nullptr;
+        cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+        cudaEventRecord(ev, stream);
+        cudaStreamWaitEvent(ps, ev, 0);
+        cudaEventDestroy(ev);   // deferred by the driver until the wait completes
+    }
+
+    INTT(cc.batch, true);                             // EVAL@q0 → coefficient form
+    if (target_limbs > 1) {
+        grow(target_limbs - 1, false, /*constant=*/false);
+        broadcastLimb0();                             // centered SwitchModulus q0 → q_i
+    }
+    NTT(cc.batch, true);                              // all limbs back to EVAL
+}
+
 void RNSPoly::broadcastLimb0() {
     if (cc.GPUid.size() == 1) {
         for (size_t i = 0; i < cc.GPUid.size(); ++i) {

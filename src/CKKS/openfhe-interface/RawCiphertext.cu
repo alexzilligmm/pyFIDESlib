@@ -4,6 +4,8 @@
 #include <bit>
 #include <cassert>
 #include <cstdlib>
+#include <stdexcept>
+#include <type_traits>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/KskSeedExpand.cuh"
@@ -16,17 +18,27 @@ using namespace lbcrypto;
 * Converts a vector of polynomial limbs to a single flattened array
 */
 std::vector<std::vector<uint64_t>> FIDESlib::CKKS::GetRawArray(
-    std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys) {
+    const std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>>& polys) {
     // total size is r * N
     int numRes = polys.size();
     int numElements = (polys[0].GetValues() /*.m_values*/).GetLength();
 
-    std::vector<std::vector<uint64_t>> flattened(numRes, std::vector<uint64_t>(numElements));
+    std::vector<std::vector<uint64_t>> flattened;
+    flattened.reserve(numRes);
 
-    // Fill the array
+    using NativeInt = std::decay_t<decltype(polys[0].GetValues()[0])>;
     for (int r = 0; r < numRes; ++r) {
-        for (int i = 0; i < numElements; i++) {
-            flattened[r][i] = (polys[r].GetValues() /*.m_values*/)[i].ConvertToInt();
+        const auto& vals = polys[r].GetValues();
+        if constexpr (sizeof(NativeInt) == sizeof(uint64_t) && std::is_trivially_copyable_v<NativeInt>) {
+            // NativeIntegerT is one uint64_t member, no virtuals; the NativeVector storage is
+            // contiguous — range-construct = a single memcpy, no zero-init, no per-element walk.
+            const uint64_t* p = reinterpret_cast<const uint64_t*>(&vals[0]);
+            flattened.emplace_back(p, p + numElements);
+        } else {
+            std::vector<uint64_t> limb(numElements);
+            for (int i = 0; i < numElements; i++)
+                limb[i] = vals[i].ConvertToInt();
+            flattened.push_back(std::move(limb));
         }
     }
     return flattened;
@@ -35,7 +47,9 @@ std::vector<std::vector<uint64_t>> FIDESlib::CKKS::GetRawArray(
 /**
 * Gets the moduli from a vector of polynomial limbs and returns a single array
 */
-static std::vector<uint64_t> GetModuli(std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>> polys) {
+// const& (was by value): this copied the entire limb vector purely to read
+// numRes moduli scalars. Pure parameter-passing change.
+static std::vector<uint64_t> GetModuli(const std::vector<lbcrypto::PolyImpl<lbcrypto::NativeVector>>& polys) {
     int numRes = polys.size();
     std::vector<uint64_t> moduli(numRes);
     for (int r = 0; r < numRes; r++) {
@@ -175,6 +189,10 @@ FIDESlib::CKKS::RawPlainText FIDESlib::CKKS::GetRawPlainText(lbcrypto::CryptoCon
                                                              lbcrypto::Plaintext pt) {
     RawPlainText result;  //{.cc = cc};
     result.originalPlainText = pt;
+    if (pt->GetElement<DCRTPoly>().GetAllElements().empty())
+        throw std::runtime_error(
+            "GetRawPlainText: plaintext CPU payload was released after pinned staging "
+            "(FHE_STAGE_RELEASE_CPU) — a second extraction of a staged weight is a bug");
     result.numRes = pt->GetElement<DCRTPoly>().GetAllElements().size();
     result.N = ((pt->GetElement<DCRTPoly>().GetAllElements())[0].GetValues() /*.m_values*/).GetLength();
     result.sub_0 = GetRawArray(pt->GetElement<DCRTPoly>().GetAllElements());
@@ -199,6 +217,10 @@ FIDESlib::CKKS::RawPlainText FIDESlib::CKKS::GetRawPlainText(lbcrypto::CryptoCon
                                                              ReadOnlyPlaintext pt) {
     RawPlainText result;  //{.cc = cc};
     //result.originalPlainText = pt;
+    if (pt->GetElement<DCRTPoly>().GetAllElements().empty())
+        throw std::runtime_error(
+            "GetRawPlainText: plaintext CPU payload was released after pinned staging "
+            "(FHE_STAGE_RELEASE_CPU) — a second extraction of a staged weight is a bug");
     result.numRes = pt->GetElement<DCRTPoly>().GetAllElements().size();
     result.N = ((pt->GetElement<DCRTPoly>().GetAllElements())[0].GetValues() /*.m_values*/).GetLength();
     result.sub_0 = GetRawArray(pt->GetElement<DCRTPoly>().GetAllElements());
