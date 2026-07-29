@@ -252,6 +252,31 @@ __global__ void copy_(void** a, void** b) {
     }
 }
 
+/* Vectorized limb copy: FOUR elements per thread instead of one.
+ *
+ * copy_ moves one element per thread, so its warp count tracks the ELEMENT count, not the
+ * byte count. A 32-bit chain carries ~2x the limbs of a 64-bit chain at the same logQ, so
+ * for identical bytes it launches ~1.83x the warps — and a pure copy has no arithmetic to
+ * hide the extra issue cost. Measured on Blackwell: copy_ costs 17.91 us/call on the n32
+ * composite chain vs 12.72 on n64 (1.41x), while its arithmetic siblings add_/sub_ sit at
+ * 1.07-1.16x. This kernel makes each thread move 16 B (uint4) or 32 B (ulonglong4), so the
+ * copy is bandwidth-bound rather than issue-bound on both widths.
+ *
+ * Width selection is deliberately IDENTICAL to copy_ (ISU64(blockIdx.y)) so behaviour is
+ * bit-for-bit unchanged. Grid must be {N/512, limbs} with 128 threads; the caller checks
+ * N % 512 == 0 and falls back to copy_ otherwise (neither kernel takes a length argument,
+ * so the grid must cover N exactly). Alignment holds: limb strides are N*4 / N*8 bytes,
+ * both multiples of 32, on top of cudaMalloc's 256 B base alignment. */
+__global__ void copy_v4_(void** a, void** b) {
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (ISU64(blockIdx.y)) {
+        ((ulonglong4*)b[blockIdx.y])[i] = ((ulonglong4*)a[blockIdx.y])[i];
+    } else {
+        ((uint4*)b[blockIdx.y])[i] = ((uint4*)a[blockIdx.y])[i];
+    }
+}
+
 __global__ void copy1D_(void* a, void* b) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
 

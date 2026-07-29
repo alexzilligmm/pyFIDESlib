@@ -2,6 +2,7 @@
 // Created by carlosad on 27/04/24.
 //
 #include <atomic>
+#include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_VEC
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -1094,6 +1095,38 @@ void LimbPartition::freeSpecialLimbs() {
     }
 }
 
+/* Limb copies go through here so the vectorized kernel is picked in one place.
+ *
+ * copy_ moves ONE element per thread, so its warp count tracks element count rather than
+ * bytes. A 32-bit chain carries ~2x the limbs of a 64-bit chain at equal logQ, so for the
+ * same bytes it launches ~1.83x the warps — and a pure copy has no arithmetic to hide the
+ * issue cost. Measured on Blackwell: 17.91 us/call on n32 composite vs 12.72 on n64 THOR
+ * (1.41x), while the arithmetic siblings add_/sub_ sit at only 1.07-1.16x. copy_v4_ moves
+ * four elements per thread (16 B via uint4 / 32 B via ulonglong4) so both widths are
+ * bandwidth-bound instead of issue-bound.
+ *
+ * Neither kernel takes a length, so the grid must cover N exactly -> require N % 512 == 0
+ * (grid.x = N/512 with 128 threads x 4 elements). FIDESLIB_COPY_VEC=0 restores the scalar
+ * kernel for back-to-back A/B on one binary. Limbs are separately allocated (see
+ * LimbPartition::generate: each Limb owns its storage), which is why this cannot simply be
+ * one flat cudaMemcpyAsync. */
+static bool copy_vec_enabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_COPY_VEC");
+        return !(e && *e && std::atoi(e) == 0);
+    }();
+    return v;
+}
+
+static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst) {
+    if (nlimbs == 0)
+        return;
+    if (copy_vec_enabled() && (N % 512) == 0)
+        copy_v4_<<<dim3{N / 512, nlimbs}, 128, 0, stream>>>(src, dst);
+    else
+        copy_<<<dim3{N / 128, nlimbs}, 128, 0, stream>>>(src, dst);
+}
+
 void LimbPartition::copyLimb(const LimbPartition& partition) {
     cudaSetDevice(device);
     s.wait(partition.getS());
@@ -1101,8 +1134,7 @@ void LimbPartition::copyLimb(const LimbPartition& partition) {
     assert(*level == *partition.level);
     //std::cout << "GPU: " << id << " copy " << limbsize << "limbs" << std::endl;
     if (limbsize > 0)
-        copy_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(partition.limbptr.data,
-                                                                                   limbptr.data);
+        launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
     /*
     for (size_t i = 0; i < partition.limb.size(); ++i) {
         STREAM(limb.at(i)).wait(s);
@@ -1125,8 +1157,8 @@ void LimbPartition::copySpecialLimb(const LimbPartition& p) {
         STREAM(SPECIALlimb[i - (SPECIALmeta.size() > SPECIALlimb.size()) * start]).wait(s);
         uint32_t size = std::min((int)start + num_limbs - (int)i, cc.batch);
 
-        copy_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0,
-                STREAM(SPECIALlimb[i - (SPECIALmeta.size() > SPECIALlimb.size()) * start]).ptr()>>>(
+        launch_copy_limbs(
+            (uint32_t)cc.N, size, STREAM(SPECIALlimb[i - (SPECIALmeta.size() > SPECIALlimb.size()) * start]).ptr(),
             p.SPECIALlimbptr.data + i - (SPECIALmeta.size() > p.SPECIALlimb.size()) * start,
             SPECIALlimbptr.data + i - (SPECIALmeta.size() > SPECIALlimb.size()) * start);
     }
@@ -2572,15 +2604,13 @@ void LimbPartition::add(const LimbPartition& a, const LimbPartition& b, const bo
             uint32_t size = std::min((int)start + num_limbs - (int)i, cc.batch);
 
             if (!ext_a && ext_b) {
-                copy_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
-                    b.SPECIALlimbptr.data + i,
-                    SPECIALlimbptr.data +
-                        i);  // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
+                // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
+                launch_copy_limbs((uint32_t)cc.N, size, STREAM(SPECIALlimb[i]).ptr(), b.SPECIALlimbptr.data + i,
+                                  SPECIALlimbptr.data + i);
             } else if (!ext_b && ext_a) {
-                copy_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
-                    a.SPECIALlimbptr.data + i,
-                    SPECIALlimbptr.data +
-                        i);  // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
+                // TODO: have to check if Limbpartition comes from a plaintext, where extension limbs are mapped differently
+                launch_copy_limbs((uint32_t)cc.N, size, STREAM(SPECIALlimb[i]).ptr(), a.SPECIALlimbptr.data + i,
+                                  SPECIALlimbptr.data + i);
             } else {
                 add_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
                     SPECIALlimbptr.data + i, a.SPECIALlimbptr.data + i, b.SPECIALlimbptr.data + i,
