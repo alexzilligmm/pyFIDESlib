@@ -1120,6 +1120,15 @@ void LimbPartition::freeSpecialLimbs() {
  * poly contiguous — that is Lever 6 in HANDOFF_bts_next_levers.md, measured dead separately
  * (layout is null in both order AND alignment).
  *
+ * WIDTH SYMMETRY — asked and answered, do not re-try. uint4 is 4 elems = 16 B/thread on u32
+ * limbs but ulonglong4 is 4 elems = 32 B/thread on u64, so n32 threads move HALF the bytes.
+ * A "copy_v8_" (2 vector ops/thread, matching 32 B on n32) was measured in
+ * tests/dev/test_limb_locality.cu: **n32 gains EXACTLY NOTHING (+-0.3% across 6 layouts x 2
+ * runs)**. n64 at 64 B/thread does pick up 2-4%, reaching its whole-buffer-memcpy ceiling —
+ * but n64's copy class converts to wall at ~0% (overlap-wash), so that is ~0.04 ms serialized
+ * and unbankable. Bytes-per-thread is not the binding constraint on either chain; both are
+ * already at the plateau for this kernel.
+ *
  * Bootstrap wall effect of shipping copy_v4_: n32 47.775 -> 47.333 ms (-0.93%, consistent
  * across 3 alternating pairs); n64 neutral (its saving overlaps off the critical path).
  * Precision unchanged — the width predicate is byte-identical to copy_'s. */
