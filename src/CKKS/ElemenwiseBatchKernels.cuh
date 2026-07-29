@@ -50,13 +50,15 @@ __global__ void copy_(void** a, void** b);
  * measurements that settled this. */
 __global__ void copy_v4_(void** a, void** b);
 __global__ void copy1D_(void* a, void* b);
-/* TYPE-UNAWARE limb copy — the preferred path since 2026-07-29. Moves bytes with no width
- * branch, so it drops ISU64 (and its slot-vs-primeid hazard) and hits the measured 64 B/thread
- * optimum on BOTH chains at ops=4. Grid {bytes_per_limb/(16*ops*128), nlimbs}, block 128; the
- * kernel carries no length so the grid must cover the limb exactly. Launch ONLY through this
- * host launcher — the underlying kernel is a template, and launching it from a TU that sees
- * just a declaration yields 'invalid device function'. ops in {1,2,4}. */
-void launchCopyBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int ops);
+/* TYPE-UNAWARE limb copy — THE path since 2026-07-29. Moves bytes with no width branch, so
+ * it drops ISU64 (and its slot-vs-primeid hazard). Tuned in BYTES PER THREAD, the only unit
+ * comparable across limb widths and portable across GPUs; default 16, override with
+ * FIDESLIB_COPY_BYTES (16/32/64), implemented uniformly as bytes/16 uint4 stores (no
+ * per-width vector-type special-casing). Grid {bytes_per_limb/(bytes*128), nlimbs},
+ * block 128; the kernel carries no length so the grid must cover the limb exactly. Launch
+ * ONLY through this host launcher — the kernel is a template, and launching it from a TU that
+ * sees just a declaration yields 'invalid device function'. */
+void launchCopyBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int bytes_per_thread);
 __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void*** bs, uint64_t* w,
                                    const __grid_constant__ int primeid_init);
 

@@ -277,44 +277,46 @@ __global__ void copy_v4_(void** a, void** b) {
     }
 }
 
-/* TYPE-UNAWARE limb copy. A copy moves BYTES, so it has no business knowing whether the
- * limb holds u32 or u64 elements. Dropping the width branch removes a constant-memory load
- * (ISU64) and a branch per thread, makes mixed-width limbs correct by construction, and
- * sidesteps the latent ISU64(blockIdx.y) confusion in copy_/copy_v4_ (that macro wants a
- * PRIME ID; blockIdx.y is a limb SLOT — harmless only while both chains are width-uniform).
+/* TYPE-UNAWARE limb copy, parameterised by BYTES PER THREAD.
  *
- * It also unifies the tuning. Measured bytes/thread sweep on Blackwell (both chains peak at
- * 64 B and fall off monotonically past it — a memory-pipe property, not a chain property):
+ * A copy moves BYTES — it has no reason to know whether the limb holds u32 or u64 elements.
+ * Dropping the width branch removes a constant-memory load (ISU64) and a branch per thread,
+ * makes mixed-width limbs correct by construction, and sidesteps the latent
+ * ISU64(blockIdx.y) confusion in copy_/copy_v4_ (that macro wants a PRIME ID; blockIdx.y is
+ * a limb SLOT — harmless only while both chains are width-uniform).
  *
- *     bytes/thread   16     32     64      128     256
- *     n32 GB/s      1204   1205   1240    1163    1053
- *     n64 GB/s        -    1267   1302    1150    1064
+ * BYTES is the tuning axis rather than "elements": it is the only unit comparable across
+ * limb widths AND portable across GPUs, so retuning for other hardware means changing one
+ * number. Implemented uniformly as BYTES/16 stores of uint4, the widest portable vector
+ * type — deliberately NOT special-casing particular widths to particular vector types, which
+ * would bake this architecture's quirks into the byte knob.
  *
- * OPS=4 is 64 B/thread on BOTH chains with identical code; only the grid differs, through
- * bytes-per-limb, which the host already knows. Type-unaware at 64 B measured 1243 GB/s on
- * n32 and 1312-1318 on n64 — equal or better than the typed kernel everywhere, and +3.2%
- * (n32) / +3.6-4.0% (n64) over the shipped copy_v4_ (which sits at 16 B and 32 B/thread
- * respectively, i.e. below the knee on both).
+ * OBSERVATION for whoever retunes (recorded, not baked in): the vector TYPE appears to matter
+ * independently of the byte count. The retired copy_v4_ moved 32 B/thread as ONE ulonglong4
+ * and measured 10.54 us/call on the n64 chain, against 12.58 for two uint4s at identical
+ * bytes AND identical block count. If a future architecture wants 32 B+, it is worth probing
+ * a wider vector type as a SEPARATE axis rather than assuming bytes alone determine it.
  *
- * Grid must be {bytes_per_limb/(16*OPS*128), nlimbs}, block 128 — the kernel carries no
+ * Grid must be {bytes_per_limb/(BYTES*128), nlimbs}, block 128 — the kernel carries no
  * length, so the grid has to cover the limb exactly. */
-template <int OPS>
+template <int BYTES>
 __global__ void copy_bytes_(void** a, void** b) {
+    constexpr int V = BYTES / 16;  // uint4 == 16 B
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 #pragma unroll
-    for (int q = 0; q < OPS; ++q)
-        ((uint4*)b[blockIdx.y])[OPS * i + q] = ((uint4*)a[blockIdx.y])[OPS * i + q];
+    for (int q = 0; q < V; ++q)
+        ((uint4*)b[blockIdx.y])[V * i + q] = ((uint4*)a[blockIdx.y])[V * i + q];
 }
 
 /* Cross-TU launcher. A __global__ TEMPLATE launched from a TU that only sees its declaration
  * gets a weak local stub with no device code in that TU's fatbin => 'invalid device function'
  * (documented for the dot kernels above, job 50426241). Keep every instantiation here. */
-void launchCopyBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int ops) {
-    switch (ops) {
-        case 1: copy_bytes_<1><<<grid, block, 0, stream>>>(a, b); break;
-        case 2: copy_bytes_<2><<<grid, block, 0, stream>>>(a, b); break;
-        case 4: copy_bytes_<4><<<grid, block, 0, stream>>>(a, b); break;
-        default: throw std::runtime_error("launchCopyBytes: unsupported ops (expect 1, 2 or 4)");
+void launchCopyBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int bytes_per_thread) {
+    switch (bytes_per_thread) {
+        case 16: copy_bytes_<16><<<grid, block, 0, stream>>>(a, b); break;
+        case 32: copy_bytes_<32><<<grid, block, 0, stream>>>(a, b); break;
+        case 64: copy_bytes_<64><<<grid, block, 0, stream>>>(a, b); break;
+        default: throw std::runtime_error("launchCopyBytes: bytes_per_thread must be 16, 32 or 64");
     }
 }
 

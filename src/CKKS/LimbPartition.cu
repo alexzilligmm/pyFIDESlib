@@ -2,7 +2,7 @@
 // Created by carlosad on 27/04/24.
 //
 #include <atomic>
-#include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_OPS
+#include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_BYTES
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -1176,19 +1176,35 @@ static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t s
      * launchCopyBytes still accepts ops in {1,2,4} so this can be re-probed cheaply, but do
      * not raise it on an isolated benchmark alone. */
     if (bytes_per_limb) {
-        // FIDESLIB_COPY_OPS overrides the 16 B/thread default (ops=1) for tuning/A-B; see the
-        // warning above before raising it on isolated-benchmark evidence. Falls back to a
-        // narrower ops if the limb does not tile exactly.
+        /* FIDESLIB_COPY_BYTES selects bytes-per-thread (16/32/64), default 16. Expressed in
+         * BYTES so it retunes cleanly on other hardware — on a different GPU the optimum may
+         * well move, and this is the only number that needs to change.
+         *
+         * WHY 16 IS THE DEFAULT, AND WHY ISOLATED BENCHMARKS SAY OTHERWISE. A standalone
+         * bytes/thread sweep peaks at 64 B on BOTH chains (n32 1240 GB/s vs 1204 at 16 B;
+         * n64 1302 vs 1256). In production 64 B is a 26% REGRESSION on n32 (15.00 vs 11.65
+         * us/call) and 32 B is a 15% regression on n64 (12.58 vs 10.98, bootstrap wall
+         * slower in 3/3 alternating pairs; primitives slower on 7/8). Two reasons the
+         * microbenchmark misleads, both worth re-checking before raising this on new hardware:
+         *   1. It fixes the limb count. grid.y == nlimbs, so wider work means proportionally
+         *      fewer blocks; a limb-count sweep shows 64 B LOSING ~1-1.5% at 8 limbs and only
+         *      winning from ~16 up. Special-limb copies run at nlimbs == K (4-6).
+         *   2. More fundamentally it runs the kernel ALONE. In situ these copies are
+         *      co-scheduled, and fewer blocks means a smaller share of the machine under
+         *      contention. A block-count floor recovered almost nothing (1.744 -> 1.725),
+         *      which is what pointed at concurrency rather than occupancy.
+         * So: retune with an in-situ A/B (bootstrap wall over alternating pairs), never with
+         * an isolated kernel sweep. */
         static const int req = [] {
-            const char* e = std::getenv("FIDESLIB_COPY_OPS");
-            const int v = (e && *e) ? std::atoi(e) : 1;
-            return (v == 1 || v == 2 || v == 4) ? v : 1;
+            const char* e = std::getenv("FIDESLIB_COPY_BYTES");
+            const int v = (e && *e) ? std::atoi(e) : 16;
+            return (v == 16 || v == 32 || v == 64) ? v : 16;
         }();
-        for (int ops = req; ops >= 1; ops >>= 1) {
-            const size_t tile = (size_t)16 * ops * 128;
+        for (int bpt = req; bpt >= 16; bpt >>= 1) {
+            const size_t tile = (size_t)bpt * 128;
             if (bytes_per_limb % tile != 0)
                 continue;
-            launchCopyBytes(dim3{(uint32_t)(bytes_per_limb / tile), nlimbs}, dim3{128}, stream, src, dst, ops);
+            launchCopyBytes(dim3{(uint32_t)(bytes_per_limb / tile), nlimbs}, dim3{128}, stream, src, dst, bpt);
             return;
         }
     }
