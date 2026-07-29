@@ -1113,11 +1113,15 @@ void LimbPartition::freeSpecialLimbs() {
  *   copy_v4_ (4/thread)     n32 11.91 us/call (-38%), n64 10.54 (-20%)   <-- SHIPPED
  *                           1203 GB/s, within 6% of what a driver memcpy achieves for the
  *                           same bytes, so this path is at its practical ceiling.
- *   per-limb cudaMemcpyAsync  4-8x WORSE. 3.5 us of API overhead PER CALL on both chains
- *                           (0.077/22 = 0.042/12), paid nlimbs times — the same
- *                           cost-tracks-limb-count failure as copy_, moved to the host.
- *                           Worse on every primitive of both chains (+27%..+700%). Dead;
- *                           do not re-try.
+ *   per-limb cudaMemcpyAsync  4-8x WORSE. 3.5 us of DISPATCH cost PER CALL on both chains
+ *                           (0.077/22 = 0.042/12), paid nlimbs times. Worse on every
+ *                           primitive of both chains (+27%..+700%). Dead; do not re-try.
+ *                           NOTE the copy PATH is not the problem: nsys shows same-device
+ *                           D2D as a memory OPERATION (copy engine) with no internal copy
+ *                           kernel in the trace, and ONE contiguous memcpy beats this
+ *                           kernel by 4-6% (1281 vs 1203 GB/s on n32). The kernel wins
+ *                           only because a single launch covers all nlimbs via grid.y,
+ *                           paying dispatch once instead of nlimbs times.
  *
  * A single whole-buffer memcpy would beat copy_v4_ by only 4-6%, and needs every limb of a
  * poly contiguous — that is Lever 6 in HANDOFF_bts_next_levers.md, measured dead separately
