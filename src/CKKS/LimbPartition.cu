@@ -1120,14 +1120,25 @@ void LimbPartition::freeSpecialLimbs() {
  * poly contiguous — that is Lever 6 in HANDOFF_bts_next_levers.md, measured dead separately
  * (layout is null in both order AND alignment).
  *
- * WIDTH SYMMETRY — asked and answered, do not re-try. uint4 is 4 elems = 16 B/thread on u32
- * limbs but ulonglong4 is 4 elems = 32 B/thread on u64, so n32 threads move HALF the bytes.
- * A "copy_v8_" (2 vector ops/thread, matching 32 B on n32) was measured in
- * tests/dev/test_limb_locality.cu: **n32 gains EXACTLY NOTHING (+-0.3% across 6 layouts x 2
- * runs)**. n64 at 64 B/thread does pick up 2-4%, reaching its whole-buffer-memcpy ceiling —
- * but n64's copy class converts to wall at ~0% (overlap-wash), so that is ~0.04 ms serialized
- * and unbankable. Bytes-per-thread is not the binding constraint on either chain; both are
- * already at the plateau for this kernel.
+ * PER-THREAD WIDTH — swept properly (tests/dev/test_limb_locality.cu, bytes-indexed, 3 runs).
+ * NOTE the axis: uint4 and ulonglong4 both hold 4 ELEMENTS, but an element is 4 B on u32
+ * limbs and 8 B on u64 — so equal element counts are NOT equal bytes, and the chains are only
+ * comparable when indexed by BYTES per thread:
+ *
+ *     bytes/thread   16     32     64      128     256     512
+ *     n32 GB/s      1191   1204   1240*   1150    1047      -
+ *     n64 GB/s        -    1256   1284*   1140    1058     825
+ *
+ * BOTH CHAINS PEAK AT 64 B/THREAD and fall off monotonically past it — it is a property of
+ * the memory pipe, not of the chain. By element count that looks like two different optima
+ * (u32 wants 16 elems, u64 wants 8); by bytes it is one number.
+ *
+ * Today's copy_v4_ is 16 B/thread on u32 and 32 B on u64, i.e. BELOW the knee on both:
+ * moving to 64 B is worth ~+3% on each. Not currently shipped — ~3% of the copy kernel is
+ * ~0.045 ms serialized per bootstrap on n32, ~0.02 ms wall after the 48% overlap conversion
+ * (~0.05%), and ~0 on n64 (overlap-wash). It would need the HOST to pick the grid from the
+ * limb width (N/2048 for u32, N/1024 for u64) since grid dims cannot vary per blockIdx.y,
+ * which hard-codes the width-uniform-chain assumption that is currently only latent.
  *
  * Bootstrap wall effect of shipping copy_v4_: n32 47.775 -> 47.333 ms (-0.93%, consistent
  * across 3 alternating pairs); n64 neutral (its saving overlaps off the critical path).
