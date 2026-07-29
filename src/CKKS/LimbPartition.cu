@@ -3,6 +3,7 @@
 //
 #include <atomic>
 #include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_VEC
+#include <type_traits>
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -1110,10 +1111,19 @@ void LimbPartition::freeSpecialLimbs() {
  * kernel for back-to-back A/B on one binary. Limbs are separately allocated (see
  * LimbPartition::generate: each Limb owns its storage), which is why this cannot simply be
  * one flat cudaMemcpyAsync. */
-static bool copy_vec_enabled() {
-    static const bool v = [] {
+// FIDESLIB_COPY_VEC selects the limb-copy strategy, for back-to-back A/B on ONE binary:
+//   0 = scalar copy_    (1 element/thread, the historical kernel)
+//   1 = copy_v4_        (4 elements/thread) — DEFAULT
+//   2 = per-limb cudaMemcpyAsync (no layout change needed: each limb is already a
+//       contiguous N*width block). Isolated microbenchmark says 4-8x WORSE than either
+//       kernel — 3.5 us of API overhead per call, paid nlimbs times — but it is wired up
+//       so the cost can be re-measured on real primitives rather than argued.
+//       Arm 2 covers the MAIN limb copy only; special-limb copies stay on arm 1's kernel
+//       (they need the SPECIALlimb host vectors, and the main path is what a clone hits).
+static int copy_mode() {
+    static const int v = [] {
         const char* e = std::getenv("FIDESLIB_COPY_VEC");
-        return !(e && *e && std::atoi(e) == 0);
+        return (e && *e) ? std::atoi(e) : 1;
     }();
     return v;
 }
@@ -1121,7 +1131,7 @@ static bool copy_vec_enabled() {
 static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst) {
     if (nlimbs == 0)
         return;
-    if (copy_vec_enabled() && (N % 512) == 0)
+    if (copy_mode() != 0 && (N % 512) == 0)
         copy_v4_<<<dim3{N / 512, nlimbs}, 128, 0, stream>>>(src, dst);
     else
         copy_<<<dim3{N / 128, nlimbs}, 128, 0, stream>>>(src, dst);
@@ -1133,8 +1143,27 @@ void LimbPartition::copyLimb(const LimbPartition& partition) {
     int limbsize = getLimbSize(*level);
     assert(*level == *partition.level);
     //std::cout << "GPU: " << id << " copy " << limbsize << "limbs" << std::endl;
-    if (limbsize > 0)
-        launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
+    if (limbsize > 0) {
+        if (copy_mode() == 2) {
+            // ARM 2: one cudaMemcpyAsync per limb (see copy_mode above).
+            const int n = std::min({limbsize, (int)limb.size(), (int)partition.limb.size()});
+            for (int i = 0; i < n; ++i) {
+                void* dst = nullptr;
+                void* src = nullptr;
+                size_t bytes = 0;
+                std::visit(
+                    [&](auto& x) {
+                        dst = (void*)x.v.data;
+                        bytes = (size_t)cc.N * sizeof(std::remove_pointer_t<decltype(x.v.data)>);
+                    },
+                    limb.at(i));
+                std::visit([&](const auto& x) { src = (void*)x.v.data; }, partition.limb.at(i));
+                cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, s.ptr());
+            }
+        } else {
+            launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data);
+        }
+    }
     /*
     for (size_t i = 0; i < partition.limb.size(); ++i) {
         STREAM(limb.at(i)).wait(s);
