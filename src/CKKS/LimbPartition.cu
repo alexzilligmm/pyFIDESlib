@@ -450,7 +450,7 @@ int kskRegenLevel() {
  * staging path keeps working untouched while any missed reader gets a null deref rather than
  * stale key material. The dense storage returns to the pool exactly the way packKeyLimbs
  * releases it after packing. */
-void LimbPartition::adoptKskASeed(const std::vector<uint32_t>& seed) {
+void LimbPartition::adoptKskASeed(const std::vector<uint32_t>& seed, int q_band) {
     cudaSetDevice(device);
     assert(cc.GPUid.size() == 1);
     assert(seed.size() == 8);
@@ -458,24 +458,44 @@ void LimbPartition::adoptKskASeed(const std::vector<uint32_t>& seed) {
         ksk_seed[i] = seed[i];
     ksk_seed_set = true;
     ksk_a_released = true;
+    // generateAllDecompAndDigit would have set this; the caller now skips that call entirely,
+    // so carry the band ourselves — dotKSK's banded-key guard reads it.
+    if (q_band >= 0)
+        key_q_band = q_band;
 
-    // Same ordering rule packKeyLimbs documents: nothing may still be reading these blocks
-    // when they return to the pool, or a later allocation recycles them under a live kernel.
+    // Works whether or not the rows were ever generated: KeySwitchingKey::Initialize skips
+    // generateDecompAndDigit for a released `a` (never allocating), but the earlier form
+    // allocated first and released here, and both must stay valid. Same ordering rule
+    // packKeyLimbs documents: nothing may still be reading these blocks when they return to
+    // the pool, or a later allocation recycles them under a live kernel.
     cudaDeviceSynchronize();
     for (auto& d : DECOMPlimb)
         d.clear();
     for (auto& d : DIGITlimb)
         d.clear();
 
-    size_t maxsz = std::max<size_t>(limbptr.size, 1);
+    // Null EVERY pointer table this partition owns. They live in bufferAUXptrs and are built
+    // by the constructor from the metas, so they exist (correctly sized) even when the storage
+    // never was — which is exactly why skipping the generate call is safe for the host staging
+    // paths. Uninitialized device memory would otherwise leave them holding garbage that reads
+    // as a valid pointer; nulled, any reader this design missed faults instead.
+    size_t maxsz = std::max<size_t>({(size_t)limbptr.size, (size_t)GATHERptr.size, (size_t)DECOMPALLptr.size, 1ul});
     for (auto& t : DIGITlimbptr)
-        maxsz = std::max<size_t>(maxsz, t.size);
+        maxsz = std::max<size_t>(maxsz, (size_t)t.size);
+    for (auto& t : DECOMPlimbptr)
+        maxsz = std::max<size_t>(maxsz, (size_t)t.size);
     const std::vector<void*> nulls(maxsz, nullptr);
-    if (limbptr.size > 0)
-        cudaMemcpyAsync(limbptr.data, nulls.data(), limbptr.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    for (auto& t : DIGITlimbptr)
+    auto null_table = [&](VectorGPU<void*>& t) {
         if (t.size > 0)
             cudaMemcpyAsync(t.data, nulls.data(), t.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    };
+    null_table(limbptr);
+    null_table(GATHERptr);
+    null_table(DECOMPALLptr);
+    for (auto& t : DIGITlimbptr)
+        null_table(t);
+    for (auto& t : DECOMPlimbptr)
+        null_table(t);
     CudaCheckErrorModNoSync;
     cudaStreamSynchronize(s.ptr());
 }

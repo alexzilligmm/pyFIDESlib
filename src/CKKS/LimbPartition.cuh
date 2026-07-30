@@ -215,7 +215,7 @@ class LimbPartition {
     // staging code that writes them into digits tables is unchanged; anything that would
     // actually READ them must throw first, which is what this flag is for.
     bool ksk_a_released = false;
-    void adoptKskASeed(const std::vector<uint32_t>& seed);
+    void adoptKskASeed(const std::vector<uint32_t>& seed, int q_band = -1);
     // Lever 1b-ii (load-time expansion): fill this KEY partition's `a` DECOMP/DIGIT limbs
     // on-GPU from the 256-bit seed instead of H2D-copying them (bit-identical by the
     // stage-2 gate; builds the same limbptr mapping loadDecompDigit would).

@@ -57,12 +57,6 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
 
     if (q_band >= 0 && cc->GPUid.size() > 1)
         q_band = -1;  // banding is single-GPU only
-    a.generateDecompAndDigit(true, q_band);
-    b.generateDecompAndDigit(true, q_band);
-    if (cc->GPUid.size() > 1) {
-        a.grow(cc->L, false, true);
-        b.grow(cc->L, false, true);
-    }
     // Lever 1b-ii (load-time expansion, default ON; FIDESLIB_KSK_EXPAND_LOAD=0 restores the
     // H2D copy): a seeded key's `a` component is regenerated on-GPU from its 256-bit seed —
     // bit-identical to rkk.r_key[0] (stage-2 gate 50433073: 95/95 keys verify), skipping
@@ -79,8 +73,21 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
     // the stage-B kernels' 16-coefficients-per-thread requirement; if it fails, the launch
     // gates fall back to streaming, so `a` must stay materialized.
     const bool release_a = seeded_a && kskRegenLevel() >= 2 && cc->N % (128 * 16) == 0;
+
+    // `a`'s rows are never allocated in the first place when released: the pointer TABLES the
+    // host staging paths read live in bufferAUXptrs and are built by the LimbPartition
+    // constructor from the metas, so they exist and are correctly sized without this call.
+    // (Skipping it, rather than allocating and freeing per key, is worth the ~85 MiB transient
+    // that the allocate-then-release form held during load.)
+    if (!release_a)
+        a.generateDecompAndDigit(true, q_band);
+    b.generateDecompAndDigit(true, q_band);
+    if (cc->GPUid.size() > 1) {
+        a.grow(cc->L, false, true);
+        b.grow(cc->L, false, true);
+    }
     if (release_a)
-        a.GPU.at(0).adoptKskASeed(rkk.a_seed);
+        a.GPU.at(0).adoptKskASeed(rkk.a_seed, q_band);
     else if (seeded_a)
         a.GPU.at(0).expandKskADigits(rkk.a_seed);
     else
