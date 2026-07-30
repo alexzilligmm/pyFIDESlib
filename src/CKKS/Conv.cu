@@ -17,6 +17,26 @@
 
 namespace FIDESlib::CKKS {
 
+/* Lever 9 (2026-07-30, ncu-found): the BConv staging buffer is uint64_t, but on an all-u32
+ * chain every slot holds a residue < 2^28 and every consumer reads it cast down to 32 bits.
+ * A stride-1 uint64_t SHARED access puts thread t at byte 8t, i.e. bank (2t)%32, so threads t
+ * and t+16 collide: an inherent 2-WAY BANK CONFLICT on every access. ncu measured exactly
+ * 50.0% shared-load conflicts on BOTH DecompAndModUpConv and ModDown2 — the signature.
+ * Aliasing the same allocation at 32-bit width for type==0 makes it stride-1 32-bit (32
+ * distinct banks, 0 conflicts) AND halves the shared footprint and bandwidth. The host sizes
+ * shared_bytes with sizeof(uint64_t), so the u32 view simply under-uses it — over-allocation
+ * is the safe direction (same convention as the LT dot's accumulator).
+ * NOTE this is NOT the NTT's problem: there the conflicts are intra-array STRIDE conflicts
+ * from the butterfly index, which no width change or padding fixes. */
+__device__ __forceinline__ void stBuff(const bool u32buf, uint64_t* b64, uint32_t* b32, const int pos,
+                                       const uint64_t v) {
+    if (u32buf)
+        b32[pos] = (uint32_t)v;
+    else
+        b64[pos] = v;
+}
+
+
 template <typename T>
 __global__ void conv1_(T* a, const T q_hat_inv, const int primeid) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -38,31 +58,34 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
     extern __shared__ char shared_mem[];
 
     uint64_t* buff = &((uint64_t*)shared_mem)[0];
+    uint32_t* buff32 = (uint32_t*)shared_mem;  // type==0 alias, half width
+    const bool u32buf = (C_.type == 0);       // grid-uniform
 
     for (int i = threadIdx.y; i < C_.K; i += blockDim.y) {
         int primeid = i + C_.L;
         if constexpr (USING_CONSTANTS_TABLE) {  // using constants table
             constexpr ALGO algo_ = algo == ALGO_SHOUP ? ALGO_BARRETT : algo;
             if (ISU64(primeid)) {
-                buff[tid + blockDim.x * i] =
-                    modmult<algo_>(((uint64_t*)(b[i]))[idx], TABLE64(C_.L, C_.L + i), C_.L + i);
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo_>(((uint64_t*)(b[i]))[idx], TABLE64(C_.L, C_.L + i), C_.L + i));
             } else {
-                buff[tid + blockDim.x * i] =
-                    modmult<algo_>(((uint32_t*)b[i])[idx], (uint32_t)TABLE32(C_.L, C_.L + i), C_.L + i);
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo_>(((uint32_t*)b[i])[idx], (uint32_t)TABLE32(C_.L, C_.L + i), C_.L + i));
             }
         } else {
             if constexpr (algo != 3) {
                 if (ISU64(primeid)) {
-                    buff[tid + blockDim.x * i] =
-                        modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid], primeid);
+                    stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid], primeid));
                 } else {
-                    buff[tid + blockDim.x * i] =
-                        modmult<algo>((uint64_t)((uint32_t*)b[i])[idx], G_->ModDown_pre_scale[primeid], primeid);
+                    stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo>((uint64_t)((uint32_t*)b[i])[idx], G_->ModDown_pre_scale[primeid], primeid));
                 }
             } else {
                 if (ISU64(primeid)) {
-                    buff[tid + blockDim.x * i] = modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid],
-                                                               primeid, G_->ModDown_pre_scale_shoup[primeid]);
+                    stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid],
+                                                               primeid, G_->ModDown_pre_scale_shoup[primeid]));
                 } else {
                     // U32 primes carry 2^32-scaled Shoup constants: the multiply must run in the
                     // 32-bit overload. Promoting to uint64_t pairs Shoup_mult_64 with a 2^32-scaled
@@ -70,9 +93,9 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                     // (~2^56). Still congruent mod p (looks in-range after the final modreduce), but
                     // base conversion needs the exact representative -> k*p excess -> the converted
                     // limbs go mutually CRT-inconsistent.
-                    buff[tid + blockDim.x * i] =
-                        modmult<algo>(((uint32_t*)b[i])[idx], (uint32_t)G_->ModDown_pre_scale[primeid], primeid,
-                                      (uint32_t)G_->ModDown_pre_scale_shoup[primeid]);
+                    stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
+                    modmult<algo>(((uint32_t*)b[i])[idx], (uint32_t)G_->ModDown_pre_scale[primeid], primeid,
+                                      (uint32_t)G_->ModDown_pre_scale_shoup[primeid]));
                 }
             }
             /*
@@ -134,7 +157,7 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                 uint64_t acc = 0;
                 for (int i = 0; i < C_.K; ++i) {
                     const int m = MODDOWN_MATRIX(i, primeid);
-                    acc += (uint64_t)(uint32_t)buff[i * blockDim.x + tid] * (uint64_t)G_->ModDown_matrix32[m];
+                    acc += (uint64_t)buff32[i * blockDim.x + tid] * (uint64_t)G_->ModDown_matrix32[m];
                 }
                 ((uint32_t*)a[j])[idx] = modreduce_lazy(acc, primeid);
 #else  // reference EAGER form — kept as the A/B arm and the bit-exactness reference
@@ -142,7 +165,7 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                 for (int i = 0; i < C_.K; ++i) {
                     const int m = MODDOWN_MATRIX(i, primeid);
                     res = modadd(res,
-                                 modmult<ALGO_SHOUP>((uint32_t)buff[i * blockDim.x + tid],
+                                 modmult<ALGO_SHOUP>(buff32[i * blockDim.x + tid],
                                                      G_->ModDown_matrix32[m], primeid,
                                                      G_->ModDown_matrix_shoup32[m]),
                                  primeid);
@@ -218,6 +241,8 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
     const int tid = threadIdx.x;
     extern __shared__ char shared_mem[];
     uint64_t* buff = ((uint64_t*)shared_mem);
+    uint32_t* buff32 = (uint32_t*)shared_mem;  // type==0 alias, half width
+    const bool u32buf = (C_.type == 0);       // grid-uniform
     /*
         if (threadIdx.y == 0 && idx == 0) {
             for (int j = d; j < d + 1; ++j) {
@@ -253,27 +278,28 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
         assert(a[i_] != nullptr);
         if constexpr (algo != 3) {
             if (ISU64(primeid)) {
-                buff[tid + blockDim.x * i_] =
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i_,
                     modmult<algo>(((uint64_t*)(a[pos]))[idx],
-                                  G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid);
+                                  G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid));
             } else {
-                buff[tid + blockDim.x * i_] =
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i_,
                     modmult<algo>((uint64_t)((uint32_t*)a[pos])[idx],
-                                  G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid);
+                                  G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid));
             }
         } else {
             if (ISU64(primeid)) {
-                buff[tid + blockDim.x * i_] = modmult<algo>(
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i_,
+                    modmult<algo>(
                     ((uint64_t*)(a[pos]))[idx], G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)],
-                    primeid, G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]);
+                    primeid, G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]));
             } else {
                 // See ModDown2: 2^32-scaled Shoup constants require the 32-bit multiply; the
                 // uint64_t promotion left buff unreduced (~2^56) and poisoned the digit base
                 // conversion with k*p multiples.
-                buff[tid + blockDim.x * i_] =
+                stBuff(u32buf, buff, buff32, tid + blockDim.x * i_,
                     modmult<algo>(((uint32_t*)a[pos])[idx],
                                   (uint32_t)G_->DecompAndModUp_pre_scale[MODUPIDX_SCALE(d, n_d_n - 1, primeid)], primeid,
-                                  (uint32_t)G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]);
+                                  (uint32_t)G_->DecompAndModUp_pre_scale_shoup[MODUPIDX_SCALE(d, n_d_n - 1, primeid)]));
             }
         }
         /*
@@ -344,7 +370,7 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                     for (int i_ = 0; i_ < n_d_n; ++i_) {
                         const int primeid = C_.primeid_digit_from[d][i_];
                         const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
-                        acc += (uint64_t)(uint32_t)buff[i_ * blockDim.x + tid] *
+                        acc += (uint64_t)buff32[i_ * blockDim.x + tid] *
                                (uint64_t)G_->DecompAndModUp_matrix32[m];
                     }
                     assert(b[j_] != nullptr);
@@ -355,7 +381,7 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                         const int primeid = C_.primeid_digit_from[d][i_];
                         const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
                         res32 = modadd(res32,
-                                       modmult<ALGO_SHOUP>((uint32_t)buff[i_ * blockDim.x + tid],
+                                       modmult<ALGO_SHOUP>(buff32[i_ * blockDim.x + tid],
                                                            G_->DecompAndModUp_matrix32[m], primeid_j,
                                                            G_->DecompAndModUp_matrix_shoup32[m]),
                                        primeid_j);
