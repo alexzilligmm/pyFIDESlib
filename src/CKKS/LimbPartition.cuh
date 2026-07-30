@@ -195,6 +195,13 @@ class LimbPartition {
     uint64_t* bufferKSKPACK = nullptr;
     size_t bufferKSKPACKbytes = 0;
     void packKeyLimbs(int bits);
+    // Lever 1b-ii (in-kernel regen): the 256-bit seed this KEY partition's `a` rows were
+    // expanded from (recorded by expandKskADigits). When set — and FIDESLIB_KSK_REGEN=1 —
+    // the dot kernels' REGEN arms regenerate kska(digit, p, slot) in registers from this
+    // seed (KskSeedExpand.cuh FROZEN SPEC v1, bit-identical to the expanded rows) instead
+    // of streaming the `a` half of the key from DRAM.
+    uint32_t ksk_seed[8] = {};
+    bool ksk_seed_set = false;
     // Lever 1b-ii (load-time expansion): fill this KEY partition's `a` DECOMP/DIGIT limbs
     // on-GPU from the 256-bit seed instead of H2D-copying them (bit-identical by the
     // stage-2 gate; builds the same limbptr mapping loadDecompDigit would).

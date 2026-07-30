@@ -421,10 +421,20 @@ __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const i
 // measured +2.4% (gate 50427306 / ncu 50428101): the extra bits/mask registers dropped the
 // packed arm 16 -> 12 blocks/SM (warps 93.8 -> 73%, DRAM 72 -> 52%). Compile-time width makes
 // the mask/shift immediates, and packed arms pin min-blocks 16 to hold the occupancy tier.
-template <int KSK_BITS>
+// Lever 1b-ii (in-kernel regen, 2026-07-30 — Blackwell re-rank): REGEN arms regenerate the
+// kska operand from the key's 256-bit seed (KskSeedExpand.cuh FROZEN SPEC v1) instead of
+// streaming it from DRAM — the `a` half of the KSK stream disappears from a class measured
+// near-DRAM-bound and fully exposed (63-84% of the memset roof, 1.00x self-overlap).
+// Shape: one 16-word ChaCha12 block serves 16 consecutive slots, so threads 0..num_d*8-1
+// each compute ONE block into dynamic smem (num_d*128 words; the block's 128 coeffs need 8
+// blocks per digit), one sync, then every thread consumes its word. The rare rejection
+// (< 2^-4/coeff at 28-bit p) escalates per-thread with full blocks — the exact expand_coeff
+// attempt sequence, so regen values are bit-identical to the expanded rows by construction.
+// u32 (type==0) chains only; host gates on ksk_seed_set + FIDESLIB_KSK_REGEN.
+template <int KSK_BITS, bool REGEN>
 __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 12)
     fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
-                   int num_special, int init) {
+                   int num_special, int init, KskSeedWords aseed, uint32_t n16) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
     const int blky = blockIdx.y + init;
@@ -440,6 +450,20 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 
     int pos_dec = blky - num_special;
 
+    extern __shared__ uint32_t ks_smem[];  // REGEN only: num_d*128 keystream words
+    if constexpr (REGEN) {
+        const uint32_t pval = (uint32_t)C_.primes[primeid];
+        if (threadIdx.x < num_d * 8) {
+            const int di = threadIdx.x >> 3, sub = threadIdx.x & 7;
+            uint32_t o[16];
+            kskexpand::chacha_block(aseed.k, (uint32_t)(blockIdx.x * 8 + sub), (uint32_t)di, pval, o);
+#pragma unroll
+            for (int w = 0; w < 16; ++w)
+                ks_smem[di * 128 + sub * 16 + w] = o[w];
+        }
+        __syncthreads();
+    }
+
     if (C_.type == 0) {
         // n32 (Lever 1 fix 2): all-U32 chain fast path — the generic arm below promotes every
         // operand to uint64_t and runs 64-bit Barrett per term on 27-bit primes. 32-bit Barrett
@@ -447,19 +471,39 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
         // reduce-then-add order) in ~1/3 the instructions AND fewer registers — registers are
         // the measured occupancy limiter of this kernel (ncu 50417213). Grid-uniform branch.
         uint32_t a1, a2;
+        [[maybe_unused]] uint32_t pval, m_p;
+        if constexpr (REGEN) {
+            pval = (uint32_t)C_.primes[primeid];
+            m_p = (0xFFFFFFFFu / pval) * pval;  // exact-uniform rejection threshold (spec v1)
+        }
         for (int i = 0; i < num_d; ++i) {
             const bool decomp = (i == primeid_digit);
             const int pos = C_.pos_in_digit[i][primeid];
             const int p = decomp ? pos_dec : pos;
             const uint32_t in = ((uint32_t*)digits[i + decomp * 3 * C_.dnum][p])[idx];
             uint32_t kska, kskb;
-            if constexpr (KSK_BITS) {
+            if constexpr (REGEN) {
+                uint32_t v = ks_smem[i * 128 + threadIdx.x];
+                if (v >= m_p) {  // rare escalation: expand_coeff's attempts t=1..15, verbatim
+                    uint32_t o[16];
+                    for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                        kskexpand::chacha_block(aseed.k, (uint32_t)(idx >> 4) + t * n16, (uint32_t)i, pval, o);
+                        v = o[idx & 15];
+                        if (v < m_p)
+                            break;
+                    }
+                }
+                kska = v % pval;
+            } else if constexpr (KSK_BITS) {
                 kska = kskUnpack(digits[C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
-                                 (1u << KSK_BITS) - 1u);
-                kskb = kskUnpack(digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
                                  (1u << KSK_BITS) - 1u);
             } else {
                 kska = ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+            }
+            if constexpr (KSK_BITS) {
+                kskb = kskUnpack(digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                                 (1u << KSK_BITS) - 1u);
+            } else {
                 kskb = ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
             }
             const uint32_t m1 = modmult<ALGO_BARRETT>(in, kska, primeid);
@@ -570,19 +614,36 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 // widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits) {
+                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16) {
+    KskSeedWords sw{};
+    if (a_seed)
+        for (int i = 0; i < 8; ++i)
+            sw.k[i] = a_seed[i];
+    const size_t smem = a_seed ? (size_t)num_d * 128 * sizeof(uint32_t) : 0;  // REGEN keystream tile
     switch (ksk_pack_bits) {
         case 0:
-            fusedDotKSK_2_<0><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
-                                                          init);
+            if (a_seed)
+                fusedDotKSK_2_<0, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                       num_special, init, sw, n16);
+            else
+                fusedDotKSK_2_<0, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                     num_special, init, sw, n16);
             break;
         case 27:
-            fusedDotKSK_2_<27><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
-                                                           init);
+            if (a_seed)
+                fusedDotKSK_2_<27, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                        num_special, init, sw, n16);
+            else
+                fusedDotKSK_2_<27, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                      num_special, init, sw, n16);
             break;
         case 28:
-            fusedDotKSK_2_<28><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
-                                                           init);
+            if (a_seed)
+                fusedDotKSK_2_<28, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                        num_special, init, sw, n16);
+            else
+                fusedDotKSK_2_<28, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
+                                                                      num_special, init, sw, n16);
             break;
         default:
             throw std::runtime_error("launchFusedDotKSK_2: unsupported ksk_pack_bits " +

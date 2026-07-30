@@ -13,6 +13,24 @@
 
 namespace FIDESlib::CKKS {
 
+/* Lever 1b-ii (in-kernel regen): returns the key's 8-word seed iff the REGEN dot-kernel arm
+ * may run — FIDESLIB_KSK_REGEN=1, the key partition recorded its expansion seed, single GPU,
+ * all-u32 chain (the regen arm exists only in the type==0 fast path). nullptr = stream `a`. */
+static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a) {
+    static const bool enabled = [] {
+        const char* e = getenv("FIDESLIB_KSK_REGEN");
+        return e != nullptr && atoi(e) != 0;
+    }();
+    if (!enabled || !ksk_a.ksk_seed_set || ksk_a.cc.GPUid.size() != 1 || ksk_a.cc.precom.constants[0].type != 0)
+        return nullptr;
+    static const bool once = [] {  // run marker: proof the REGEN arm engaged (not just the env)
+        std::cerr << "[ksk_regen] active: fusedDotKSK regenerating kska from seed\n";
+        return true;
+    }();
+    (void)once;
+    return ksk_a.ksk_seed;
+}
+
 static bool envMemcopyPeer(bool def = false) {
     bool out = def;
 
@@ -446,7 +464,8 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
             assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
             launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, s.ptr(),
                                 out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
-                                out2.SPECIALlimbptr.data, digits.data, i, id, num_special, 0, ksk_a.key_pack_bits);
+                                out2.SPECIALlimbptr.data, digits.data, i, id, num_special, 0, ksk_a.key_pack_bits,
+                                kskRegenSeed(ksk_a), (uint32_t)cc.N >> 4);
         }
     }
     cudaFreeAsync(digits.data, s.ptr());
@@ -1405,7 +1424,8 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
                 launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, s.ptr(), out1.limbptr.data,
                                     out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
-                                    num_d, id, num_special, 0, ksk_a.key_pack_bits);
+                                    num_d, id, num_special, 0, ksk_a.key_pack_bits, kskRegenSeed(ksk_a),
+                                    (uint32_t)cc.N >> 4);
             }
         }
 
@@ -1756,7 +1776,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, stream.ptr(),
                                         out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
                                         out2.SPECIALlimbptr.data, digits, i, id, num_special, num_special + start,
-                                        ksk_a.key_pack_bits);
+                                        ksk_a.key_pack_bits, kskRegenSeed(ksk_a), (uint32_t)cc.N >> 4);
                 }
             }
         }

@@ -441,6 +441,10 @@ void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
     KskSeedWords sw;
     for (int i = 0; i < 8; ++i)
         sw.k[i] = seed[i];
+    // Record for the 1b-ii in-kernel regen arms (dot kernels re-derive `a` from this).
+    for (int i = 0; i < 8; ++i)
+        ksk_seed[i] = seed[i];
+    ksk_seed_set = true;
     const uint32_t n16 = (uint32_t)cc.N >> 4;
     const uint32_t grid = (uint32_t)((cc.N + 127) / 128);
 

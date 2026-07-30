@@ -71,9 +71,12 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
  * that only sees its declaration gets a weak local stub with no device code in that TU's
  * fatbin => 'invalid device function' — learned the hard way, job 50426241). ksk_pack_bits==0
  * selects the dense instantiation; unsupported widths throw. */
+/* a_seed: 8 seed words => the REGEN arm regenerates kska in-kernel (1b-ii; u32 chains only,
+ * caller gates on ksk_seed_set + FIDESLIB_KSK_REGEN); nullptr = stream `a` as before.
+ * n16 = N>>4 (the spec's escalation stride; ignored when a_seed is null). */
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits);
+                         int ksk_pack_bits, const uint32_t* a_seed = nullptr, uint32_t n16 = 0);
 void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
