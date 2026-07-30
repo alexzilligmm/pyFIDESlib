@@ -17,6 +17,12 @@ namespace FIDESlib::CKKS {
 
 extern bool MEMCPY_PEER;
 extern bool GRAPH_CAPTURE;
+/* Lever 1b-ii: FIDESLIB_KSK_REGEN as a LEVEL (0 off / 1 hoisted / 2 both `a`-readers, the
+ * shipping config / 3 hoisted + the wall-negative stage-A smem arm, diagnostic only). ONE
+ * definition, because the key-loading path and the launch gates must agree exactly: at >=2
+ * nothing reads the `a` rows, which is what makes releasing them (adoptKskASeed) legal. */
+int kskRegenLevel();
+
 class LimbPartition {
    public:
     ContextData& cc;
@@ -202,6 +208,14 @@ class LimbPartition {
     // of streaming the `a` half of the key from DRAM.
     uint32_t ksk_seed[8] = {};
     bool ksk_seed_set = false;
+    // Lever 1b-ii memory endgame: at FIDESLIB_KSK_REGEN>=2 EVERY reader of this chain's `a`
+    // rows regenerates them, so the rows are never materialized — adoptKskASeed() records the
+    // seed and releases the storage instead (worth ~8.5 GB: half of the measured 17.0 GB of
+    // packed rotation keys). The device pointer tables survive, holding nullptr, so the host
+    // staging code that writes them into digits tables is unchanged; anything that would
+    // actually READ them must throw first, which is what this flag is for.
+    bool ksk_a_released = false;
+    void adoptKskASeed(const std::vector<uint32_t>& seed);
     // Lever 1b-ii (load-time expansion): fill this KEY partition's `a` DECOMP/DIGIT limbs
     // on-GPU from the 256-bit seed instead of H2D-copying them (bit-identical by the
     // stage-2 gate; builds the same limbptr mapping loadDecompDigit would).

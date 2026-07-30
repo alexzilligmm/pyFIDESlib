@@ -2,6 +2,7 @@
 // Created by carlosad on 8/06/25.
 //
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include "CKKS/Context.cuh"
@@ -22,14 +23,6 @@ namespace FIDESlib::CKKS {
  *      ab_FIDESLIB_KSK_REGEN_20260730_120442) — kept only as the reference shape that first
  *      proved bit-exactness; diagnostic, never a shipping config.
  * The levels are nested so that an A/B of any level measures exactly one added arm. */
-static int kskRegenLevel() {
-    static const int level = [] {
-        const char* e = getenv("FIDESLIB_KSK_REGEN");
-        return e != nullptr ? atoi(e) : 0;
-    }();
-    return level;
-}
-
 /* Common gate: the regen arms exist only in the u32 fast path, need the key's recorded
  * expansion seed, and are single-GPU (the seed is a per-partition record). */
 static bool kskRegenEligible(const LimbPartition& ksk_a) {
@@ -41,8 +34,15 @@ static bool kskRegenEligible(const LimbPartition& ksk_a) {
 static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a, int block_x, int* shape) {
     *shape = 0;
     const int level = kskRegenLevel();
-    if (level < 2 || !kskRegenEligible(ksk_a))
+    if (level < 2 || !kskRegenEligible(ksk_a)) {
+        // A released `a` has no rows to stream. Reaching a streaming arm here would read the
+        // nulled pointer tables, so fail loudly instead: the key was loaded under a regen
+        // level that no longer matches the launch gates.
+        if (ksk_a.ksk_a_released)
+            throw std::runtime_error("fusedDotKSK: `a` was released (FIDESLIB_KSK_REGEN>=2 at key load) "
+                                     "but the regen arm is not armed for this launch");
         return nullptr;
+    }
     if (level >= 3) {
         *shape = 2;
     } else {
@@ -64,13 +64,21 @@ static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a, int block_x, int
  * kernel has one arm for the whole launch. N must also split into whole 16-coefficient
  * threads at this block size, which logN>=11 always does. */
 static bool kskRegenHoist(const std::vector<LimbPartition*>& ksk_a, int block_x) {
+    const bool released = std::any_of(ksk_a.begin(), ksk_a.end(),
+                                      [](const LimbPartition* k) { return k && k->ksk_a_released; });
+    auto guard = [released](bool armed) {  // same rule as kskRegenSeed: never stream a released `a`
+        if (!armed && released)
+            throw std::runtime_error("hoistedRotateDotKSK: `a` was released (FIDESLIB_KSK_REGEN>=2 at key "
+                                     "load) but the regen arm is not armed for this launch");
+        return armed;
+    };
     if (kskRegenLevel() < 1 || ksk_a.empty())
-        return false;
+        return guard(false);
     for (const auto* k : ksk_a)
         if (k == nullptr || !kskRegenEligible(*k))
-            return false;
+            return guard(false);
     if (ksk_a[0]->cc.N % (block_x * 16) != 0)
-        return false;
+        return guard(false);
     static const bool once = [] {
         std::cerr << "[ksk_regen] active: hoistedRotateDotKSK regenerating kska from seed (stage B)\n";
         return true;
@@ -672,7 +680,7 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
             for (size_t d = 1; d < src.DIGITlimb.size(); ++d)
                 if (src.DIGITlimb[d].size() > (size_t)num_special)
                     dump1("digit_q0_d" + std::to_string(d), src.DIGITlimb[d][num_special]);
-            if (ksk_a[0]->key_pack_bits == 0) {  // packed keys freed their dense limbs — skip
+            if (ksk_a[0]->key_pack_bits == 0 && !ksk_a[0]->ksk_a_released) {  // packed/released keys freed their dense limbs — skip
                 for (size_t d = 1; d < ksk_a[0]->DIGITlimb.size(); ++d)
                     if (ksk_a[0]->DIGITlimb[d].size() > (size_t)num_special) {
                         dump1("kska_q0_d" + std::to_string(d), ksk_a[0]->DIGITlimb[d][num_special]);

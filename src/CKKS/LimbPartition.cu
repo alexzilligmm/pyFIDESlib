@@ -434,6 +434,52 @@ void LimbPartition::packKeyLimbs(const int bits) {
  * stored (stage-2 gate: 95/95 keys verify), so this REPLACES loadDecompDigit for `a`
  * and skips its ~half of the key H2D upload. Mirrors loadDecompDigit's single-GPU
  * structure exactly: per-limb fill on the limb stream + the limbptr decomp mapping. */
+int kskRegenLevel() {
+    static const int level = [] {
+        const char* e = getenv("FIDESLIB_KSK_REGEN");
+        return e != nullptr ? atoi(e) : 0;
+    }();
+    return level;
+}
+
+/* Lever 1b-ii memory endgame: record the seed and RELEASE this KEY partition's `a` rows
+ * instead of expanding them. Legal only when every consumer regenerates (FIDESLIB_KSK_REGEN
+ * >= 2 — see kskRegenLevel()); KeySwitchingKey::Initialize is the only caller and owns that
+ * check. generateDecompAndDigit has already built the device pointer TABLES by the time we
+ * get here — those stay (they are a few hundred pointers) and are nulled, so every host
+ * staging path keeps working untouched while any missed reader gets a null deref rather than
+ * stale key material. The dense storage returns to the pool exactly the way packKeyLimbs
+ * releases it after packing. */
+void LimbPartition::adoptKskASeed(const std::vector<uint32_t>& seed) {
+    cudaSetDevice(device);
+    assert(cc.GPUid.size() == 1);
+    assert(seed.size() == 8);
+    for (int i = 0; i < 8; ++i)
+        ksk_seed[i] = seed[i];
+    ksk_seed_set = true;
+    ksk_a_released = true;
+
+    // Same ordering rule packKeyLimbs documents: nothing may still be reading these blocks
+    // when they return to the pool, or a later allocation recycles them under a live kernel.
+    cudaDeviceSynchronize();
+    for (auto& d : DECOMPlimb)
+        d.clear();
+    for (auto& d : DIGITlimb)
+        d.clear();
+
+    size_t maxsz = std::max<size_t>(limbptr.size, 1);
+    for (auto& t : DIGITlimbptr)
+        maxsz = std::max<size_t>(maxsz, t.size);
+    const std::vector<void*> nulls(maxsz, nullptr);
+    if (limbptr.size > 0)
+        cudaMemcpyAsync(limbptr.data, nulls.data(), limbptr.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    for (auto& t : DIGITlimbptr)
+        if (t.size > 0)
+            cudaMemcpyAsync(t.data, nulls.data(), t.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    CudaCheckErrorModNoSync;
+    cudaStreamSynchronize(s.ptr());
+}
+
 void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
     cudaSetDevice(device);
     assert(cc.GPUid.size() == 1);

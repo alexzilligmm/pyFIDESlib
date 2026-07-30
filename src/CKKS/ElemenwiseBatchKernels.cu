@@ -612,6 +612,12 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #ifndef FIDESLIB_DOT_REGEN_MINCTA
 #define FIDESLIB_DOT_REGEN_MINCTA 3
 #endif
+// Swept independently of the hoisted arm: the two regen kernels have different live sets
+// (this one has no rotation loop), and the tier was worth 5.4 ms on the hoisted kernel, so
+// inheriting its pin is an assumption, not a default.
+#ifndef FIDESLIB_FUSED_REGEN_MINCTA
+#define FIDESLIB_FUSED_REGEN_MINCTA 4
+#endif
 
 /* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
  * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
@@ -639,7 +645,7 @@ __device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t 
 // port carries none of the L2 re-read the hoisted one accepted, and its stores stay coalesced
 // (no automorphism permutes them) — hence the uint4 store path.
 template <int KSK_BITS>
-__global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
+__global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
     fusedDotKSKRegen_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
                       int num_special, int init, KskSeedWords aseed, const uint32_t n16) {
     constexpr int SLOTS = 16;

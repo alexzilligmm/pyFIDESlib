@@ -71,14 +71,29 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
         const char* e = std::getenv("FIDESLIB_KSK_EXPAND_LOAD");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    if (expand_on_load && !rkk.a_seed.empty() && cc->GPUid.size() == 1 && cc->precom.constants[0].type == 0)
+    const bool seeded_a =
+        expand_on_load && !rkk.a_seed.empty() && cc->GPUid.size() == 1 && cc->precom.constants[0].type == 0;
+    // Lever 1b-ii memory endgame: at level >= 2 BOTH `a`-readers (hoistedRotateDotKSK and
+    // fusedDotKSK) regenerate from the seed, so `a` is never read and never needs to exist.
+    // Release it instead of expanding it — half of every key's storage. The N condition is
+    // the stage-B kernels' 16-coefficients-per-thread requirement; if it fails, the launch
+    // gates fall back to streaming, so `a` must stay materialized.
+    const bool release_a = seeded_a && kskRegenLevel() >= 2 && cc->N % (128 * 16) == 0;
+    if (release_a)
+        a.GPU.at(0).adoptKskASeed(rkk.a_seed);
+    else if (seeded_a)
         a.GPU.at(0).expandKskADigits(rkk.a_seed);
     else
         a.loadDecompDigit(rkk.r_key[0], rkk.r_key_moduli[0]);
     b.loadDecompDigit(rkk.r_key[1], rkk.r_key_moduli[1]);
 
     if (const int W = kskPackBitsPolicy(cc)) {
-        a.GPU.at(0).packKeyLimbs(W);
+        if (release_a)
+            // `a` has no rows to pack. The width still has to match `b`: it is the compile-time
+            // KSK_BITS the dot kernels select on, and that arm now governs only the kskb unpack.
+            a.GPU.at(0).key_pack_bits = W;
+        else
+            a.GPU.at(0).packKeyLimbs(W);
         b.GPU.at(0).packKeyLimbs(W);
     }
 
