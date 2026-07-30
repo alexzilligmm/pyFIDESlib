@@ -834,30 +834,184 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Lever 1b-ii STAGE B (2026-07-30): barrier-free in-kernel regen of the KSK `a` half for the
+// HOISTED rotation dot kernel — the class nsys measured at 45% of the bootstrap wall, 1.00x
+// self-overlap (fully exposed) and 1.12-1.5 TB/s achieved (63-84% of the memset roof), i.e.
+// stream-bound with no conventional kernel headroom left. Deleting the `a` stream halves it.
+//
+// WHY THIS SHAPE. Stage A (fusedDotKSK, committed default-OFF) proved the mechanism bit-exact
+// on the first shot but lost 0.9 ms: its per-block smem keystream tile put ~600 cycles of
+// serial ChaCha behind a __syncthreads with 3 of 4 warps idle, inside a kernel whose whole
+// per-thread body is ~600-1000 cycles. The fix is not a better tile — it is to delete the
+// barrier: give each thread the 16 consecutive coefficients that ONE ChaCha block serves
+// (spec v1: block b0 = slot>>4, word w = slot&15) so the generation amortizes 1:16 in
+// registers and overlaps the loads through ILP instead of blocking on them.
+//
+// COSTS THIS SHAPE PAYS (measure, do not model — but these are the two that decide it):
+//  1. Warp-level rejection escalation. Per coefficient the spec rejects with p/2^32 < 2^-4,
+//     so a 512-slot warp almost always needs attempt t=1 and needs t=2 ~86% of the time:
+//     ~3 ChaCha blocks per (rotation, digit), i.e. ~112 ALU ops per coefficient, not 37.5.
+//  2. The per-thread smem digit cache CANNOT come along: 16 coefficients/thread means
+//     2048 coefficients/block, and num_d rows of them is 48 KB/block = 2 blocks/SM. So the
+//     REGEN arm re-reads din1 once per (rotation, digit) instead of once per block. That
+//     traffic is L2-resident by construction (din1 is num_d x 256 KB against a 128 MB L2)
+//     and DRAM traffic still halves; if the A/B says otherwise, this is the tuning axis.
+// Registers are the other cliff (this campaign's recurring one): 16 accumulator PAIRS are
+// live across the digit loop by construction, so budget ~80 and check STACK/LOCAL = 0 with
+// cuobjdump --dump-resource-usage before running anything.
+#ifndef FIDESLIB_DOT_REGEN_MINCTA
+#define FIDESLIB_DOT_REGEN_MINCTA 3
+#endif
+
+/* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
+ * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
+ * per (rotation, digit) would rival the ChaCha block itself. m = floor(2^32/p) gives
+ * q_hat in {floor(v/p)-1, floor(v/p)} => one conditional subtract. Bit-identical remainder. */
+__device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t p, const uint32_t m) {
+    const uint32_t r = v - __umulhi(v, m) * p;
+    return r >= p ? r - p : r;
+}
+
+template <int KSK_BITS>
+__global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
+    hoistedRotateDotKSKRegen_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
+                              const int n, const int* indexes, void*** digits, int num_d, int id, int num_special,
+                              int init, void** sc0, bool c0_modup, const uint32_t* __restrict__ seeds,
+                              const uint32_t n16) {
+    constexpr int SLOTS = 16;  // == the ChaCha block width: one block serves exactly one thread
+    const uint32_t b0 = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);  // == slot>>4 for this thread
+    const int base = (int)(b0 << 4);                                        // its first coefficient
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint32_t pval = (uint32_t)C_.primes[primeid];
+    const uint32_t recip = 0xFFFFFFFFu / pval;  // == floor(2^32/p) for odd p
+    const uint32_t m_p = recip * pval;          // exact-uniform rejection threshold (spec v1)
+
+    // c0 is folded into aux2's INITIAL value rather than into the i==0 iteration: modadd(0,x)
+    // == x and modadd(in2, add2) is then produced by the very first accumulate, so the residue
+    // sequence is identical to the streaming kernel's while the digit loop stays branch-free.
+    const uint32_t* c0p = nullptr;
+    if (c0_modup || primeid < C_.L)
+        c0p = primeid < C_.L ? (const uint32_t*)c0[pos_dec] : (const uint32_t*)sc0[primeid - C_.L];
+    const bool c0_shoup = (!c0_modup && primeid < C_.L);
+
+    for (int j = 0; j < n; ++j) {
+        const int offset = j * 3 * 2 * C_.dnum;
+        const uint32_t* key = seeds + j * 8;
+
+        uint32_t aux1[SLOTS], aux2[SLOTS];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            aux1[w] = 0;
+            uint32_t in2 = c0p ? c0p[base + w] : 0u;
+            if (c0p && c0_shoup)
+                in2 = modmult<ALGO_SHOUP>(in2, (uint32_t)C_.P[primeid], primeid, (uint32_t)C_.P_shoup[primeid]);
+            aux2[w] = in2;
+        }
+
+        for (int i = 0; i < num_d; ++i) {
+            const bool decomp = (i == primeid_digit);
+            const int pos = C_.pos_in_digit[i][primeid];
+            const int p = decomp ? pos_dec : pos;
+            const uint32_t* dinp = (const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base;
+            const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+
+            // --- the `a` half, regenerated: one block, then the spec's escalation for the
+            // few words the rejection sampler refused. Attempt t reads word w of block
+            // b0 + t*n16 — expand_coeff's sequence verbatim, so the values are the expanded
+            // rows bit for bit (the whole point: bitcmp stays a real gate).
+            uint32_t ks[16];
+            kskexpand::chacha_block(key, b0, (uint32_t)i, pval, ks);
+            uint32_t need = 0;
+#pragma unroll
+            for (int w = 0; w < 16; ++w)
+                need |= (ks[w] >= m_p) ? (1u << w) : 0u;
+            if (need) {
+                for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                    uint32_t es[16];
+                    kskexpand::chacha_block(key, b0 + t * n16, (uint32_t)i, pval, es);
+#pragma unroll
+                    for (int w = 0; w < 16; ++w)
+                        if (need & (1u << w)) {
+                            ks[w] = es[w];  // spec fallback: a never-accepted word keeps the LAST attempt
+                            if (es[w] < m_p)
+                                need &= ~(1u << w);
+                        }
+                    if (!need)
+                        break;
+                }
+            }
+
+            // --- the dot itself. din1 is read as uint4 (the thread's 16 coefficients are
+            // 64 B aligned by construction) so a warp still covers one contiguous 2 KB span.
+#pragma unroll
+            for (int q = 0; q < SLOTS / 4; ++q) {
+                const uint4 dv = *(const uint4*)(dinp + 4 * q);
+                const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w};
+#pragma unroll
+                for (int r = 0; r < 4; ++r) {
+                    const int w = 4 * q + r;  // both loops unroll => compile-time index
+                    const uint32_t kska = modByRecip(ks[w], pval, recip);
+                    uint32_t kskb;
+                    if constexpr (KSK_BITS)
+                        kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+                    else
+                        kskb = ((const uint32_t*)kskbp)[base + w];
+                    aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[r], kska, primeid), primeid);
+                    aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(d4[r], kskb, primeid), primeid);
+                }
+            }
+        }
+
+        const int rot_index = indexes[j];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+            if (primeid < C_.L) {
+                ((uint32_t*)out1[j][pos_dec])[out_idx] = aux1[w];
+                ((uint32_t*)out2[j][pos_dec])[out_idx] = aux2[w];
+            } else {
+                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = aux1[w];
+                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = aux2[w];
+            }
+        }
+    }
+}
+
 void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
-                                 bool c0_modup, int ksk_pack_bits) {
+                                 bool c0_modup, int ksk_pack_bits, const uint32_t* seeds, uint32_t n16) {
+#define FIDESLIB_HOISTED_DOT_ARM(BITS)                                                                             \
+    if (seeds)                                                                                                     \
+        hoistedRotateDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes, \
+                                                                    digits, num_d, id, num_special, init, sc0,      \
+                                                                    c0_modup, seeds, n16);                         \
+    else                                                                                                           \
+        hoistedRotateDotKSK_2_<BITS><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes, \
+                                                                     digits, num_d, id, num_special, init, sc0,     \
+                                                                     c0_modup);
     switch (ksk_pack_bits) {
         case 0:
-            hoistedRotateDotKSK_2_<0><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
-                                                                      digits, num_d, id, num_special, init, sc0,
-                                                                      c0_modup);
+            FIDESLIB_HOISTED_DOT_ARM(0)
             break;
         case 27:
-            hoistedRotateDotKSK_2_<27><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
-                                                                       digits, num_d, id, num_special, init, sc0,
-                                                                       c0_modup);
+            FIDESLIB_HOISTED_DOT_ARM(27)
             break;
         case 28:
-            hoistedRotateDotKSK_2_<28><<<grid, block, shmem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
-                                                                       digits, num_d, id, num_special, init, sc0,
-                                                                       c0_modup);
+            FIDESLIB_HOISTED_DOT_ARM(28)
             break;
         default:
             throw std::runtime_error("launchHoistedRotateDotKSK_2: unsupported ksk_pack_bits " +
                                      std::to_string(ksk_pack_bits));
     }
+#undef FIDESLIB_HOISTED_DOT_ARM
 }
 
 __global__ void hoistedRotateDotKSKBatched___(void*** c1, void*** din1, void*** c0, void*** sc0, void*** out1,

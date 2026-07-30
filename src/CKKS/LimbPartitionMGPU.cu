@@ -13,22 +13,56 @@
 
 namespace FIDESlib::CKKS {
 
-/* Lever 1b-ii (in-kernel regen): returns the key's 8-word seed iff the REGEN dot-kernel arm
- * may run — FIDESLIB_KSK_REGEN=1, the key partition recorded its expansion seed, single GPU,
- * all-u32 chain (the regen arm exists only in the type==0 fast path). nullptr = stream `a`. */
-static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a) {
-    static const bool enabled = [] {
+/* Lever 1b-ii (in-kernel regen) — FIDESLIB_KSK_REGEN is a LEVEL, not a boolean:
+ *   0 (default) off;  >=1 the stage-B HOISTED arm (barrier-free, 16 coefficients/thread);
+ *   >=2 additionally the stage-A fusedDotKSK arm (smem keystream tile behind one barrier).
+ * Stage A is measured wall-NEGATIVE (+0.9 ms, ab_FIDESLIB_KSK_REGEN_20260730_120442) and is
+ * kept only as the proven-bit-exact reference shape, so it must not ride along with a plain
+ * FIDESLIB_KSK_REGEN=1 A/B of stage B. */
+static int kskRegenLevel() {
+    static const int level = [] {
         const char* e = getenv("FIDESLIB_KSK_REGEN");
-        return e != nullptr && atoi(e) != 0;
+        return e != nullptr ? atoi(e) : 0;
     }();
-    if (!enabled || !ksk_a.ksk_seed_set || ksk_a.cc.GPUid.size() != 1 || ksk_a.cc.precom.constants[0].type != 0)
+    return level;
+}
+
+/* Common gate: the regen arms exist only in the u32 fast path, need the key's recorded
+ * expansion seed, and are single-GPU (the seed is a per-partition record). */
+static bool kskRegenEligible(const LimbPartition& ksk_a) {
+    return ksk_a.ksk_seed_set && ksk_a.cc.GPUid.size() == 1 && ksk_a.cc.precom.constants[0].type == 0;
+}
+
+/* Stage A (fusedDotKSK): returns the key's 8-word seed, or nullptr to stream `a` as before. */
+static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a) {
+    if (kskRegenLevel() < 2 || !kskRegenEligible(ksk_a))
         return nullptr;
     static const bool once = [] {  // run marker: proof the REGEN arm engaged (not just the env)
-        std::cerr << "[ksk_regen] active: fusedDotKSK regenerating kska from seed\n";
+        std::cerr << "[ksk_regen] active: fusedDotKSK regenerating kska from seed (stage A)\n";
         return true;
     }();
     (void)once;
     return ksk_a.ksk_seed;
+}
+
+/* Stage B (hoistedRotateDotKSK): ALL n rotation keys of this hoisted group must carry a seed
+ * — a mixed group (some key predating the OpenFHE seed patch) falls back wholesale, since the
+ * kernel has one arm for the whole launch. N must also split into whole 16-coefficient
+ * threads at this block size, which logN>=11 always does. */
+static bool kskRegenHoist(const std::vector<LimbPartition*>& ksk_a, int block_x) {
+    if (kskRegenLevel() < 1 || ksk_a.empty())
+        return false;
+    for (const auto* k : ksk_a)
+        if (k == nullptr || !kskRegenEligible(*k))
+            return false;
+    if (ksk_a[0]->cc.N % (block_x * 16) != 0)
+        return false;
+    static const bool once = [] {
+        std::cerr << "[ksk_regen] active: hoistedRotateDotKSK regenerating kska from seed (stage B)\n";
+        return true;
+    }();
+    (void)once;
+    return true;
 }
 
 static bool envMemcopyPeer(bool def = false) {
@@ -486,11 +520,15 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
         void*** data{nullptr};
         int size;
     };
-    vector_gpu digits{.size = n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n};
+    // Lever 1b-ii stage B: the regen arm needs the n per-key 256-bit seeds on device. They ride
+    // the existing h_digits staging memcpy as a 4-pointer-per-key tail (8 u32 = 4 void**), the
+    // same trick offset_indexes already uses for its ints — no extra allocation, no extra copy.
+    const int seed_slots = 4 * n;
+    vector_gpu digits{.size = n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n + seed_slots};
     cudaMallocAsync(&digits.data, digits.size * sizeof(void**), s.ptr());
 
     //VectorGPU<void**> digits(s, n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n, device);
-    std::vector<void**> h_digits(n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n, nullptr);
+    std::vector<void**> h_digits(digits.size, nullptr);
 
     int offset_c1 = n * cc.dnum * 6;
     int offset_output_c0 = n * cc.dnum * 6 + cc.dnum * 6;
@@ -498,6 +536,7 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
     int offset_output_c0s = n * cc.dnum * 6 + cc.dnum * 6 + n * 2;
     int offset_output_c1s = n * cc.dnum * 6 + cc.dnum * 6 + n * 3;
     int offset_indexes = n * cc.dnum * 6 + cc.dnum * 6 + n * 4;
+    int offset_seeds = offset_indexes + n;
 
     LimbPartition& src = *this;
     s.wait(src_c0.getS());
@@ -577,15 +616,25 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
         while (num_limbs < (int)meta.size() && meta.at(num_limbs).id <= *level)
             num_limbs++;
 
+        constexpr uint32_t BLOCK_X = 128;
+        const bool regen = kskRegenHoist(ksk_a, (int)BLOCK_X);
+        if (regen)
+            for (int k = 0; k < n; ++k)
+                for (int t = 0; t < 8; ++t)
+                    ((uint32_t*)&h_digits[offset_seeds])[k * 8 + t] = ksk_a[k]->ksk_seed[t];
+
         cudaMemcpyAsync(digits.data, h_digits.data(), h_digits.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
 
         const int kpb = ksk_a.empty() ? 0 : ksk_a[0]->key_pack_bits;
+        // REGEN: 16 coefficients per thread => grid.x shrinks by 16 and the digit smem cache
+        // is gone (see the kernel header for why it cannot come along).
         launchHoistedRotateDotKSK_2(
-            dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, sizeof(uint64_t) * 128 * i, s.ptr(),
-            digits.data + offset_c1, src_c0.limbptr.data, digits.data + offset_output_c1,
-            digits.data + offset_output_c1s, digits.data + offset_output_c0, digits.data + offset_output_c0s, n,
-            (int*)(digits.data + offset_indexes), digits.data, i, id, num_special, 0, src_c0.SPECIALlimbptr.data,
-            c0_modup, kpb);
+            dim3{(uint32_t)cc.N / (regen ? BLOCK_X * 16 : BLOCK_X), (uint32_t)num_special + num_limbs}, BLOCK_X,
+            regen ? 0 : sizeof(uint64_t) * BLOCK_X * i, s.ptr(), digits.data + offset_c1, src_c0.limbptr.data,
+            digits.data + offset_output_c1, digits.data + offset_output_c1s, digits.data + offset_output_c0,
+            digits.data + offset_output_c0s, n, (int*)(digits.data + offset_indexes), digits.data, i, id, num_special,
+            0, src_c0.SPECIALlimbptr.data, c0_modup, kpb,
+            regen ? (const uint32_t*)(digits.data + offset_seeds) : nullptr, (uint32_t)cc.N >> 4);
 
         // n32 debug: full-vector dumps of the hoisted-rotation dot inputs/outputs at prime q0,
         // for offline per-position verification (dot+automorph, then the moddown chain).
