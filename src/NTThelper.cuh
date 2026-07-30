@@ -68,9 +68,20 @@ __device__ __forceinline__ int swz_base(const int e) {
     }
 }
 
+// The ROW term is separately switchable and DEFAULTS OFF, because it is the only part of the
+// swizzle with a per-access cost. swz_base is loop-invariant across the unrolled i-loop (the
+// butterfly computes it once per stage and reuses it for all M rows), so quad-only is FREE;
+// the row term adds one LOP3 to every shared access, and at this kernel's arithmetic intensity
+// that measured +16.5% instructions — more than the conflicts it removes are worth.
+// It buys the last 14.3% -> 0% (the transposed accesses, which differ only in the ROW and so
+// cannot be separated by anything row-invariant). Enable only if smem ever becomes the limiter.
+#ifndef FIDESLIB_NTT_SWIZZLE_ROW
+#define FIDESLIB_NTT_SWIZZLE_ROW 0
+#endif
+
 template <typename T>
 __device__ __forceinline__ int swz_row(const int i) {
-    if constexpr (FIDESLIB_NTT_SWIZZLE && sizeof(T) == 4) {
+    if constexpr (FIDESLIB_NTT_SWIZZLE && FIDESLIB_NTT_SWIZZLE_ROW && sizeof(T) == 4) {
         return (4 * (i & 7)) ^ ((i >> 2) & 1);
     } else {
         return 0;
@@ -100,6 +111,12 @@ __device__ __forceinline__ int swz_lx(const int i, const int e) {
 // out.lane[l] = v.lane[l ^ x], i.e. logical lane r lands at physical lane r ^ x. Involutive,
 // so the same call reorders both a store (logical -> physical) and a load (physical -> logical).
 __device__ __forceinline__ int4 swz_perm4(int4 v, const int x) {
+#if !FIDESLIB_NTT_SWIZZLE_ROW
+    // With the row term off the lane XOR is only ever 0 or 3, i.e. a plain 4-way reversal.
+    // Telling the compiler that halves this to 4 SEL instead of 8 — and the SELs on the
+    // vector paths are where quad-only's whole instruction overhead lives (SASS: +32 SEL).
+    return x ? make_int4(v.w, v.z, v.y, v.x) : v;
+#else
     if (x & 1) {
         int t = v.x; v.x = v.y; v.y = t;
         t = v.z; v.z = v.w; v.w = t;
@@ -109,6 +126,7 @@ __device__ __forceinline__ int4 swz_perm4(int4 v, const int x) {
         t = v.y; v.y = v.w; v.w = t;
     }
     return v;
+#endif
 }
 
 // Swizzled scalar access to logical element `e` of shared row `i`.
