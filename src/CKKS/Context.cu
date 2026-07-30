@@ -782,6 +782,16 @@ void ContextData::AddBootPrecomputation(int slots, BootstrapPrecomputation&& pre
                                   precomp.CtS.at(0).A.at(0).c0.isModUp() * specialMeta[0].size()))) *
                          N * (NATIVEINT / 8) / (1 << 20)
                   << "MB\n";
+        // Per-level homomorphic-DFT shape: bStep = hoisted rotations per level's BIG
+        // hoistedRotateDotKSK launch (each streams bStep full rotation keys), gStep = giant
+        // rotations. Needed to compute achieved bandwidth of the exposed dot class from an
+        // nsys trace (HANDOFF_blackwell_levers.md re-ranking) — printed once at setup.
+        for (auto* v : {&precomp.CtS, &precomp.StC}) {
+            for (size_t i = 0; i < v->size(); ++i)
+                std::cout << "[boot_lt] " << (v == &precomp.CtS ? "CtS" : "StC") << " level " << i
+                          << ": slots=" << v->at(i).slots << " bStep=" << v->at(i).bStep
+                          << " gStep=" << v->at(i).gStep << "\n";
+        }
     }
 
     precom.boot.emplace(slots, std::move(precomp));
