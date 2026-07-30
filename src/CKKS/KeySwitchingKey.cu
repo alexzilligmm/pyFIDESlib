@@ -77,8 +77,10 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
     // `a`'s rows are never allocated in the first place when released: the pointer TABLES the
     // host staging paths read live in bufferAUXptrs and are built by the LimbPartition
     // constructor from the metas, so they exist and are correctly sized without this call.
-    // (Skipping it, rather than allocating and freeing per key, is worth the ~85 MiB transient
-    // that the allocate-then-release form held during load.)
+    // MEASURED: skipping it rather than allocating-and-freeing per key changes peak device
+    // memory by NOTHING (14425 MiB either way). The transient this was expected to remove never
+    // showed — the peak is set by the steady-state bootstrap loop, not key load. Kept because it
+    // is strictly less work and makes the invariant honest, NOT as a memory lever.
     if (!release_a)
         a.generateDecompAndDigit(true, q_band);
     b.generateDecompAndDigit(true, q_band);

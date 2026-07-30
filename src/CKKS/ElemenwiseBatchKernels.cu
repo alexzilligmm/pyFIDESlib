@@ -655,7 +655,7 @@ __device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t 
 // cuts ~32% of the traffic here against ~50% there — on the same ~112 ALU ops/coefficient of
 // regen. Expect a smaller win; the reason to do it anyway is that it is the LAST `a`-reader on
 // this chain, and only when every reader regenerates can expandKskADigits stop materializing
-// `a` at all (measured: 17.0 GB of packed rotation keys loaded, half of which is `a`).
+// `a` at all (MEASURED -7.50 GiB of device memory: 22105 -> 14425 MiB peak, scripts/mem_ab.sh).
 // The flip side of having no rotation loop: no per-thread smem digit cache to lose, so this
 // port carries none of the L2 re-read the hoisted one accepted, and its stores stay coalesced
 // (no automorphism permutes them) — hence the uint4 store path.

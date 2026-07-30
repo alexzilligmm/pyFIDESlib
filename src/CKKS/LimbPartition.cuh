@@ -210,8 +210,10 @@ class LimbPartition {
     bool ksk_seed_set = false;
     // Lever 1b-ii memory endgame: at FIDESLIB_KSK_REGEN>=2 EVERY reader of this chain's `a`
     // rows regenerates them, so the rows are never materialized — adoptKskASeed() records the
-    // seed and releases the storage instead (worth ~8.5 GB: half of the measured 17.0 GB of
-    // packed rotation keys). The device pointer tables survive, holding nullptr, so the host
+    // seed and releases the storage instead. MEASURED at -7.50 GiB (22105 -> 14425 MiB peak,
+    // scripts/mem_ab.sh) — do NOT re-derive this from the `Rotation keys loaded: N ~ XXXXX MB`
+    // line, which is a formula assuming dense storage, not an allocation; trusting it once
+    // produced a wrong -8.5 GB claim. The device pointer tables survive, holding nullptr, so the host
     // staging code that writes them into digits tables is unchanged; anything that would
     // actually READ them must throw first, which is what this flag is for.
     bool ksk_a_released = false;
