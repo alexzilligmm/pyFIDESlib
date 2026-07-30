@@ -14,11 +14,14 @@
 namespace FIDESlib::CKKS {
 
 /* Lever 1b-ii (in-kernel regen) — FIDESLIB_KSK_REGEN is a LEVEL, not a boolean:
- *   0 (default) off;  >=1 the stage-B HOISTED arm (barrier-free, 16 coefficients/thread);
- *   >=2 additionally the stage-A fusedDotKSK arm (smem keystream tile behind one barrier).
- * Stage A is measured wall-NEGATIVE (+0.9 ms, ab_FIDESLIB_KSK_REGEN_20260730_120442) and is
- * kept only as the proven-bit-exact reference shape, so it must not ride along with a plain
- * FIDESLIB_KSK_REGEN=1 A/B of stage B. */
+ *   0 (default) off
+ *   1  stage-B register arm in the HOISTED kernel only (the -4.8 ms banked config)
+ *   2  stage-B register arm in BOTH `a`-readers (hoisted + fusedDotKSK) — the config the
+ *      memory endgame needs, since `a` can only stop being materialized once NOTHING reads it
+ *   3  hoisted stage B + the stage-A smem fusedDotKSK arm (measured wall-NEGATIVE, +0.9 ms,
+ *      ab_FIDESLIB_KSK_REGEN_20260730_120442) — kept only as the reference shape that first
+ *      proved bit-exactness; diagnostic, never a shipping config.
+ * The levels are nested so that an A/B of any level measures exactly one added arm. */
 static int kskRegenLevel() {
     static const int level = [] {
         const char* e = getenv("FIDESLIB_KSK_REGEN");
@@ -33,12 +36,23 @@ static bool kskRegenEligible(const LimbPartition& ksk_a) {
     return ksk_a.ksk_seed_set && ksk_a.cc.GPUid.size() == 1 && ksk_a.cc.precom.constants[0].type == 0;
 }
 
-/* Stage A (fusedDotKSK): returns the key's 8-word seed, or nullptr to stream `a` as before. */
-static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a) {
-    if (kskRegenLevel() < 2 || !kskRegenEligible(ksk_a))
+/* fusedDotKSK: returns the key's 8-word seed and, via *shape, which regen arm to launch
+ * (1 = stage-B register, 2 = stage-A smem). nullptr / shape 0 = stream `a` as before. */
+static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a, int block_x, int* shape) {
+    *shape = 0;
+    const int level = kskRegenLevel();
+    if (level < 2 || !kskRegenEligible(ksk_a))
         return nullptr;
-    static const bool once = [] {  // run marker: proof the REGEN arm engaged (not just the env)
-        std::cerr << "[ksk_regen] active: fusedDotKSK regenerating kska from seed (stage A)\n";
+    if (level >= 3) {
+        *shape = 2;
+    } else {
+        if (ksk_a.cc.N % (block_x * 16) != 0)  // stage B needs whole 16-coefficient threads
+            return nullptr;
+        *shape = 1;
+    }
+    static const bool once = [s = *shape] {  // run marker: proof the arm engaged (not just the env)
+        std::cerr << "[ksk_regen] active: fusedDotKSK regenerating kska from seed (stage "
+                  << (s == 1 ? "B, register" : "A, smem") << ")\n";
         return true;
     }();
     (void)once;
@@ -496,10 +510,12 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
         if (num_special + num_limbs > 0) {
             cudaMemcpyAsync(digits.data, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
             assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
+            int regen_shape;
+            const uint32_t* regen_seed = kskRegenSeed(ksk_a, 128, &regen_shape);
             launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, s.ptr(),
                                 out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
                                 out2.SPECIALlimbptr.data, digits.data, i, id, num_special, 0, ksk_a.key_pack_bits,
-                                kskRegenSeed(ksk_a), (uint32_t)cc.N >> 4);
+                                regen_seed, (uint32_t)cc.N >> 4, regen_shape);
         }
     }
     cudaFreeAsync(digits.data, s.ptr());
@@ -1471,10 +1487,12 @@ void LimbPartition::modup_ksk_moddown_mgpu(
 
             if (num_special > 0) {
                 assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
+                int regen_shape;
+                const uint32_t* regen_seed = kskRegenSeed(ksk_a, 128, &regen_shape);
                 launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, s.ptr(), out1.limbptr.data,
                                     out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
-                                    num_d, id, num_special, 0, ksk_a.key_pack_bits, kskRegenSeed(ksk_a),
-                                    (uint32_t)cc.N >> 4);
+                                    num_d, id, num_special, 0, ksk_a.key_pack_bits, regen_seed,
+                                    (uint32_t)cc.N >> 4, regen_shape);
             }
         }
 
@@ -1822,10 +1840,12 @@ void LimbPartition::modup_ksk_moddown_mgpu(
             if (limb_size > 0) {
                 for (int start = 0; start < limb_size; start += cc.batch) {
                     int num = std::min(cc.batch, (int)limb_size - start);
+                    int regen_shape;
+                    const uint32_t* regen_seed = kskRegenSeed(ksk_a, 128, &regen_shape);
                     launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, stream.ptr(),
                                         out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
                                         out2.SPECIALlimbptr.data, digits, i, id, num_special, num_special + start,
-                                        ksk_a.key_pack_bits, kskRegenSeed(ksk_a), (uint32_t)cc.N >> 4);
+                                        ksk_a.key_pack_bits, regen_seed, (uint32_t)cc.N >> 4, regen_shape);
                 }
             }
         }

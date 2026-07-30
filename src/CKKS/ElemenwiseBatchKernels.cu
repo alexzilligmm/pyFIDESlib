@@ -609,46 +609,164 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
     }
 }
 
+#ifndef FIDESLIB_DOT_REGEN_MINCTA
+#define FIDESLIB_DOT_REGEN_MINCTA 3
+#endif
+
+/* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
+ * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
+ * per (rotation, digit) would rival the ChaCha block itself. m = floor(2^32/p) gives
+ * q_hat in {floor(v/p)-1, floor(v/p)} => one conditional subtract. Bit-identical remainder. */
+__device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t p, const uint32_t m) {
+    const uint32_t r = v - __umulhi(v, m) * p;
+    return r >= p ? r - p : r;
+}
+
+// Lever 1b-ii stage B, second consumer (2026-07-30): the SAME barrier-free register shape as
+// hoistedRotateDotKSKRegen_ below — each thread owns the 16 consecutive coefficients one
+// ChaCha block serves and regenerates each digit's block once in registers. Ported here after
+// the hoisted arm banked -4.8 ms; the stage-A smem arm above stays only as the reference shape
+// that proved bit-exactness (it is wall-NEGATIVE, FIDESLIB_KSK_REGEN=3 to look at it).
+//
+// This kernel is a WEAKER case than the hoisted one, by construction: it has no rotation loop,
+// so its `in` operand is not amortized across 16 keys. Per (digit, coefficient) it streams
+// in + kska + kskb ~ 11 B where the hoisted kernel streamed kska + kskb ~ 7 B, so deleting `a`
+// cuts ~32% of the traffic here against ~50% there — on the same ~112 ALU ops/coefficient of
+// regen. Expect a smaller win; the reason to do it anyway is that it is the LAST `a`-reader on
+// this chain, and only when every reader regenerates can expandKskADigits stop materializing
+// `a` at all (measured: 17.0 GB of packed rotation keys loaded, half of which is `a`).
+// The flip side of having no rotation loop: no per-thread smem digit cache to lose, so this
+// port carries none of the L2 re-read the hoisted one accepted, and its stores stay coalesced
+// (no automorphism permutes them) — hence the uint4 store path.
+template <int KSK_BITS>
+__global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
+    fusedDotKSKRegen_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
+                      int num_special, int init, KskSeedWords aseed, const uint32_t n16) {
+    constexpr int SLOTS = 16;
+    const uint32_t b0 = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);  // == slot>>4 for this thread
+    const int base = (int)(b0 << 4);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint32_t pval = (uint32_t)C_.primes[primeid];
+    const uint32_t recip = 0xFFFFFFFFu / pval;
+    const uint32_t m_p = recip * pval;
+
+    // modadd(0, x) == x for x < p, so a zero init reproduces the streaming kernel's i==0
+    // assignment exactly while keeping the digit loop branch-free.
+    uint32_t a1[SLOTS], a2[SLOTS];
+#pragma unroll
+    for (int w = 0; w < SLOTS; ++w) {
+        a1[w] = 0;
+        a2[w] = 0;
+    }
+
+    for (int i = 0; i < num_d; ++i) {
+        const bool decomp = (i == primeid_digit);
+        const int pos = C_.pos_in_digit[i][primeid];
+        const int p = decomp ? pos_dec : pos;
+        const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
+        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+
+        uint32_t ks[16];
+        kskexpand::chacha_block(aseed.k, b0, (uint32_t)i, pval, ks);
+        uint32_t need = 0;
+#pragma unroll
+        for (int w = 0; w < 16; ++w)
+            need |= (ks[w] >= m_p) ? (1u << w) : 0u;
+        if (need) {  // spec v1 escalation: attempt t reads word w of block b0 + t*n16
+            for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                uint32_t es[16];
+                kskexpand::chacha_block(aseed.k, b0 + t * n16, (uint32_t)i, pval, es);
+#pragma unroll
+                for (int w = 0; w < 16; ++w)
+                    if (need & (1u << w)) {
+                        ks[w] = es[w];  // a never-accepted word keeps the LAST attempt (spec fallback)
+                        if (es[w] < m_p)
+                            need &= ~(1u << w);
+                    }
+                if (!need)
+                    break;
+            }
+        }
+
+#pragma unroll
+        for (int q = 0; q < SLOTS / 4; ++q) {
+            const uint4 iv = *(const uint4*)(inp + 4 * q);
+            const uint32_t in4[4] = {iv.x, iv.y, iv.z, iv.w};
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                const int w = 4 * q + r;  // both loops unroll => compile-time index
+                const uint32_t kska = modByRecip(ks[w], pval, recip);
+                uint32_t kskb;
+                if constexpr (KSK_BITS)
+                    kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+                else
+                    kskb = ((const uint32_t*)kskbp)[base + w];
+                a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(in4[r], kska, primeid), primeid);
+                a2[w] = modadd(a2[w], modmult<ALGO_BARRETT>(in4[r], kskb, primeid), primeid);
+            }
+        }
+    }
+
+    uint32_t* o1 = (primeid < C_.L) ? (uint32_t*)out1[pos_dec] : (uint32_t*)sout1[primeid - C_.L];
+    uint32_t* o2 = (primeid < C_.L) ? (uint32_t*)out2[pos_dec] : (uint32_t*)sout2[primeid - C_.L];
+#pragma unroll
+    for (int q = 0; q < SLOTS / 4; ++q) {
+        *(uint4*)(o1 + base + 4 * q) = make_uint4(a1[4 * q], a1[4 * q + 1], a1[4 * q + 2], a1[4 * q + 3]);
+        *(uint4*)(o2 + base + 4 * q) = make_uint4(a2[4 * q], a2[4 * q + 1], a2[4 * q + 2], a2[4 * q + 3]);
+    }
+}
+
 // Same-TU launcher (see the .cuh note: cross-TU template-kernel launches hit
 // 'invalid device function' — the launch must live in the defining TU). Supported packed
 // widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16) {
+                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16, int regen_shape) {
     KskSeedWords sw{};
     if (a_seed)
         for (int i = 0; i < 8; ++i)
             sw.k[i] = a_seed[i];
-    const size_t smem = a_seed ? (size_t)num_d * 128 * sizeof(uint32_t) : 0;  // REGEN keystream tile
+    if (a_seed == nullptr)
+        regen_shape = 0;
+    // Shape 1 (stage B) gives each thread 16 coefficients, so grid.x shrinks by 16 — done here
+    // rather than at the three call sites, which all pass the same N/block.x grid.
+    if (regen_shape == 1) {
+        if (grid.x % 16u != 0u)
+            throw std::runtime_error("launchFusedDotKSK_2: regen shape 1 needs grid.x % 16 == 0");
+        grid.x /= 16u;
+    }
+    const size_t smem = regen_shape == 2 ? (size_t)num_d * 128 * sizeof(uint32_t) : 0;  // stage-A tile only
+#define FIDESLIB_FUSED_DOT_ARM(BITS)                                                                             \
+    if (regen_shape == 1)                                                                                        \
+        fusedDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,          \
+                                                            num_special, init, sw, n16);                         \
+    else if (regen_shape == 2)                                                                                   \
+        fusedDotKSK_2_<BITS, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,    \
+                                                                  num_special, init, sw, n16);                   \
+    else                                                                                                         \
+        fusedDotKSK_2_<BITS, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,      \
+                                                                num_special, init, sw, n16);
     switch (ksk_pack_bits) {
         case 0:
-            if (a_seed)
-                fusedDotKSK_2_<0, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                       num_special, init, sw, n16);
-            else
-                fusedDotKSK_2_<0, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                     num_special, init, sw, n16);
+            FIDESLIB_FUSED_DOT_ARM(0)
             break;
         case 27:
-            if (a_seed)
-                fusedDotKSK_2_<27, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                        num_special, init, sw, n16);
-            else
-                fusedDotKSK_2_<27, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                      num_special, init, sw, n16);
+            FIDESLIB_FUSED_DOT_ARM(27)
             break;
         case 28:
-            if (a_seed)
-                fusedDotKSK_2_<28, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                        num_special, init, sw, n16);
-            else
-                fusedDotKSK_2_<28, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,
-                                                                      num_special, init, sw, n16);
+            FIDESLIB_FUSED_DOT_ARM(28)
             break;
         default:
             throw std::runtime_error("launchFusedDotKSK_2: unsupported ksk_pack_bits " +
                                      std::to_string(ksk_pack_bits));
     }
+#undef FIDESLIB_FUSED_DOT_ARM
 }
 
 constexpr bool PRINT = false;
@@ -860,19 +978,6 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 // Registers are the other cliff (this campaign's recurring one): 16 accumulator PAIRS are
 // live across the digit loop by construction, so budget ~80 and check STACK/LOCAL = 0 with
 // cuobjdump --dump-resource-usage before running anything.
-#ifndef FIDESLIB_DOT_REGEN_MINCTA
-#define FIDESLIB_DOT_REGEN_MINCTA 3
-#endif
-
-/* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
- * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
- * per (rotation, digit) would rival the ChaCha block itself. m = floor(2^32/p) gives
- * q_hat in {floor(v/p)-1, floor(v/p)} => one conditional subtract. Bit-identical remainder. */
-__device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t p, const uint32_t m) {
-    const uint32_t r = v - __umulhi(v, m) * p;
-    return r >= p ? r - p : r;
-}
-
 template <int KSK_BITS>
 __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
     hoistedRotateDotKSKRegen_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,

@@ -71,12 +71,15 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
  * that only sees its declaration gets a weak local stub with no device code in that TU's
  * fatbin => 'invalid device function' — learned the hard way, job 50426241). ksk_pack_bits==0
  * selects the dense instantiation; unsupported widths throw. */
-/* a_seed: 8 seed words => the REGEN arm regenerates kska in-kernel (1b-ii; u32 chains only,
+/* a_seed: 8 seed words => a REGEN arm regenerates kska in-kernel (1b-ii; u32 chains only,
  * caller gates on ksk_seed_set + FIDESLIB_KSK_REGEN); nullptr = stream `a` as before.
- * n16 = N>>4 (the spec's escalation stride; ignored when a_seed is null). */
+ * n16 = N>>4 (the spec's escalation stride; ignored when a_seed is null).
+ * regen_shape: 1 = stage-B register arm (barrier-free, 16 coefficients/thread — the launcher
+ * divides grid.x by 16 itself); 2 = stage-A smem arm, measured wall-NEGATIVE, diagnostic only. */
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits, const uint32_t* a_seed = nullptr, uint32_t n16 = 0);
+                         int ksk_pack_bits, const uint32_t* a_seed = nullptr, uint32_t n16 = 0,
+                         int regen_shape = 0);
 /* seeds: DEVICE pointer to n*8 seed words (one 256-bit seed per rotation key, in the same
  * order as the rotation loop) => the stage-B REGEN kernel is launched instead: each thread
  * owns 16 consecutive coefficients and regenerates each (key, digit) ChaCha block once in
