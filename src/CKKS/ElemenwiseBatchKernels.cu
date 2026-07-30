@@ -401,6 +401,17 @@ __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const i
     out[w] = (uint32_t)acc;
 }
 
+// sm_120 (RTX PRO 6000) retune 2026-07-30: maxThreadsPerSM is 1536 there (vs A100's 2048),
+// so min-blocks 16 x 128 = 2048 threads is INFEASIBLE — ptxas silently ignores it and the
+// packed arms compile to 52/48 regs = only ~9 blocks/SM (75% occupancy) while the dense arms'
+// 12 x 128 = 1536 is exactly full. On >=sm_120 pin the packed arms to 12 (regs capped ~42,
+// occupancy 100%); A100/Hopper keep the measured min-blocks-16 tier.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+#define FIDESLIB_DOT_MINCTA_PACKED 12
+#else
+#define FIDESLIB_DOT_MINCTA_PACKED 16
+#endif
+
 // Lever 1 (2026-07-27, ncu job 50417213): these dot kernels are REGISTER-occupancy-limited,
 // not DRAM-bound — occupancy_limit_registers=8 blocks/SM (>40 regs/thread) ⇒ only ~49% warps
 // active, DRAM at 41-47% of peak, SM ~50%. __launch_bounds__(128, 12) caps regs at ~42 and
@@ -411,7 +422,7 @@ __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const i
 // packed arm 16 -> 12 blocks/SM (warps 93.8 -> 73%, DRAM 72 -> 52%). Compile-time width makes
 // the mask/shift immediates, and packed arms pin min-blocks 16 to hold the occupancy tier.
 template <int KSK_BITS>
-__global__ void __launch_bounds__(128, KSK_BITS ? 16 : 12)
+__global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 12)
     fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
                    int num_special, int init) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -584,7 +595,7 @@ constexpr bool PRINT = false;
 // Lever 1: same register-occupancy treatment as fusedDotKSK_2_ above (ncu 50417213).
 // Lever 1b-i: same compile-time KSK_BITS treatment as fusedDotKSK_2_ above (ncu 50428101).
 template <int KSK_BITS>
-__global__ void __launch_bounds__(128, KSK_BITS ? 16 : 12)
+__global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 12)
     hoistedRotateDotKSK_2_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2,
                            void*** sout2, const int n, const int* indexes, void*** digits, int num_d,
                            int id, int num_special, int init, void** sc0, bool c0_modup) {
