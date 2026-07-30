@@ -19,3 +19,4 @@ build/
 deps/openfhe-install/
 
 .cache/
+build_local_n32/

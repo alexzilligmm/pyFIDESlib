@@ -150,5 +150,18 @@ void run_in_graph(cudaGraphExec_t& exec, Stream& s, std::function<void()> run);
 void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache = false);
 void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache = false);
 
+/* KSK L2 persisting-window probe (Blackwell lever #1, HANDOFF_blackwell_levers.md).
+ * setPersistingL2Window raises cudaLimitPersistingL2CacheSize and installs an
+ * accessPolicyWindow(hitProp=persisting) over [base, base+bytes) on EVERY FIDESlib stream —
+ * retroactively via a registry of live streams, and on each stream created afterwards
+ * (Stream::init applies the stored window). One window per process; a second call replaces
+ * it. Streams outside FIDESlib (none launch KSK readers) are unaffected. The window is
+ * read-path metadata only: no kernel, value or schedule changes, bit-exact by construction. */
+void setPersistingL2Window(void* base, size_t bytes);
+namespace detail {
+void registerL2WindowStream(cudaStream_t s);    // Stream::init only
+void unregisterL2WindowStream(cudaStream_t s);  // Stream teardown only
+}  // namespace detail
+
 }  // namespace FIDESlib
 #endif  //FIDESLIB_CUDAUTILS_CUH

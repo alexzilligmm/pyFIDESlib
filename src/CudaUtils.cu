@@ -2,8 +2,11 @@
 // Created by carlosad on 25/03/24.
 //
 
+#include <algorithm>
 #include <cassert>
 #include <list>
+#include <mutex>
+#include <set>
 #include <string>
 #include "CudaUtils.cuh"
 
@@ -232,11 +235,72 @@ void Stream::wait(cudaStream_t s) {
     CudaCheckErrorModNoSync;
 }
 
+/* KSK L2 persisting-window probe — see CudaUtils.cuh. State + registry are process-global:
+ * FIDESlib streams all funnel through Stream::init/teardown, so the registry is complete by
+ * construction. hitRatio is derived once at set time (carveout / window) so the hardware
+ * randomly persists at most a carveout's worth of the window instead of thrashing it. */
+namespace {
+std::mutex l2win_mtx;
+std::set<cudaStream_t> l2win_streams;
+cudaAccessPolicyWindow l2win{};  // num_bytes == 0 <=> no window configured
+
+void l2winApply(cudaStream_t s) {  // call with l2win_mtx held, l2win.num_bytes > 0
+    cudaStreamAttrValue attr{};
+    attr.accessPolicyWindow = l2win;
+    cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+}  // namespace
+
+void setPersistingL2Window(void* base, size_t bytes) {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceProp prop{};
+    cudaGetDeviceProperties(&prop, dev);
+    if (prop.persistingL2CacheMaxSize <= 0 || bytes == 0) {
+        std::cerr << "[ksk_l2] persisting L2 unsupported on device " << dev << " — window not set\n";
+        return;
+    }
+    const size_t carve = (size_t)prop.persistingL2CacheMaxSize;
+    const size_t window = std::min(bytes, (size_t)prop.accessPolicyMaxWindowSize);
+    cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, carve);
+
+    std::lock_guard<std::mutex> lock(l2win_mtx);
+    l2win.base_ptr = base;
+    l2win.num_bytes = window;
+    l2win.hitRatio = std::min(1.0f, (float)((double)carve / (double)window));
+    l2win.hitProp = cudaAccessPropertyPersisting;
+    l2win.missProp = cudaAccessPropertyNormal;
+    for (cudaStream_t s : l2win_streams)
+        l2winApply(s);
+    std::cerr << "[ksk_l2] window base=" << base << " bytes=" << (window >> 20) << " MB (of " << (bytes >> 20)
+              << " MB requested), carveout=" << (carve >> 20) << " MB, hitRatio=" << l2win.hitRatio << ", applied to "
+              << l2win_streams.size() << " live streams\n";
+    CudaCheckErrorMod;
+}
+
+namespace detail {
+void registerL2WindowStream(cudaStream_t s) {
+    if (!s)
+        return;
+    std::lock_guard<std::mutex> lock(l2win_mtx);
+    l2win_streams.insert(s);
+    if (l2win.num_bytes)
+        l2winApply(s);
+}
+void unregisterL2WindowStream(cudaStream_t s) {
+    if (!s)
+        return;
+    std::lock_guard<std::mutex> lock(l2win_mtx);
+    l2win_streams.erase(s);
+}
+}  // namespace detail
+
 int low = -1;
 int high = -1;
 void Stream::init(int priority) {
     if (ptr_) {
         //free[ptr]++;
+        detail::unregisterL2WindowStream(ptr_);
         cudaEventDestroy(ev);
         cudaStreamDestroy(ptr_);
         ptr_ = nullptr;
@@ -251,6 +315,7 @@ void Stream::init(int priority) {
     int prio = low + priority * ((high - low - 1)) / 100;
     cudaStreamCreateWithPriority(&ptr_, 0 /*cudaStreamNonBlocking*/, prio);
     //cudaStreamCreateWithFlags(&ptr, cudaStreamNonBlocking);
+    detail::registerL2WindowStream(ptr_);
 
     cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
     cudaEventCreate(&ev, cudaEventDisableTiming);
@@ -272,6 +337,7 @@ void Stream::initDefault() {
 Stream::~Stream() {
     if (ptr_) {
         //free[ptr]++;
+        detail::unregisterL2WindowStream(ptr_);
         cudaStreamDestroy(ptr_);
         ptr_ = nullptr;
     }

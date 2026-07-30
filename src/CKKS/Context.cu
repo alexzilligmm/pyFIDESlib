@@ -1,7 +1,9 @@
 //
 // Created by carlosad on 2/05/24.
 //
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -686,12 +688,71 @@ bool ContextData::RemoveRotationKey(int index, const KeyHash& keyID) {
     return it->second.rot_keys.erase(index) > 0;   // dtor frees the GPU limbs
 }
 
+/* KSK L2 persisting-window probe (FIDESLIB_KSK_L2_PIN=1; HANDOFF_blackwell_levers.md #1).
+ * The mult/eval key is re-read from DRAM by all 46 EvalMod keyswitches per bootstrap while
+ * its A100 L2 hit rate was 32-36% (streams once). On Blackwell the persisting carveout (80 MB
+ * on the RTX PRO 6000) can hold the digit set, so mark its span persisting on every stream.
+ * Limbs are individually slab-allocated (bufferDECOMPandDIGIT is null on single GPU), so the
+ * window is the [min, max) SPAN over the limb allocations — key limbs are carved back-to-back
+ * from the slab at load time, and the log reports payload vs span so a sparse span is visible.
+ * Read-path metadata only: no value, schedule or kernel change, bit-exact by construction. */
+namespace {
+void maybePinEvalKeyL2(KeySwitchingKey& key) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_L2_PIN");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    if (!enabled)
+        return;
+    uintptr_t lo = UINTPTR_MAX, hi = 0;
+    size_t total = 0, nlimbs = 0;
+    const auto scan = [&](const LimbImpl& l) {
+        uintptr_t p;
+        size_t b;
+        if (l.index() == U32) {
+            const auto& v = std::get<U32>(l).v;
+            p = (uintptr_t)v.data, b = (size_t)v.alloc * sizeof(uint32_t);
+        } else {
+            const auto& v = std::get<U64>(l).v;
+            p = (uintptr_t)v.data, b = (size_t)v.alloc * sizeof(uint64_t);
+        }
+        if (!p || !b)
+            return;
+        lo = std::min(lo, p), hi = std::max(hi, p + b), total += b, ++nlimbs;
+    };
+    for (RNSPoly* poly : {&key.a, &key.b}) {
+        for (auto& part : poly->GPU) {
+            if (part.key_pack_bits && part.bufferKSKPACK) {  // 1b-i packed layout: one dense buffer
+                const uintptr_t p = (uintptr_t)part.bufferKSKPACK;
+                lo = std::min(lo, p), hi = std::max(hi, p + part.bufferKSKPACKbytes);
+                total += part.bufferKSKPACKbytes, ++nlimbs;
+                continue;
+            }
+            for (auto& d : part.DECOMPlimb)
+                for (auto& l : d)
+                    scan(l);
+            for (auto& d : part.DIGITlimb)
+                for (auto& l : d)
+                    scan(l);
+        }
+    }
+    if (!total || lo >= hi) {
+        std::cerr << "[ksk_l2] eval key has no digit limbs to pin — window not set\n";
+        return;
+    }
+    std::cerr << "[ksk_l2] eval key: " << nlimbs << " limbs, payload " << (total >> 20) << " MB, span "
+              << ((hi - lo) >> 20) << " MB\n";
+    setPersistingL2Window((void*)lo, hi - lo);
+}
+}  // namespace
+
 void ContextData::AddEvalKey(KeySwitchingKey&& ksk) {
     if (!precom.keys.contains(ksk.keyID))
         precom.keys[ksk.keyID] = Precomputations::KeyPrecomputations{};
     std::unique_ptr<KeySwitchingKey> key = std::make_unique<KeySwitchingKey>(std::move(ksk));
     std::unique_ptr<KeySwitchingKey>& dest_key = precom.keys.at(key->keyID).eval_key;
     dest_key = std::move(key);
+    maybePinEvalKeyL2(*dest_key);
 }
 KeySwitchingKey& ContextData::GetEvalKey(const KeyHash& keyID) {
     assert(precom.keys.contains(keyID));
