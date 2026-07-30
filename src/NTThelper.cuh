@@ -48,7 +48,7 @@ namespace FIDESlib {
 // the identity, the pos^1 pair swaps become no-ops because j is even, and swz_perm4 is fed 0).
 // That is what the wall A/B alternates, and it is the escape hatch if a future arch regresses.
 #ifndef FIDESLIB_NTT_SWIZZLE
-#define FIDESLIB_NTT_SWIZZLE 0
+#define FIDESLIB_NTT_SWIZZLE 1
 #endif
 
 // SPLIT FORM — this is what makes the swizzle affordable. pos(i,e) factors exactly into a
@@ -58,11 +58,27 @@ namespace FIDESlib {
 // In every hot loop `e` is loop-invariant across the unrolled i-loop, so swz_base is computed
 // ONCE and swz_row(i) folds into an immediate — the whole per-access cost is one LOP3.
 // The fused form cost +23.7% instructions and ate the entire conflict win; do not re-fuse it.
+// GRAY variant: swz_base(e) = e ^ (e>>1). Two ops instead of five, at 15.4% residual conflicts
+// instead of 14.3% — i.e. slightly WORSE on the counter and much cheaper on the ALU, which is the
+// trade that matters here (this kernel pays ~1:1 for instructions). It is the optimum of both the
+// cute::Swizzle<B,M,S> family (= Swizzle<5,0,1>) and of a 2104-map magic-multiplier search, which
+// both independently land on it. Mutually exclusive with the ROW term.
+#ifndef FIDESLIB_NTT_SWIZZLE_GRAY
+#define FIDESLIB_NTT_SWIZZLE_GRAY 1
+#endif
+#if FIDESLIB_NTT_SWIZZLE_GRAY && FIDESLIB_NTT_SWIZZLE_ROW
+#error "FIDESLIB_NTT_SWIZZLE_GRAY and _ROW are mutually exclusive (the Gray lane map is not an XOR)"
+#endif
+
 template <typename T>
 __device__ __forceinline__ int swz_base(const int e) {
     if constexpr (FIDESLIB_NTT_SWIZZLE && sizeof(T) == 4) {
+#if FIDESLIB_NTT_SWIZZLE_GRAY
+        return e ^ (e >> 1);
+#else
         const int g = e >> 2;
         return 4 * (g ^ (-((g >> 3) & 1) & 7)) + ((e & 3) ^ (-(g & 1) & 3));
+#endif
     } else {
         return e;
     }
@@ -111,7 +127,12 @@ __device__ __forceinline__ int swz_lx(const int i, const int e) {
 // out.lane[l] = v.lane[l ^ x], i.e. logical lane r lands at physical lane r ^ x. Involutive,
 // so the same call reorders both a store (logical -> physical) and a load (physical -> logical).
 __device__ __forceinline__ int4 swz_perm4(int4 v, const int x) {
-#if !FIDESLIB_NTT_SWIZZLE_ROW
+#if FIDESLIB_NTT_SWIZZLE_GRAY
+    // Gray lane map is gray2(r) ^ c with gray2 = [0,1,3,2] and c = x = 2*(q&1). Inverting it:
+    // out.lane[l] = v.lane[gray2(l ^ c)], which is a FIXED 2<->3 swap (free, a static reorder)
+    // composed with a conditional half-swap. Still 4 SEL, same as the XOR case.
+    return x ? make_int4(v.w, v.z, v.x, v.y) : make_int4(v.x, v.y, v.w, v.z);
+#elif !FIDESLIB_NTT_SWIZZLE_ROW
     // With the row term off the lane XOR is only ever 0 or 3, i.e. a plain 4-way reversal.
     // Telling the compiler that halves this to 4 SEL instead of 8 — and the SELs on the
     // vector paths are where quad-only's whole instruction overhead lives (SASS: +32 SEL).
