@@ -609,12 +609,27 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
     }
 }
 
+// Launch-bounds tier for hoistedRotateDotKSKRegen_. MEASURED, and it inverts Lever 1's rule
+// for the streaming dot kernels (cap registers, buy occupancy): 16 accumulator PAIRS plus a
+// 16-word keystream are live by construction here, so every register taken away buys
+// rematerialization, not warps. 3 alternating rounds each, ab_regen_mincta_20260730_*:
+//   min-CTA 8 -> 64 regs, 8 blocks/SM -> 46.30 ms   <- the "8 blocks/SM" target is the WORST
+//   min-CTA 6 -> 80 regs, 6 blocks/SM -> 43.18 ms
+//   min-CTA 5 -> 96 regs, 5 blocks/SM -> 41.55 ms
+//   min-CTA 4 -> 128 regs, 4 blocks/SM -> 41.32 ms
+//   min-CTA 3 -> 168 regs, 3 blocks/SM -> 40.86 ms  <- shipped; curve is flat past 4
 #ifndef FIDESLIB_DOT_REGEN_MINCTA
 #define FIDESLIB_DOT_REGEN_MINCTA 3
 #endif
-// Swept independently of the hoisted arm: the two regen kernels have different live sets
-// (this one has no rotation loop), and the tier was worth 5.4 ms on the hoisted kernel, so
-// inheriting its pin is an assumption, not a default.
+// Launch-bounds tier for fusedDotKSKRegen_ — SEPARATE from the hoisted one on purpose. Same
+// shape, OPPOSITE answer: this kernel wants FEWER registers than ptxas asks for, where the
+// hoisted arm wanted every one it could get. 3 alternating rounds, ab_fused_tier_20260730_*:
+//   min-CTA 3 -> 152 regs (ptxas's natural demand) -> 39.611 ms
+//   min-CTA 4 -> 128 regs                          -> 39.414 ms  <- shipped, 3/3 rounds
+//   min-CTA 6 ->  80 regs                          -> 39.762 ms
+// (min-CTA 2 compiles identically to 3; 152 is the ceiling this kernel asks for.)
+// The lesson, twice over now: a launch-bounds pin transfers neither across GPUs (the sm_120
+// retune above) nor across kernels. Sweep it, never inherit it.
 #ifndef FIDESLIB_FUSED_REGEN_MINCTA
 #define FIDESLIB_FUSED_REGEN_MINCTA 4
 #endif
@@ -748,6 +763,10 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
         grid.x /= 16u;
     }
     const size_t smem = regen_shape == 2 ? (size_t)num_d * 128 * sizeof(uint32_t) : 0;  // stage-A tile only
+/* Macro, not a helper template, for one reason: BITS must reach the kernel as a COMPILE-TIME
+ * template argument (Lever 1b-i measured a runtime-width variant at +2.4%), so the arms have
+ * to be selected by a switch over instantiations. The macro keeps the argument list — 15+
+ * parameters — written once per launcher instead of once per (width x arm) pair. */
 #define FIDESLIB_FUSED_DOT_ARM(BITS)                                                                             \
     if (regen_shape == 1)                                                                                        \
         fusedDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,          \
@@ -1099,6 +1118,10 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
                                  bool c0_modup, int ksk_pack_bits, const uint32_t* seeds, uint32_t n16) {
+/* Macro, not a helper template, for one reason: BITS must reach the kernel as a COMPILE-TIME
+ * template argument (Lever 1b-i measured a runtime-width variant at +2.4%), so the arms have
+ * to be selected by a switch over instantiations. The macro keeps the argument list — 15+
+ * parameters — written once per launcher instead of once per (width x arm) pair. */
 #define FIDESLIB_HOISTED_DOT_ARM(BITS)                                                                             \
     if (seeds)                                                                                                     \
         hoistedRotateDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes, \

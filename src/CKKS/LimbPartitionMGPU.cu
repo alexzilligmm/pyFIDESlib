@@ -23,8 +23,14 @@ namespace FIDESlib::CKKS {
  *      ab_FIDESLIB_KSK_REGEN_20260730_120442) — kept only as the reference shape that first
  *      proved bit-exactness; diagnostic, never a shipping config.
  * The levels are nested so that an A/B of any level measures exactly one added arm. */
-/* Common gate: the regen arms exist only in the u32 fast path, need the key's recorded
- * expansion seed, and are single-GPU (the seed is a per-partition record). */
+/* Common gate for every regen arm. Each condition guards a specific way the arm cannot work,
+ * and each is the reason a wrong answer would be silent rather than loud:
+ *   ksk_seed_set  - the key was loaded WITHOUT the OpenFHE seed patch, so there is nothing to
+ *                   regenerate from; its `a` rows are the only copy of those values.
+ *   GPUid == 1    - the seed is recorded per LimbPartition; on multi-GPU the peer partitions
+ *                   never ran expandKskADigits and carry no seed.
+ *   type == 0     - the regen arms live only in the u32 fast path. FROZEN SPEC v1 expands to
+ *                   u32 residues; a u64 chain would need a spec extension, not a cast. */
 static bool kskRegenEligible(const LimbPartition& ksk_a) {
     return ksk_a.ksk_seed_set && ksk_a.cc.GPUid.size() == 1 && ksk_a.cc.precom.constants[0].type == 0;
 }
@@ -642,6 +648,10 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
 
         constexpr uint32_t BLOCK_X = 128;
         const bool regen = kskRegenHoist(ksk_a, (int)BLOCK_X);
+        // Pack the n seeds into the void** staging vector as raw words (4 pointers = 8 u32 per
+        // key), exactly the way offset_indexes already smuggles its ints through. They ride the
+        // one h_digits memcpy below, so the regen arm costs no extra allocation and no extra
+        // H2D transfer — it just reads 8 words per rotation out of the table it already has.
         if (regen)
             for (int k = 0; k < n; ++k)
                 for (int t = 0; t < 8; ++t)
