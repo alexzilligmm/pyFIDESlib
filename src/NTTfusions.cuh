@@ -23,8 +23,8 @@ __device__ __forceinline__ void mult_and_save_fusion(char* buffer, const int log
             ((int4*)c1tilde_)[0] = ((int4*)c1tilde)[OFFSET_2T(i)];
             in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             ((int4*)c0_)[0] = ((int4*)c0)[OFFSET_2T(i)];
             ((int4*)c0tilde_)[0] = ((int4*)c0tilde)[OFFSET_2T(i)];
@@ -73,8 +73,8 @@ __device__ __forceinline__ void mult_and_save_fusion(char* buffer, const int log
             c1tilde_[1] = c1tilde[OFFSET_T(i) | 1];
             in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             c0_[0] = c0[OFFSET_T(i)];
             c0_[1] = c0[OFFSET_T(i) | 1];
@@ -120,8 +120,8 @@ __device__ __forceinline__ void rotate_and_save_fusion(char* buffer, const int l
 
         if constexpr (sizeof(T) == 8) {
             ((int4*)c1_)[0] = ((int4*)c1)[OFFSET_2T(i)];
-            A(i)[j] = c1_[0];
-            A(i)[j + 1] = c1_[1];
+            AS(i, j) = c1_[0];
+            AS(i, j + 1) = c1_[1];
 
             ((int4*)ksk2)[0] = ((int4*)kska)[OFFSET_2T(i)];
             in2[0] = modmult<algo>(c1_[0], ksk2[0], primeid);
@@ -142,8 +142,8 @@ __device__ __forceinline__ void rotate_and_save_fusion(char* buffer, const int l
             // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
             c1_[0] = c1[OFFSET_T(i)];
             c1_[1] = c1[OFFSET_T(i) | 1];
-            A(i)[j] = c1_[0];
-            A(i)[j + 1] = c1_[1];
+            AS(i, j) = c1_[0];
+            AS(i, j + 1) = c1_[1];
 
             ksk2[0] = kska[OFFSET_T(i)];
             ksk2[1] = kska[OFFSET_T(i) | 1];
@@ -183,8 +183,8 @@ __device__ __forceinline__ void square_and_save_fusion(char* buffer, const int l
 
             in1[0] = modmult<algo>(c1_[0], c1_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             ((int4*)c0_)[0] = ((int4*)c0)[OFFSET_2T(i)];
             in2[0] = modmult<algo>(c0_[0], c0_[0], primeid);
@@ -215,8 +215,8 @@ __device__ __forceinline__ void square_and_save_fusion(char* buffer, const int l
 
             in1[0] = modmult<algo>(c1_[0], c1_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             c0_[0] = c0[OFFSET_T(i)];
             c0_[1] = c0[OFFSET_T(i) | 1];
@@ -264,8 +264,8 @@ __device__ __forceinline__ void mult_and_acc_fusion(char* buffer, const int logB
             ((int4*)c1tilde_)[0] = ((int4*)c1tilde)[OFFSET_2T(i)];
             in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             ((int4*)c0_)[0] = ((int4*)c0)[OFFSET_2T(i)];
             ((int4*)c0tilde_)[0] = ((int4*)c0tilde)[OFFSET_2T(i)];
@@ -320,8 +320,8 @@ __device__ __forceinline__ void mult_and_acc_fusion(char* buffer, const int logB
             c1tilde_[1] = c1tilde[OFFSET_T(i) | 1];
             in1[0] = modmult<algo>(c1_[0], c1tilde_[0], primeid);
             in1[1] = modmult<algo>(c1_[1], c1tilde_[1], primeid);
-            A(i)[j] = in1[0];
-            A(i)[j + 1] = in1[1];
+            AS(i, j) = in1[0];
+            AS(i, j + 1) = in1[1];
 
             c0_[0] = c0[OFFSET_T(i)];
             c0_[1] = c0[OFFSET_T(i) | 1];
@@ -377,17 +377,18 @@ __device__ __forceinline__ void rescale_fusion(char* buffer, const int logBD, co
 
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
         assert(primeid_rescale >= 0);
         if constexpr (1) {  // OpenFHE style rescale
-            A[j] = modadd(modmult<algo>(q_inv_temp, in[0], primeid),
-                          modmult<algo>(QlQlInvModqlDivqlModq_temp, A[j], primeid), primeid);
-            A[j | 1] = modadd(modmult<algo>(q_inv_temp, in[1], primeid),
-                              modmult<algo>(QlQlInvModqlDivqlModq_temp, A[j | 1], primeid), primeid);
+            A[jS] = modadd(modmult<algo>(q_inv_temp, in[0], primeid),
+                          modmult<algo>(QlQlInvModqlDivqlModq_temp, A[jS], primeid), primeid);
+            A[jS ^ 1] = modadd(modmult<algo>(q_inv_temp, in[1], primeid),
+                              modmult<algo>(QlQlInvModqlDivqlModq_temp, A[jS ^ 1], primeid), primeid);
         } else {
-            A[j] = modmult<algo>(q_inv_temp, modsub(in[0], A[j], primeid), primeid);
-            A[j | 1] = modmult<algo>(q_inv_temp, modsub(in[1], A[j | 1], primeid), primeid);
+            A[jS] = modmult<algo>(q_inv_temp, modsub(in[0], A[jS], primeid), primeid);
+            A[jS ^ 1] = modmult<algo>(q_inv_temp, modsub(in[1], A[jS ^ 1], primeid), primeid);
         }
     }
 }
@@ -407,10 +408,11 @@ __device__ __forceinline__ void rescale2_fusion(char* buffer, const int logBD, c
 
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
-        A[j] = modadd(modmult<algo>(c0, in[0], primeid), A[j], primeid);
-        A[j | 1] = modadd(modmult<algo>(c0, in[1], primeid), A[j | 1], primeid);
+        A[jS] = modadd(modmult<algo>(c0, in[0], primeid), A[jS], primeid);
+        A[jS ^ 1] = modadd(modmult<algo>(c0, in[1], primeid), A[jS ^ 1], primeid);
     }
 }
 
@@ -419,16 +421,17 @@ __device__ __forceinline__ void moddown_fusion(char* buffer, const int logBD, co
                                                const T* res) {
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
 
         if (algo != ALGO_SHOUP) {
-            A[j] = modmult<algo>(modsub(in[0], A[j], primeid), (T)C_.P_inv[primeid], primeid);
-            A[j | 1] = modmult<algo>(modsub(in[1], A[j | 1], primeid), (T)C_.P_inv[primeid], primeid);
+            A[jS] = modmult<algo>(modsub(in[0], A[jS], primeid), (T)C_.P_inv[primeid], primeid);
+            A[jS ^ 1] = modmult<algo>(modsub(in[1], A[jS ^ 1], primeid), (T)C_.P_inv[primeid], primeid);
         } else {
-            A[j] =
-                modmult<algo>(modsub(in[0], A[j], primeid), (T)C_.P_inv[primeid], primeid, (T)C_.P_inv_shoup[primeid]);
-            A[j | 1] = modmult<algo>(modsub(in[1], A[j | 1], primeid), (T)C_.P_inv[primeid], primeid,
+            A[jS] =
+                modmult<algo>(modsub(in[0], A[jS], primeid), (T)C_.P_inv[primeid], primeid, (T)C_.P_inv_shoup[primeid]);
+            A[jS ^ 1] = modmult<algo>(modsub(in[1], A[jS ^ 1], primeid), (T)C_.P_inv[primeid], primeid,
                                      (T)C_.P_inv_shoup[primeid]);
         }
     }
@@ -445,6 +448,7 @@ __device__ __forceinline__ void multpt_fusion(char* buffer, const int logBD, con
 
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
 
@@ -453,13 +457,13 @@ __device__ __forceinline__ void multpt_fusion(char* buffer, const int logBD, con
 
         assert(primeid_rescale >= 0);
         if constexpr (1) {  // OpenFHE style rescale
-            A[j] = modadd(modmult<algo>(q_inv_temp, in[0], primeid),
-                          modmult<algo>(QlQlInvModqlDivqlModq_temp, A[j], primeid), primeid);
-            A[j | 1] = modadd(modmult<algo>(q_inv_temp, in[1], primeid),
-                              modmult<algo>(QlQlInvModqlDivqlModq_temp, A[j | 1], primeid), primeid);
+            A[jS] = modadd(modmult<algo>(q_inv_temp, in[0], primeid),
+                          modmult<algo>(QlQlInvModqlDivqlModq_temp, A[jS], primeid), primeid);
+            A[jS ^ 1] = modadd(modmult<algo>(q_inv_temp, in[1], primeid),
+                              modmult<algo>(QlQlInvModqlDivqlModq_temp, A[jS ^ 1], primeid), primeid);
         } else {
-            A[j] = modmult<algo>(q_inv_temp, modsub(in[0], A[j], primeid), primeid);
-            A[j | 1] = modmult<algo>(q_inv_temp, modsub(in[1], A[j | 1], primeid), primeid);
+            A[jS] = modmult<algo>(q_inv_temp, modsub(in[0], A[jS], primeid), primeid);
+            A[jS ^ 1] = modmult<algo>(q_inv_temp, modsub(in[1], A[jS ^ 1], primeid), primeid);
         }
     }
 }
@@ -471,34 +475,35 @@ __device__ __forceinline__ void ksk_dot_fusion(char* buffer, const int logBD, co
 
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T ksk1[2], ksk2[2], in2[2], in1[2];
 
         if constexpr (sizeof(T) == 8) {
 
             ((int4*)ksk2)[0] = ((int4*)kska)[OFFSET_2T(i)];
-            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
-            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            in2[0] = modmult<algo>(A[jS], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[jS ^ 1], ksk2[1], primeid);
             ((int4*)c1)[OFFSET_2T(i)] = ((int4*)&in2)[0];
 
             ((int4*)ksk1)[0] = ((int4*)kskb)[OFFSET_2T(i)];
-            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
-            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            in1[0] = modmult<algo>(A[jS], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[jS ^ 1], ksk1[1], primeid);
             ((int4*)c0)[OFFSET_2T(i)] = ((int4*)&in1)[0];
 
         } else {
             // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
             ksk2[0] = kska[OFFSET_T(i)];
             ksk2[1] = kska[OFFSET_T(i) | 1];
-            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
-            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            in2[0] = modmult<algo>(A[jS], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[jS ^ 1], ksk2[1], primeid);
             c1[OFFSET_T(i)] = in2[0];
             c1[OFFSET_T(i) | 1] = in2[1];
 
             ksk1[0] = kskb[OFFSET_T(i)];
             ksk1[1] = kskb[OFFSET_T(i) | 1];
-            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
-            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            in1[0] = modmult<algo>(A[jS], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[jS ^ 1], ksk1[1], primeid);
             c0[OFFSET_T(i)] = in1[0];
             c0[OFFSET_T(i) | 1] = in1[1];
         }
@@ -512,22 +517,23 @@ __device__ __forceinline__ void ksk_dot_acc_fusion(char* buffer, const int logBD
 
     for (int i = 0; i < M; i += 1) {
         T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
 
         T ksk1[2], ksk2[2], in2[2], in1[2], r0[2], r1[2];
 
         if constexpr (sizeof(T) == 8) {
 
             ((int4*)ksk2)[0] = ((int4*)kska)[OFFSET_2T(i)];
-            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
-            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            in2[0] = modmult<algo>(A[jS], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[jS ^ 1], ksk2[1], primeid);
             ((int4*)r1)[0] = ((int4*)res1)[OFFSET_2T(i)];
             in2[0] = modadd(in2[0], r1[0], primeid);
             in2[1] = modadd(in2[1], r1[1], primeid);
             ((int4*)res1)[OFFSET_2T(i)] = ((int4*)&in2)[0];
 
             ((int4*)ksk1)[0] = ((int4*)kskb)[OFFSET_2T(i)];
-            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
-            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            in1[0] = modmult<algo>(A[jS], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[jS ^ 1], ksk1[1], primeid);
             ((int4*)r0)[0] = ((int4*)res0)[OFFSET_2T(i)];
             in1[0] = modadd(in1[0], r0[0], primeid);
             in1[1] = modadd(in1[1], r0[1], primeid);
@@ -536,8 +542,8 @@ __device__ __forceinline__ void ksk_dot_acc_fusion(char* buffer, const int logBD
             // n32: scalar (OFFSET_T) port of the uint64 int4 path — uint32 limbs.
             ksk2[0] = kska[OFFSET_T(i)];
             ksk2[1] = kska[OFFSET_T(i) | 1];
-            in2[0] = modmult<algo>(A[j], ksk2[0], primeid);
-            in2[1] = modmult<algo>(A[j + 1], ksk2[1], primeid);
+            in2[0] = modmult<algo>(A[jS], ksk2[0], primeid);
+            in2[1] = modmult<algo>(A[jS ^ 1], ksk2[1], primeid);
             r1[0] = res1[OFFSET_T(i)];
             r1[1] = res1[OFFSET_T(i) | 1];
             in2[0] = modadd(in2[0], r1[0], primeid);
@@ -547,8 +553,8 @@ __device__ __forceinline__ void ksk_dot_acc_fusion(char* buffer, const int logBD
 
             ksk1[0] = kskb[OFFSET_T(i)];
             ksk1[1] = kskb[OFFSET_T(i) | 1];
-            in1[0] = modmult<algo>(A[j], ksk1[0], primeid);
-            in1[1] = modmult<algo>(A[j + 1], ksk1[1], primeid);
+            in1[0] = modmult<algo>(A[jS], ksk1[0], primeid);
+            in1[1] = modmult<algo>(A[jS ^ 1], ksk1[1], primeid);
             r0[0] = res0[OFFSET_T(i)];
             r0[1] = res0[OFFSET_T(i) | 1];
             in1[0] = modadd(in1[0], r0[0], primeid);
@@ -567,12 +573,10 @@ __device__ __forceinline__ void forward_negacyclic_scale(char* buffer, const int
 
     if constexpr (0) {  // High bandwidth
         for (int i = 0; i < M; i += 1) {
-            A(i)
-            [tid] = modmult<ALGO_BARRETT>(
-                A(i)[tid], ((T*)G_->psi_no[primeid])[tid * (gridDim.x * M) + M * blockIdx.x + i], primeid);
-            A(i)
-            [tid + blockDim.x] = modmult<ALGO_BARRETT>(
-                A(i)[tid + blockDim.x],
+            AS(i, tid) = modmult<ALGO_BARRETT>(
+                AS(i, tid), ((T*)G_->psi_no[primeid])[tid * (gridDim.x * M) + M * blockIdx.x + i], primeid);
+            AS(i, tid + blockDim.x) = modmult<ALGO_BARRETT>(
+                AS(i, tid + blockDim.x),
                 ((T*)G_->psi_no[primeid])[(tid + blockDim.x) * (gridDim.x * M) + M * blockIdx.x + i], primeid);
         }
     } else if constexpr (0) {
@@ -585,8 +589,8 @@ __device__ __forceinline__ void forward_negacyclic_scale(char* buffer, const int
                 aux[0] = modmult<4>(aux[0], root, primeid);
                 aux[1] = modmult<4>(aux[1], root, primeid);
             }
-            A(i)[tid] = modmult<4>(A(i)[tid], aux[0], primeid);
-            A(i)[tid + blockDim.x] = modmult<4>(A(i)[tid + blockDim.x], aux[1], primeid);
+            AS(i, tid) = modmult<4>(AS(i, tid), aux[0], primeid);
+            AS(i, tid + blockDim.x) = modmult<4>(AS(i, tid + blockDim.x), aux[1], primeid);
         }
     } else {
         const uint32_t logBD = __clz(blockDim.x);
@@ -631,8 +635,8 @@ __device__ __forceinline__ void forward_negacyclic_scale(char* buffer, const int
                 aux2 = modmult<algo>(aux, fourth_root, primeid);
             }
 
-            A(i)[tid] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[tid], aux, primeid);
-            A(i)[tid + blockDim.x] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[tid + blockDim.x], aux2, primeid);
+            AS(i, tid) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, tid), aux, primeid);
+            AS(i, tid + blockDim.x) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, tid + blockDim.x), aux2, primeid);
         }
     }
 }
@@ -645,15 +649,13 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
 
     if constexpr (0) {  // High bandwidth
         for (int i = 0; i < M; i += 1) {
-            A(i)
-            [tid] = modmult<ALGO_BARRETT>(
-                A(i)[tid], ((T*)G_->inv_psi_no[primeid])[tid * (gridDim.x * M) + M * blockIdx.x + i], primeid);
-            A(i)
-            [tid + blockDim.x] = modmult<ALGO_BARRETT>(
-                A(i)[tid + blockDim.x],
+            AS(i, tid) = modmult<ALGO_BARRETT>(
+                AS(i, tid), ((T*)G_->inv_psi_no[primeid])[tid * (gridDim.x * M) + M * blockIdx.x + i], primeid);
+            AS(i, tid + blockDim.x) = modmult<ALGO_BARRETT>(
+                AS(i, tid + blockDim.x),
                 ((T*)G_->inv_psi_no[primeid])[(tid + blockDim.x) * (gridDim.x * M) + M * blockIdx.x + i], primeid);
-            A(i)[tid] = modmult<ALGO_SHOUP>(A(i)[tid], C_.N, primeid, C_.N_shoup[primeid]);
-            A(i)[tid + blockDim.x] = modmult<ALGO_SHOUP>(A(i)[tid + blockDim.x], C_.N, primeid, C_.N_shoup[primeid]);
+            AS(i, tid) = modmult<ALGO_SHOUP>(AS(i, tid), C_.N, primeid, C_.N_shoup[primeid]);
+            AS(i, tid + blockDim.x) = modmult<ALGO_SHOUP>(AS(i, tid + blockDim.x), C_.N, primeid, C_.N_shoup[primeid]);
         }
     } else if constexpr (0) {
         // Now, try to load this from bit-reversed psi array TODO
@@ -665,8 +667,8 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
                 aux[0] = modmult<4>(aux[0], root, primeid);
                 aux[1] = modmult<4>(aux[1], root, primeid);
             }
-            A(i)[tid] = modmult<4>(A(i)[tid], aux[0], primeid);
-            A(i)[tid + blockDim.x] = modmult<4>(A(i)[tid + blockDim.x], aux[1], primeid);
+            AS(i, tid) = modmult<4>(AS(i, tid), aux[0], primeid);
+            AS(i, tid + blockDim.x) = modmult<4>(AS(i, tid + blockDim.x), aux[1], primeid);
         }
     } else {
         const uint32_t logBD = __clz(blockDim.x);
@@ -719,8 +721,8 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
                 aux2 = modmult<algo>(aux, fourth_root, primeid);
             }
 
-            A(i)[tid] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[tid], aux, primeid);
-            A(i)[tid + blockDim.x] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[tid + blockDim.x], aux2, primeid);
+            AS(i, tid) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, tid), aux, primeid);
+            AS(i, tid + blockDim.x) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, tid + blockDim.x), aux2, primeid);
         }
     }
 }

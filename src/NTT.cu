@@ -100,7 +100,15 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                 } else {
                     int2 aux;
                     aux = ((int2*)dat)[OFFSET_2T(i)];
-                    ((int2*)(A(i)))[j >> 1] = aux;
+                    // swizzled: logical j / j+1 live at pos / pos^1 (same quad, lane bit 0),
+                    // so the 8-B store stays aligned — only the pair ORDER can flip.
+                    const int pos = swz_pos<T>(i, j);
+                    if (pos & 1) {
+                        const int t_ = aux.x;
+                        aux.x = aux.y;
+                        aux.y = t_;
+                    }
+                    ((int2*)(A(i)))[pos >> 1] = aux;
                 }
             }
         }
@@ -145,11 +153,11 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             }
 
             if constexpr (algo == FIDESlib::ALGO_SHOUP) {
-                A(i)[j] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[j], psi_aux[0], primeid);
-                A(i)[j + 1] = modmult<FIDESlib::ALGO_BARRETT>(A(i)[j + 1], psi_aux[1], primeid);
+                AS(i, j) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, j), psi_aux[0], primeid);
+                AS(i, j + 1) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, j + 1), psi_aux[1], primeid);
             } else {
-                A(i)[j] = modmult<algo>(A(i)[j], psi_aux[0], primeid);
-                A(i)[j + 1] = modmult<algo>(A(i)[j + 1], psi_aux[1], primeid);
+                AS(i, j) = modmult<algo>(AS(i, j), psi_aux[0], primeid);
+                AS(i, j + 1) = modmult<algo>(AS(i, j + 1), psi_aux[1], primeid);
             }
         }
     }
@@ -176,8 +184,8 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             psiaux_shoup = psi_shoup[psiid];
 
         for (int i = 0; i < M; ++i) {
-            T& a0 = A(i)[j1];
-            T& a1 = A(i)[j2];
+            T& a0 = AS(i, j1);
+            T& a1 = AS(i, j2);
             if constexpr (algo == 3) {
                 GS_butterfly<T, algo>(a0, a1, psiaux, primeid, psiaux_shoup);
             } else {
@@ -189,10 +197,10 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
     __syncthreads();
     for (int i = 0; i < M; ++i) {
         T aux[2];
-        aux[0] = A(i)[tid];
-        aux[1] = A(i)[tid + m];
-        A(i)[tid] = modadd(aux[0], aux[1], primeid);
-        A(i)[tid + m] = modsub(aux[0], aux[1], primeid);
+        aux[0] = AS(i, tid);
+        aux[1] = AS(i, tid + m);
+        AS(i, tid) = modadd(aux[0], aux[1], primeid);
+        AS(i, tid + m) = modsub(aux[0], aux[1], primeid);
     }
 
     // Obs: Almacenamos el array transpuesto ambas veces
@@ -220,8 +228,8 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                 const int pos_trasp = (M * gridDim.x) * (col_init + i) + M * blockIdx.x + (j & 2);
                 const int pos_res = (col_init + i);
                 assert(pos_trasp < gridDim.x * 2 * blockDim.x * M);
-                ((T*)&aux)[0] = A((j & 2))[pos_res];
-                ((T*)&aux)[1] = A((j & 2) + 1)[pos_res];
+                ((T*)&aux)[0] = AS((j & 2), pos_res);
+                ((T*)&aux)[1] = AS((j & 2) + 1, pos_res);
 
                 ((int4*)res)[pos_trasp >> 1] = aux;
             }
@@ -232,10 +240,10 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                 const int pos_trasp = (M / 2) * ((gridDim.x) * (col_init + i) + blockIdx.x) + (j & 2);
                 const int pos_res = (col_init + i);
                 assert(pos_trasp < gridDim.x * 2 * blockDim.x * M);
-                aux.x = A(2 * (j & 2))[pos_res];
-                aux.y = A(2 * (j & 2) + 1)[pos_res];
-                aux.z = A(2 * (j & 2) + 2)[pos_res];
-                aux.w = A(2 * (j & 2) + 3)[pos_res];
+                aux.x = AS(2 * (j & 2), pos_res);
+                aux.y = AS(2 * (j & 2) + 1, pos_res);
+                aux.z = AS(2 * (j & 2) + 2, pos_res);
+                aux.w = AS(2 * (j & 2) + 3, pos_res);
                 // int4 slot = 2*(gridDim*(col)+bx) + (j&2)/2: >>1 keeps the (j&2) pair offset
                 // ((4X+(j&2))>>2 collapses both j&2 threads onto one slot — write race + half
                 // the outputs never written). Mirrors the u32 transposed LOAD in NTT__ (>>1).
@@ -395,8 +403,8 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                                                                   primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
                     }
                     if constexpr (1) {
-                        A(j & 2)[pos_res] = ((uint64_t*)&aux)[0];
-                        A((j & 2) + 1)[pos_res] = ((uint64_t*)&aux)[1];
+                        AS(j & 2, pos_res) = ((uint64_t*)&aux)[0];
+                        AS((j & 2) + 1, pos_res) = ((uint64_t*)&aux)[1];
                     } else {
                         temp[0][i & 1] = ((uint64_t*)&aux)[0];
                         temp[1][i & 1] = ((uint64_t*)&aux)[1];
@@ -439,10 +447,14 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 // The old `(int4*)A(...) + t` offset by t int4s WITHIN row 2*(j&2): rows +1..+3
                 // were never written and row 0's columns got smeared — every U32 forward NTT
                 // produced garbage while the INTT (different load path) was exact.
-                ((int4*)A(2 * (j & 2)))[col_init >> 2] = temp[0];
-                ((int4*)A(2 * (j & 2) + 1))[col_init >> 2] = temp[1];
-                ((int4*)A(2 * (j & 2) + 2))[col_init >> 2] = temp[2];
-                ((int4*)A(2 * (j & 2) + 3))[col_init >> 2] = temp[3];
+                // Swizzled: the quad stays one aligned int4, so the vector store survives; the
+                // slot moves (swz_quad) and the four register lanes get permuted (swz_perm4).
+#pragma unroll
+                for (int t_ = 0; t_ < 4; ++t_) {
+                    const int row = 2 * (j & 2) + t_;
+                    ((int4*)A(row))[swz_quad<T>(row, col_init)] =
+                        swz_perm4(temp[t_], swz_lx<T>(row, col_init));
+                }
             }
 
             __syncthreads();
@@ -453,8 +465,8 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 if constexpr (!second) {
                     assert(primeid_rescale >= 0);
                     for (int i = 0; i < M; i += 1) {
-                        CKKS::SwitchModulus(A(i)[tid], primeid_rescale, primeid);
-                        CKKS::SwitchModulus(A(i)[tid + blockDim.x], primeid_rescale, primeid);
+                        CKKS::SwitchModulus(AS(i, tid), primeid_rescale, primeid);
+                        CKKS::SwitchModulus(AS(i, tid + blockDim.x), primeid_rescale, primeid);
                     }
                 }
             }
@@ -479,10 +491,10 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
         A[tid | m] = modsub(aux[0], aux[1], primeid);
          */
                 // T aux[2]; // esto causa error de alineamiento lol
-                T aux0 = A(i)[tid];
-                T aux1 = A(i)[tid + m];
-                A(i)[tid] = modadd(aux0, aux1, primeid);
-                A(i)[tid + m] = modsub(aux0, aux1, primeid);
+                T aux0 = AS(i, tid);
+                T aux1 = AS(i, tid + m);
+                AS(i, tid) = modadd(aux0, aux1, primeid);
+                AS(i, tid + m) = modsub(aux0, aux1, primeid);
             }
 
             m >>= 1;
@@ -503,10 +515,8 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     __syncwarp();
 
                 for (int i = 0; i < M; i += 1) {
-                    T* A = (T*)(buffer + (i << (logBD)));
-
-                    T& aux1 = A[j1];
-                    T& aux2 = A[j2];
+                    T& aux1 = AS(i, j1);
+                    T& aux2 = AS(i, j2);
                     if constexpr (algo == 3) {
                         CT_butterfly<T, algo>(aux1, aux2, psiaux, primeid, psiaux_barret);
                     } else {
@@ -515,6 +525,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 }
             }
 
+            // ⚠️ Everything in this `if constexpr (0)` block is DEAD and was NOT converted to
+            // the swizzled accessor (AS / swz_*). Re-enabling any of it against a u32 limb
+            // without swizzling its A(i)[..] indices will silently read the wrong elements.
             if constexpr (0) {
                 if constexpr (1) {
                     assert(m <= warpSize);
@@ -646,7 +659,6 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
             if (!second) {
 
                 for (int i = 0; i < M; i += 1) {
-                    const T* A = (T*)(buffer + (i << (logBD)));
                     int4 aux;
 
                     {  // Low bandwidth
@@ -686,11 +698,11 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     }
 
                     if constexpr (algo == ALGO_SHOUP) {
-                        ((T*)&aux)[0] = modmult<ALGO_BARRETT>(A[j], (T)((T*)&aux)[0], primeid);
-                        ((T*)&aux)[1] = modmult<ALGO_BARRETT>(A[j + 1], (T)((T*)&aux)[1], primeid);
+                        ((T*)&aux)[0] = modmult<ALGO_BARRETT>(AS(i, j), (T)((T*)&aux)[0], primeid);
+                        ((T*)&aux)[1] = modmult<ALGO_BARRETT>(AS(i, j + 1), (T)((T*)&aux)[1], primeid);
                     } else {
-                        ((T*)&aux)[0] = modmult<algo>(A[j], (T)((T*)&aux)[0], primeid);
-                        ((T*)&aux)[1] = modmult<algo>(A[j + 1], (T)((T*)&aux)[1], primeid);
+                        ((T*)&aux)[0] = modmult<algo>(AS(i, j), (T)((T*)&aux)[0], primeid);
+                        ((T*)&aux)[1] = modmult<algo>(AS(i, j + 1), (T)((T*)&aux)[1], primeid);
                     }
 
                     if constexpr (sizeof(T) == 8) {
@@ -721,11 +733,19 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     ksk_dot_acc_fusion<T, algo, M>(buffer, logBD, j, primeid, res, res2, pt, kskb);
                 } else {
                     for (int i = 0; i < M; i += 1) {
-                        const T* A = (T*)(buffer + (i << (logBD)));
                         if constexpr (sizeof(T) == 8) {
-                            ((int4*)res)[OFFSET_2T(i)] = ((int4*)A)[tid];
+                            ((int4*)res)[OFFSET_2T(i)] = ((int4*)A(i))[tid];
                         } else {
-                            ((int2*)res)[OFFSET_2T(i)] = ((int2*)A)[tid];
+                            // swizzled: logical j / j+1 sit at pos / pos^1, so the 8-B load
+                            // stays aligned; undo the pair order before writing out.
+                            const int pos = swz_pos<T>(i, j);
+                            int2 out = ((int2*)A(i))[pos >> 1];
+                            if (pos & 1) {
+                                const int t_ = out.x;
+                                out.x = out.y;
+                                out.y = t_;
+                            }
+                            ((int2*)res)[OFFSET_2T(i)] = out;
                         }
                     }
                 }
