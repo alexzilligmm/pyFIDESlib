@@ -285,6 +285,23 @@ __forceinline__ __device__ uint32_t Neal_reduce_32(const uint64_t c, const uint3
     return c_lo;
 }
 
+/* Lever 3 (lazy-reduction BConv): exact `a mod p` for ANY a < 2^64, p < 2^32.
+ *
+ * Why not modreduce<>/Neal_reduce_32: that reducer does `uint32_t rx = c >> (qbit-2)` and then
+ * `rx << (30-qbit)`, so its input is bounded at roughly 2^56 — precisely one 28x28 product. It
+ * is the right tool for reduce-after-every-multiply and the wrong one for an accumulator, which
+ * is what makes the lazy BConv shape need its own reducer rather than reusing that path.
+ *
+ * mu = floor(2^64/p) gives q_hat = floor(a*mu / 2^64) in {floor(a/p)-1, floor(a/p)}: writing
+ * mu = (2^64 - e)/p with 0 <= e < p, a*mu/2^64 = a/p - a*e/(p*2^64) and a*e/(p*2^64) < 1 for
+ * a < 2^64. So the remainder lands in [0, 2p) and ONE conditional subtract finishes it. The
+ * result is the exact canonical residue, so callers stay bit-exact against the eager form. */
+__forceinline__ __device__ uint32_t modreduce_lazy(const uint64_t a, const int primeid) {
+    const uint64_t p = C_.primes[primeid];
+    const uint64_t r = a - __umul64hi(a, C_.prime_mu64[primeid]) * p;
+    return (uint32_t)(r >= p ? r - p : r);
+}
+
 template <ALGO algo>
 __device__ uint32_t modreduce(const uint64_t a, const int primeid) {
     //if(threadIdx.x == 0 && blockIdx.x == 0) printf("Prime %d: %lu \n", primeid, p);

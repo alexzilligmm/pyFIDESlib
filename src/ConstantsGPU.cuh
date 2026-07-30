@@ -32,6 +32,12 @@ struct Constants {
     uint64_t type;
     uint64_t primes[MAXP];
     uint64_t prime_better_barret_mu[MAXP];
+    /* Lever 3 (lazy-reduction BConv): floor(2^64 / p). Neal_reduce_32 cannot reduce an
+     * ACCUMULATOR — its `rx = c >> (qbit-2)` truncates to uint32_t, bounding its input at
+     * ~2^56, i.e. exactly one 28x28 product. Deferring the reduction across a BConv dot
+     * needs a reducer valid on the whole u64 range, which is what this constant is for.
+     * See modreduce_lazy() in ModMult.cuh. 512 B added to the 64 KB bank. */
+    uint64_t prime_mu64[MAXP];
     uint32_t prime_bits[MAXP];
     uint8_t table[MAXP * MAXP * 8];
 

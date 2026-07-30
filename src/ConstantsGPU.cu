@@ -32,6 +32,15 @@ __global__ void printConstants() {
     printf("\n");
 }
 
+/* Lever 3 (lazy-reduction BConv): floor(2^64 / q), the reciprocal for a Barrett reduction
+ * valid across the WHOLE u64 range — unlike Neal_reduce_32's mu, which is tuned to a single
+ * product and whose reducer truncates its input to ~2^56. A BConv dot that defers reduction
+ * accumulates n products of up to (q-1)^2, so it needs this one. q is an odd prime > 2, so
+ * the quotient fits comfortably in u64. */
+uint64_t mu64_precomp(const uint64_t q) {
+    return (uint64_t)((((__uint128_t)1) << 64) / (__uint128_t)q);
+}
+
 uint64_t mu_new(const uint64_t q, const uint32_t num_bits) {
     __uint128_t res =
         (((__uint128_t)1) << (2 * num_bits + (VERSION == DHEM ? 3 : (VERSION == NEIL ? 1 : 0)))) / ((__uint128_t)q);
@@ -195,6 +204,7 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
             hC_.N_inv_shoup[i] = shoup_precomp(hC_.N_inv[i], i, host_constants);
 
             hC_.prime_better_barret_mu[i] = mu_new(q[i].p, q[i].bits);
+            hC_.prime_mu64[i] = mu64_precomp(q[i].p);
             hC_.prime_bits[i] = q[i].bits;
         }
 
@@ -207,6 +217,7 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
             ;
 
             hC_.prime_better_barret_mu[hC_.L + i] = mu_new(hC_.primes[hC_.L + i], p[i].bits);
+            hC_.prime_mu64[hC_.L + i] = mu64_precomp(hC_.primes[hC_.L + i]);
             hC_.prime_bits[hC_.L + i] = p[i].bits;
         }
     }

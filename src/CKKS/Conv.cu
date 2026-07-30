@@ -7,6 +7,14 @@
 
 #include <cuda_runtime.h>
 
+/* Lever 3 (2026-07-30): LAZY REDUCTION in the u32 BConv arms — accumulate the raw 32x32->64
+ * products and reduce once (modreduce_lazy) instead of a Shoup multiply + modadd per term.
+ * Default ON; build with -DFIDESLIB_LAZY_BCONV=0 to restore the eager reference arm, which is
+ * how the wall A/B is run (there is no env knob — the arms are compile-time). */
+#ifndef FIDESLIB_LAZY_BCONV
+#define FIDESLIB_LAZY_BCONV 1
+#endif
+
 namespace FIDESlib::CKKS {
 
 template <typename T>
@@ -119,6 +127,17 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                 // U64 chains keep the generic arm; branch is grid-uniform (no divergence).
                 // E4: matrix reads go through the u32 shadow copies (filled iff type==0) —
                 // halves the constant stream this kernel pulls through L2 per output limb.
+                // Lever 3 (LAZY REDUCTION): same shape as DecompAndModUpConv's arm below —
+                // raw 32x32->64 products accumulated, ONE modreduce_lazy at the end, bit-exact.
+                // Bound here is C_.K special primes (~5) x 2^56, decades short of u64.
+#if FIDESLIB_LAZY_BCONV
+                uint64_t acc = 0;
+                for (int i = 0; i < C_.K; ++i) {
+                    const int m = MODDOWN_MATRIX(i, primeid);
+                    acc += (uint64_t)(uint32_t)buff[i * blockDim.x + tid] * (uint64_t)G_->ModDown_matrix32[m];
+                }
+                ((uint32_t*)a[j])[idx] = modreduce_lazy(acc, primeid);
+#else  // reference EAGER form — kept as the A/B arm and the bit-exactness reference
                 uint32_t res = 0;
                 for (int i = 0; i < C_.K; ++i) {
                     const int m = MODDOWN_MATRIX(i, primeid);
@@ -129,6 +148,7 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                                  primeid);
                 }
                 ((uint32_t*)a[j])[idx] = res;
+#endif
                 continue;
             }
             __uint128_t res = 0;
@@ -302,6 +322,34 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                     // primeid_j). This kernel is the #1 bootstrap kernel (17.3%).
                     // E4: u32 shadow matrices (see ModDown2) — this kernel is the #1
                     // bootstrap kernel, its matrix stream is the largest constant reader.
+                    // Lever 3 (LAZY REDUCTION, Cheddar 4.2): accumulate the raw 32x32->64
+                    // products and reduce ONCE, instead of a Shoup multiply + modadd per term.
+                    // Per term this is ONE instruction: ptxas narrows `(uint64_t)a * (uint64_t)b`
+                    // on two u32 operands to mul.wide.u32 and folds the accumulator in as the
+                    // addend, emitting `IMAD.WIDE.U32 Racc, Ra, Rb, Racc` (verified in SASS).
+                    // Against the eager form's ~9 ops/term, with one modreduce_lazy amortized.
+                    // DO NOT "fix" this into inline PTX mul.wide.u32: that pins the multiply but
+                    // blocks the fused accumulate, costing an extra IADD3 per term. The genuine
+                    // 64x64 emulation (IMAD.WIDE.U32 with carry-out + the .X carry-in variant) is
+                    // what the __uint128_t arm below compiles to — this arm never touches it.
+                    // BIT-EXACT: sum(b_i*m_i) mod p == sum(b_i*m_i mod p) mod p, and the sum
+                    // itself is computed exactly — no wraparound, see the bound below.
+                    // OVERFLOW: buff entries are residues < 2^28 and matrix32 < p_j < 2^28, so
+                    // each product < 2^56 and n_d_n (primes per digit, ~5 here) would have to
+                    // exceed 2^8 to threaten u64. Cheddar needs a range adjustment every 4
+                    // products because it accumulates SIGNED with ~30-bit primes; at 28 bits
+                    // and unsigned we need none, and no Montgomery form either.
+#if FIDESLIB_LAZY_BCONV
+                    uint64_t acc = 0;
+                    for (int i_ = 0; i_ < n_d_n; ++i_) {
+                        const int primeid = C_.primeid_digit_from[d][i_];
+                        const int m = MODUPIDX_MATRIX(n - 1, d, primeid, primeid_j);
+                        acc += (uint64_t)(uint32_t)buff[i_ * blockDim.x + tid] *
+                               (uint64_t)G_->DecompAndModUp_matrix32[m];
+                    }
+                    assert(b[j_] != nullptr);
+                    ((uint32_t*)b[j_])[idx] = modreduce_lazy(acc, primeid_j);
+#else  // reference EAGER form — kept as the A/B arm and the bit-exactness reference
                     uint32_t res32 = 0;
                     for (int i_ = 0; i_ < n_d_n; ++i_) {
                         const int primeid = C_.primeid_digit_from[d][i_];
@@ -314,6 +362,7 @@ __global__ void DecompAndModUpConv(void** __restrict__ a, const int __grid_const
                     }
                     assert(b[j_] != nullptr);
                     ((uint32_t*)b[j_])[idx] = res32;
+#endif
                     continue;
                 }
 
