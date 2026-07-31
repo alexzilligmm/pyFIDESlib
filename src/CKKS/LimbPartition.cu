@@ -1222,8 +1222,21 @@ void LimbPartition::freeSpecialLimbs() {
  * Precision unchanged — the width predicate is byte-identical to copy_'s. */
 /* bytes_per_limb == 0 means "unknown or non-uniform widths" -> fall back to the typed
  * kernels, which branch per limb. See uniform_limb_bytes(). */
+#ifndef FIDESLIB_COPY_ABLATE
+#define FIDESLIB_COPY_ABLATE 0
+#endif
+
 static inline void launch_copy_limbs(uint32_t N, uint32_t nlimbs, cudaStream_t stream, void** src, void** dst,
                                      size_t bytes_per_limb = 0) {
+#if FIDESLIB_COPY_ABLATE
+    // DIAGNOSTIC (default 0) — WRONG results by design: skip the limb copy entirely. The kernel
+    // itself is already at its ceiling (1203 GB/s, within 6 % of a driver memcpy), so the only
+    // lever left on `copy_bytes_` is ELIMINATING copies, not speeding them up. This bounds that:
+    // 127 launches / 1.30 ms serialized per bootstrap, from the ~16 `.copy()` sites in
+    // ApproxModEval.cu and CacheMirLinear.cu. Deleting ALL of them is an upper bound — a real
+    // liveness/in-place pass could only remove the subset whose source is dead.
+    return;
+#endif
     if (nlimbs == 0)
         return;
     /* Type-unaware byte copy at 16 B/thread — THE path when the width is known.
