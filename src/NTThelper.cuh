@@ -212,6 +212,24 @@ __device__ __forceinline__ int4 swz_perm4(int4 v, [[maybe_unused]] const int c) 
 #define FIDESLIB_NTT_TWIDDLE_ABLATE 0
 #endif
 
+// ── DIAGNOSTIC ONLY — NEVER SHIP THIS AT 1. Bounds the LAST open item in TO-TRY §2.2: TMA for
+// the strided tile moves. The stage-1 transposed LOAD (`NTT__`) and the final transposed STORE
+// (`INTT__`) are the only global<->shared accesses with real per-thread address math
+// (IMAD/LEA/SHF over col_init, gridDim.x, blockIdx.x, j&2) — and the biggest launch is
+// ISSUE-limited, not bandwidth-limited, which is the whole argument for moving that math into
+// a copy engine.
+//
+// Setting this to 1 replaces those two indices with a plain linear one — same access COUNT,
+// same int4 width, same bytes moved, but no address arithmetic and a fully coalesced pattern.
+// **Results are WRONG by construction** (the transpose is what makes the 4-step NTT correct).
+// It removes strictly MORE than TMA could recover, so the wall delta is a hard upper bound on
+// the whole TMA rewrite — which is worth a day of descriptor plumbing only if this is large.
+// The shared-side indexing (AS / swz_*) is deliberately left untouched, so this isolates the
+// GLOBAL side alone.
+#ifndef FIDESLIB_NTT_TRANSPOSE_ABLATE
+#define FIDESLIB_NTT_TRANSPOSE_ABLATE 0
+#endif
+
 // ── TO-TRY §2.2 candidate 2: EXTENDED ON-THE-FLY TWIDDLES (EOT) at the middle-scale site ──
 // The ablation above bounded this site at −0.910 ms (12/12 pairs, t=−14.3), so it is worth
 // generating rather than loading.

@@ -315,7 +315,12 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             const int col_init = j & ~2;
             for (int i = 0; i < M; ++i) {
                 int4 aux;
+#if FIDESLIB_NTT_TRANSPOSE_ABLATE
+                // WRONG RESULTS BY DESIGN — transposed-index ablation, see NTThelper.cuh.
+                const int pos_trasp = 2 * (blockIdx.x * (blockDim.x * M) + i * blockDim.x + tid);
+#else
                 const int pos_trasp = (M * gridDim.x) * (col_init + i) + M * blockIdx.x + (j & 2);
+#endif
                 const int pos_res = (col_init + i);
                 assert(pos_trasp < gridDim.x * 2 * blockDim.x * M);
                 ((T*)&aux)[0] = AS((j & 2), pos_res);
@@ -327,7 +332,12 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             const int col_init = j & ~2;
             for (int i = 0; i < M / 2; ++i) {
                 int4 aux;
+#if FIDESLIB_NTT_TRANSPOSE_ABLATE
+                // WRONG RESULTS BY DESIGN — transposed-index ablation, see NTThelper.cuh.
+                const int pos_trasp = 2 * (blockIdx.x * (blockDim.x * (M / 2)) + i * blockDim.x + tid);
+#else
                 const int pos_trasp = (M / 2) * ((gridDim.x) * (col_init + i) + blockIdx.x) + (j & 2);
+#endif
                 const int pos_res = (col_init + i);
                 assert(pos_trasp < gridDim.x * 2 * blockDim.x * M);
                 aux.x = AS(2 * (j & 2), pos_res);
@@ -477,7 +487,12 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 const int col_init = j & ~2;
                 for (int i = 0; i < M; i += 1) {
                     int4 aux;
+#if FIDESLIB_NTT_TRANSPOSE_ABLATE
+                    // WRONG RESULTS BY DESIGN — transposed-index ablation, see NTThelper.cuh.
+                    const int pos_transp = 2 * (blockIdx.x * (blockDim.x * M) + i * blockDim.x + tid);
+#else
                     const int pos_transp = M * gridDim.x * (col_init + i) + M * blockIdx.x + (j & 2);
+#endif
                     const int pos_res = (col_init + i);
                     //((int4*)aux)[0] = ((int4*)dat)[pos_transp >> 1];
                     aux = ((int4*)dat)[pos_transp >> 1];
@@ -512,7 +527,12 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 int4 temp[4];
                 for (int i = 0; i < M / 2; i += 1) {
                     int4 aux;
+#if FIDESLIB_NTT_TRANSPOSE_ABLATE
+                    // WRONG RESULTS BY DESIGN — transposed-index ablation, see NTThelper.cuh.
+                    const int pos_transp = 2 * (blockIdx.x * (blockDim.x * (M / 2)) + i * blockDim.x + tid);
+#else
                     const int pos_transp = (M / 2) * (gridDim.x * (col_init + i) + blockIdx.x) + (j & 2);
+#endif
                     //                   const int pos_res = (col_init + i);
                     aux = ((int4*)dat)[pos_transp >> 1];
                     if constexpr (mode == NTT_RESCALE2 && !second) {
