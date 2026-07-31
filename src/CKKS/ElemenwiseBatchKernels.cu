@@ -1641,6 +1641,10 @@ __global__ void dotProductLtBatchedPt2___(void*** c0_out, void*** c1_out, void**
 // The host sizes the shared buffer with sizeof(__uint128_t) (LimbPartitionBatch.cu), so the
 // U32 arm's uint64_t accumulator simply under-uses it — over-allocation is the safe direction.
 template <typename T, typename ACC>
+#ifndef FIDESLIB_LT_CTIN_ABLATE
+#define FIDESLIB_LT_CTIN_ABLATE 0
+#endif
+
 __device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*** c1_out, void*** c0_in,
                                                            void*** c1_in, void*** pts, const int bStep,
                                                            const int gStep, const int n, const int idx,
@@ -1656,7 +1660,16 @@ __device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*
 
     for (int k = blockIdx.z; k < n; k += gridDim.z) {
         for (int i = 0; i < bStep; ++i) {
+            // DIAGNOSTIC (FIDESLIB_LT_CTIN_ABLATE, default 0 — WRONG results by design):
+            // delete the CIPHERTEXT input stream, keep every plaintext load and all arithmetic.
+            // Those inputs are exactly the rotation results hoistedRotateDotKSKRegen_ materialises,
+            // so this bounds the READ half of TO-TRY §2.4's linear-transform fusion. The value is
+            // idx-dependent so nothing downstream gets folded away.
+#if FIDESLIB_LT_CTIN_ABLATE
+            const T in = (T)(idx + i);
+#else
             const T in = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
+#endif
 
             for (int j = 0; j < gStep; ++j) {
                 void** pt_partition = pts[k * bStep * gStep + j * bStep + i];
