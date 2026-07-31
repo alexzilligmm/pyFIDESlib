@@ -1003,6 +1003,10 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 // Registers are the other cliff (this campaign's recurring one): 16 accumulator PAIRS are
 // live across the digit loop by construction, so budget ~80 and check STACK/LOCAL = 0 with
 // cuobjdump --dump-resource-usage before running anything.
+#ifndef FIDESLIB_HOISTED_SCATTER_ABLATE
+#define FIDESLIB_HOISTED_SCATTER_ABLATE 0
+#endif
+
 template <int KSK_BITS>
 __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
     hoistedRotateDotKSKRegen_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
@@ -1102,7 +1106,18 @@ __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
         const int rot_index = indexes[j];
 #pragma unroll
         for (int w = 0; w < SLOTS; ++w) {
+            // DIAGNOSTIC (FIDESLIB_HOISTED_SCATTER_ABLATE, default 0 — WRONG results by design):
+            // automorph_slot is brev -> odd-multiply -> brev, i.e. a TOTAL scatter, so these four
+            // stores are fully scattered writes. Replacing the index with the linear one keeps
+            // every store and all the arithmetic but makes the writes coalesced, bounding what
+            // the scatter itself costs. That decides TO-TRY §2.4: if the scatter is expensive it
+            // is fixable by staging through shared memory (small change); if it is cheap, §2.4's
+            // prize must be the intermediate round-trip and needs the full LT fusion.
+#if FIDESLIB_HOISTED_SCATTER_ABLATE
+            const uint32_t out_idx = (uint32_t)(base + w);
+#else
             const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+#endif
             if (primeid < C_.L) {
                 ((uint32_t*)out1[j][pos_dec])[out_idx] = aux1[w];
                 ((uint32_t*)out2[j][pos_dec])[out_idx] = aux2[w];
