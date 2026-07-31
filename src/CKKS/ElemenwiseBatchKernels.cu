@@ -730,6 +730,48 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #define FIDESLIB_FUSED_REGEN_MINCTA 4
 #endif
 
+// ksk_dot session ablations (2026-07-31; all default 0, WRONG results by design). Each bounds
+// one candidate prize in BOTH regen kernels before anything is built, per TO-TRY §0:
+//   KSK_REGEN_ABLATE — delete the whole ChaCha regen (ceiling for any cheaper sampler/spec);
+//   KSK_ESC_ABLATE   — keep the base block, delete the rejection escalation only (the spec-v2
+//                      question is REGEN−ESC vs ESC alone);
+//   KSKB_ABLATE      — delete the kskb global stream (ceiling for any further packing);
+//   DIN_ABLATE       — delete the digit read (the read half of a BConv→dot vertical fusion).
+#ifndef FIDESLIB_KSK_REGEN_ABLATE
+#define FIDESLIB_KSK_REGEN_ABLATE 0
+#endif
+#ifndef FIDESLIB_KSK_ESC_ABLATE
+#define FIDESLIB_KSK_ESC_ABLATE 0
+#endif
+#ifndef FIDESLIB_KSKB_ABLATE
+#define FIDESLIB_KSKB_ABLATE 0
+#endif
+#ifndef FIDESLIB_DIN_ABLATE
+#define FIDESLIB_DIN_ABLATE 0
+#endif
+// Staged kskb unpack for the regen kernels (2026-07-31 ksk_dot session). The kskb-stream
+// ablation bounds its cost at −2.33 ms/bts and ncu shows both regen kernels LATENCY-bound
+// (53–60 % DRAM, 24 %/13 % warps): per (digit, thread) the per-coefficient kskUnpack issues
+// 16 × 2 overlapping word loads whose addresses ptxas only materialises coefficient by
+// coefficient at the register ceiling. Staging loads the thread's whole 448-bit span once
+// (14 words + 1 masked-out guard, base word-aligned because 16·28 = 448 ≡ 0 mod 32) and
+// extracts from registers — 15 independent loads issued up front instead of 32 dependent
+// ones. KSK_BITS == 28 only (27 is not word-aligned per thread and is not live on this
+// chain: uniform width = max prime bits = 28 at 56-bit first mod); other widths keep the
+// per-coefficient path.
+// LEVEL 2: additionally issue the staged kb loads AND the four din uint4 loads BEFORE the
+// ChaCha block — the regen is ~600+ cycles of pure ALU with no dependence on either stream,
+// so it becomes the latency-hider for the very loads the ablations priced (kskb −2.33 ms,
+// din −1.31 ms), instead of stalling after it.
+#ifndef FIDESLIB_KSKB_STAGE
+#define FIDESLIB_KSKB_STAGE 0
+#endif
+// Launch-bounds pin for the 4-slot cooperative regen kernel. 0 = no pin (ptxas natural
+// demand). NEVER inherit a tier — sweep it (the ledger's rule, learned three times).
+#ifndef FIDESLIB_DOT_REGEN4_MINCTA
+#define FIDESLIB_DOT_REGEN4_MINCTA 0
+#endif
+
 /* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
  * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
  * per (rotation, digit) would rival the ChaCha block itself. m = floor(2^32/p) gives
@@ -737,6 +779,50 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 __device__ __forceinline__ uint32_t modByRecip(const uint32_t v, const uint32_t p, const uint32_t m) {
     const uint32_t r = v - __umulhi(v, m) * p;
     return r >= p ? r - p : r;
+}
+
+// Helpers for the 4-slot cooperative regen kernels (fusedDotKSKRegen4_ below and
+// hoistedRotateDotKSKRegen4_ further down — see the latter's header comment for the design).
+__device__ __forceinline__ uint32_t sel4(const uint32_t k, const uint32_t v0, const uint32_t v1, const uint32_t v2,
+                                         const uint32_t v3) {
+    uint32_t r = v0;
+    r = (k == 1) ? v1 : r;
+    r = (k == 2) ? v2 : r;
+    r = (k == 3) ? v3 : r;
+    return r;
+}
+
+/* One cooperative ChaCha12 block across a 4-lane group (width-4 shuffles, segment-relative
+ * lane ids). Lane k holds column k = words {k, k+4, k+8, k+12}; outputs are the
+ * feedforwarded column, still in COLUMN order. */
+__device__ __forceinline__ void chachaCoop4(const uint32_t gmask, const uint32_t k, const uint32_t key0,
+                                            const uint32_t key4, const uint32_t ctr, const uint32_t digit,
+                                            const uint32_t modulus, uint32_t& oa, uint32_t& ob, uint32_t& oc,
+                                            uint32_t& od) {
+    const uint32_t A = sel4(k, 0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u);
+    const uint32_t D = sel4(k, ctr, digit, modulus, kskexpand::kDomainSep);
+    uint32_t a = A, b = key0, c = key4, d = D;
+#pragma unroll
+    for (int r = 0; r < kskexpand::kRounds; r += 2) {
+        a += b; d ^= a; d = __funnelshift_l(d, d, 16);
+        c += d; b ^= c; b = __funnelshift_l(b, b, 12);
+        a += b; d ^= a; d = __funnelshift_l(d, d, 8);
+        c += d; b ^= c; b = __funnelshift_l(b, b, 7);
+        b = __shfl_sync(gmask, b, (k + 1) & 3u, 4);
+        c = __shfl_sync(gmask, c, (k + 2) & 3u, 4);
+        d = __shfl_sync(gmask, d, (k + 3) & 3u, 4);
+        a += b; d ^= a; d = __funnelshift_l(d, d, 16);
+        c += d; b ^= c; b = __funnelshift_l(b, b, 12);
+        a += b; d ^= a; d = __funnelshift_l(d, d, 8);
+        c += d; b ^= c; b = __funnelshift_l(b, b, 7);
+        b = __shfl_sync(gmask, b, (k + 3) & 3u, 4);
+        c = __shfl_sync(gmask, c, (k + 2) & 3u, 4);
+        d = __shfl_sync(gmask, d, (k + 1) & 3u, 4);
+    }
+    oa = a + A;
+    ob = b + key0;
+    oc = c + key4;
+    od = d + D;
 }
 
 // Lever 1b-ii stage B, second consumer (2026-07-30): the SAME barrier-free register shape as
@@ -789,8 +875,26 @@ __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
         const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
         const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
 
+#if FIDESLIB_KSKB_STAGE >= 2
+        uint32_t kb[15];
+        if constexpr (KSK_BITS == 28) {
+#pragma unroll
+            for (int t = 0; t < 15; ++t)
+                kb[t] = ((const uint32_t*)kskbp)[(((uint32_t)base * KSK_BITS) >> 5) + t];
+        }
+        uint4 din4[SLOTS / 4];
+#pragma unroll
+        for (int q = 0; q < SLOTS / 4; ++q)
+            din4[q] = ((const uint4*)inp)[q];
+#endif
         uint32_t ks[16];
+#if FIDESLIB_KSK_REGEN_ABLATE
+#pragma unroll
+        for (int w = 0; w < 16; ++w)
+            ks[w] = (b0 * 2654435761u) ^ ((uint32_t)i * 0x9e3779b9u) ^ (uint32_t)w;
+#else
         kskexpand::chacha_block(aseed.k, b0, (uint32_t)i, pval, ks);
+#if !FIDESLIB_KSK_ESC_ABLATE
         uint32_t need = 0;
 #pragma unroll
         for (int w = 0; w < 16; ++w)
@@ -810,20 +914,48 @@ __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
                     break;
             }
         }
+#endif
+#endif
 
+#if FIDESLIB_KSKB_STAGE == 1
+        uint32_t kb[15];
+        if constexpr (KSK_BITS == 28) {
+#pragma unroll
+            for (int t = 0; t < 15; ++t)
+                kb[t] = ((const uint32_t*)kskbp)[(((uint32_t)base * KSK_BITS) >> 5) + t];
+        }
+#endif
 #pragma unroll
         for (int q = 0; q < SLOTS / 4; ++q) {
+#if FIDESLIB_DIN_ABLATE
+            const uint32_t in4[4] = {1u, 2u, 3u, 5u};
+#elif FIDESLIB_KSKB_STAGE >= 2
+            const uint32_t in4[4] = {din4[q].x, din4[q].y, din4[q].z, din4[q].w};
+#else
             const uint4 iv = *(const uint4*)(inp + 4 * q);
             const uint32_t in4[4] = {iv.x, iv.y, iv.z, iv.w};
+#endif
 #pragma unroll
             for (int r = 0; r < 4; ++r) {
                 const int w = 4 * q + r;  // both loops unroll => compile-time index
                 const uint32_t kska = modByRecip(ks[w], pval, recip);
                 uint32_t kskb;
+#if FIDESLIB_KSKB_ABLATE
+                kskb = pval - 1u;
+#elif FIDESLIB_KSKB_STAGE
+                if constexpr (KSK_BITS == 28) {
+                    const uint32_t lo = (uint32_t)(w * KSK_BITS);
+                    kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                } else if constexpr (KSK_BITS)
+                    kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+                else
+                    kskb = ((const uint32_t*)kskbp)[base + w];
+#else
                 if constexpr (KSK_BITS)
                     kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
                 else
                     kskb = ((const uint32_t*)kskbp)[base + w];
+#endif
                 a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(in4[r], kska, primeid), primeid);
                 a2[w] = modadd(a2[w], modmult<ALGO_BARRETT>(in4[r], kskb, primeid), primeid);
             }
@@ -839,6 +971,134 @@ __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
     }
 }
 
+// 4-slot cooperative port of fusedDotKSKRegen_ — same shape as hoistedRotateDotKSKRegen4_
+// below (see its header comment for the design; helpers sel4/chachaCoop4 are defined there,
+// above the launcher). No rotation loop, no automorphism: stores stay coalesced uint4.
+template <int KSK_BITS>
+__global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d,
+                                   int id, int num_special, int init, KskSeedWords aseed, const uint32_t n16) {
+    constexpr int SLOTS = 4;
+    const uint32_t gtid = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);
+    const int base = (int)(gtid * SLOTS);
+    const uint32_t b0 = gtid >> 2;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t k = lane & 3u;
+    const uint32_t gmask = 0xFu << (lane & ~3u);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint32_t pval = (uint32_t)C_.primes[primeid];
+    const uint32_t recip = 0xFFFFFFFFu / pval;
+    const uint32_t m_p = recip * pval;
+    const uint32_t key0 = sel4(k, aseed.k[0], aseed.k[1], aseed.k[2], aseed.k[3]);
+    const uint32_t key4 = sel4(k, aseed.k[4], aseed.k[5], aseed.k[6], aseed.k[7]);
+
+    uint32_t a1[SLOTS], a2[SLOTS];
+#pragma unroll
+    for (int w = 0; w < SLOTS; ++w) {
+        a1[w] = 0;
+        a2[w] = 0;
+    }
+
+    for (int i = 0; i < num_d; ++i) {
+        const bool decomp = (i == primeid_digit);
+        const int pos = C_.pos_in_digit[i][primeid];
+        const int p = decomp ? pos_dec : pos;
+        const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
+        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+
+        const uint4 iv = *(const uint4*)inp;
+        uint32_t kb[5];
+        if constexpr (KSK_BITS == 28) {
+            const uint32_t bit0 = (uint32_t)base * KSK_BITS;
+#pragma unroll
+            for (int t = 0; t < 5; ++t)
+                kb[t] = ((const uint32_t*)kskbp)[(bit0 >> 5) + t];
+        }
+
+        uint32_t ca, cb, cc, cd;
+        chachaCoop4(gmask, k, key0, key4, b0, (uint32_t)i, pval, ca, cb, cc, cd);
+        uint32_t need = ((ca >= m_p) ? 1u : 0u) | ((cb >= m_p) ? 2u : 0u) | ((cc >= m_p) ? 4u : 0u) |
+                        ((cd >= m_p) ? 8u : 0u);
+        uint32_t gneed = need;
+        gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+        gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+        if (gneed) {
+            for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                uint32_t ea, eb, ec, ed;
+                chachaCoop4(gmask, k, key0, key4, b0 + t * n16, (uint32_t)i, pval, ea, eb, ec, ed);
+                if (need & 1u) {
+                    ca = ea;
+                    if (ea < m_p)
+                        need &= ~1u;
+                }
+                if (need & 2u) {
+                    cb = eb;
+                    if (eb < m_p)
+                        need &= ~2u;
+                }
+                if (need & 4u) {
+                    cc = ec;
+                    if (ec < m_p)
+                        need &= ~4u;
+                }
+                if (need & 8u) {
+                    cd = ed;
+                    if (ed < m_p)
+                        need &= ~8u;
+                }
+                gneed = need;
+                gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+                gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+                if (!gneed)
+                    break;
+            }
+        }
+
+        uint32_t ks[SLOTS] = {0u, 0u, 0u, 0u};
+#pragma unroll
+        for (int s = 0; s < 4; ++s) {
+            const uint32_t pub = sel4((k - (uint32_t)s) & 3u, ca, cb, cc, cd);
+            const uint32_t rcv = __shfl_sync(gmask, pub, (k + (uint32_t)s) & 3u, 4);
+            const uint32_t r = (k + (uint32_t)s) & 3u;
+            ks[0] = (r == 0) ? rcv : ks[0];
+            ks[1] = (r == 1) ? rcv : ks[1];
+            ks[2] = (r == 2) ? rcv : ks[2];
+            ks[3] = (r == 3) ? rcv : ks[3];
+        }
+
+        const uint32_t in4[4] = {iv.x, iv.y, iv.z, iv.w};
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint32_t kska = modByRecip(ks[w], pval, recip);
+            uint32_t kskb;
+            if constexpr (KSK_BITS == 28) {
+                if (gtid & 1u) {
+                    const uint32_t lo = 16u + (uint32_t)(w * KSK_BITS);
+                    kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                } else {
+                    const uint32_t lo = (uint32_t)(w * KSK_BITS);
+                    kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                }
+            } else if constexpr (KSK_BITS)
+                kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+            else
+                kskb = ((const uint32_t*)kskbp)[base + w];
+            a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(in4[w], kska, primeid), primeid);
+            a2[w] = modadd(a2[w], modmult<ALGO_BARRETT>(in4[w], kskb, primeid), primeid);
+        }
+    }
+
+    uint32_t* o1 = (primeid < C_.L) ? (uint32_t*)out1[pos_dec] : (uint32_t*)sout1[primeid - C_.L];
+    uint32_t* o2 = (primeid < C_.L) ? (uint32_t*)out2[pos_dec] : (uint32_t*)sout2[primeid - C_.L];
+    *(uint4*)(o1 + base) = make_uint4(a1[0], a1[1], a1[2], a1[3]);
+    *(uint4*)(o2 + base) = make_uint4(a2[0], a2[1], a2[2], a2[3]);
+}
+
 // Same-TU launcher (see the .cuh note: cross-TU template-kernel launches hit
 // 'invalid device function' — the launch must live in the defining TU). Supported packed
 // widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
@@ -852,11 +1112,20 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
     if (a_seed == nullptr)
         regen_shape = 0;
     // Shape 1 (stage B) gives each thread 16 coefficients, so grid.x shrinks by 16 — done here
-    // rather than at the three call sites, which all pass the same N/block.x grid.
+    // rather than at the three call sites, which all pass the same N/block.x grid. The 4-slot
+    // cooperative shape shrinks it by 4 instead (same env switch as the hoisted launcher).
+    static const int regen_slots = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_REGEN_SLOTS");
+        // Default 4 = the cooperative shape (banked 2026-07-31: -0.95 ms/bts, trio-gated);
+        // 16 = the previous one-block-per-thread kernel, kept as the fallback arm.
+        const int v = e ? std::atoi(e) : 4;
+        return (v == 4 || v == 16) ? v : 4;
+    }();
+    const bool coop4 = regen_shape == 1 && regen_slots == 4;
     if (regen_shape == 1) {
         if (grid.x % 16u != 0u)
             throw std::runtime_error("launchFusedDotKSK_2: regen shape 1 needs grid.x % 16 == 0");
-        grid.x /= 16u;
+        grid.x /= coop4 ? 4u : 16u;
     }
     const size_t smem = regen_shape == 2 ? (size_t)num_d * 128 * sizeof(uint32_t) : 0;  // stage-A tile only
 /* Macro, not a helper template, for one reason: BITS must reach the kernel as a COMPILE-TIME
@@ -864,7 +1133,10 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
  * to be selected by a switch over instantiations. The macro keeps the argument list — 15+
  * parameters — written once per launcher instead of once per (width x arm) pair. */
 #define FIDESLIB_FUSED_DOT_ARM(BITS)                                                                             \
-    if (regen_shape == 1)                                                                                        \
+    if (coop4)                                                                                                   \
+        fusedDotKSKRegen4_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,         \
+                                                             num_special, init, sw, n16);                        \
+    else if (regen_shape == 1)                                                                                   \
         fusedDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,          \
                                                             num_special, init, sw, n16);                         \
     else if (regen_shape == 2)                                                                                   \
@@ -1152,12 +1424,30 @@ __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
             const uint32_t* dinp = (const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base;
             const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
 
+#if FIDESLIB_KSKB_STAGE >= 2
+            uint32_t kb[15];
+            if constexpr (KSK_BITS == 28) {
+#pragma unroll
+                for (int t = 0; t < 15; ++t)
+                    kb[t] = ((const uint32_t*)kskbp)[(((uint32_t)base * KSK_BITS) >> 5) + t];
+            }
+            uint4 din4[SLOTS / 4];
+#pragma unroll
+            for (int q = 0; q < SLOTS / 4; ++q)
+                din4[q] = ((const uint4*)dinp)[q];
+#endif
             // --- the `a` half, regenerated: one block, then the spec's escalation for the
             // few words the rejection sampler refused. Attempt t reads word w of block
             // b0 + t*n16 — expand_coeff's sequence verbatim, so the values are the expanded
             // rows bit for bit (the whole point: bitcmp stays a real gate).
             uint32_t ks[16];
+#if FIDESLIB_KSK_REGEN_ABLATE
+#pragma unroll
+            for (int w = 0; w < 16; ++w)
+                ks[w] = (b0 * 2654435761u) ^ ((uint32_t)i * 0x9e3779b9u) ^ (uint32_t)w;
+#else
             kskexpand::chacha_block(key, b0, (uint32_t)i, pval, ks);
+#if !FIDESLIB_KSK_ESC_ABLATE
             uint32_t need = 0;
 #pragma unroll
             for (int w = 0; w < 16; ++w)
@@ -1177,22 +1467,50 @@ __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
                         break;
                 }
             }
+#endif
+#endif
 
             // --- the dot itself. din1 is read as uint4 (the thread's 16 coefficients are
             // 64 B aligned by construction) so a warp still covers one contiguous 2 KB span.
+#if FIDESLIB_KSKB_STAGE == 1
+            uint32_t kb[15];
+            if constexpr (KSK_BITS == 28) {
+#pragma unroll
+                for (int t = 0; t < 15; ++t)
+                    kb[t] = ((const uint32_t*)kskbp)[(((uint32_t)base * KSK_BITS) >> 5) + t];
+            }
+#endif
 #pragma unroll
             for (int q = 0; q < SLOTS / 4; ++q) {
+#if FIDESLIB_DIN_ABLATE
+                const uint32_t d4[4] = {1u, 2u, 3u, 5u};
+#elif FIDESLIB_KSKB_STAGE >= 2
+                const uint32_t d4[4] = {din4[q].x, din4[q].y, din4[q].z, din4[q].w};
+#else
                 const uint4 dv = *(const uint4*)(dinp + 4 * q);
                 const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w};
+#endif
 #pragma unroll
                 for (int r = 0; r < 4; ++r) {
                     const int w = 4 * q + r;  // both loops unroll => compile-time index
                     const uint32_t kska = modByRecip(ks[w], pval, recip);
                     uint32_t kskb;
+#if FIDESLIB_KSKB_ABLATE
+                    kskb = pval - 1u;
+#elif FIDESLIB_KSKB_STAGE
+                    if constexpr (KSK_BITS == 28) {
+                        const uint32_t lo = (uint32_t)(w * KSK_BITS);
+                        kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                    } else if constexpr (KSK_BITS)
+                        kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+                    else
+                        kskb = ((const uint32_t*)kskbp)[base + w];
+#else
                     if constexpr (KSK_BITS)
                         kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
                     else
                         kskb = ((const uint32_t*)kskbp)[base + w];
+#endif
                     aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[r], kska, primeid), primeid);
                     aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(d4[r], kskb, primeid), primeid);
                 }
@@ -1225,6 +1543,192 @@ __global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
     }
 }
 
+// ============================ 4-slot cooperative regen ============================
+// (2026-07-31 ksk_dot session; user-authorized redesign.) The 16-slot regen kernel is
+// LATENCY-bound at 24 % occupancy: its 168 registers are forced by SLOTS = 16, which is
+// forced by "one ChaCha block per thread" — and the ablations price the exposed latency at
+// kskb −2.33 ms + din −1.31 ms while the ChaCha ALU itself measures FREE (−0.16). This
+// kernel decouples the two (FAILURE.md §2.12's recorded flip condition): each thread owns
+// FOUR consecutive slots and a 4-lane group computes each ChaCha block cooperatively —
+// column-per-lane, the diagonal rounds via 3 __shfl rotations in/out (verified bit-exact
+// against the spec reference in scripts/model_coop_chacha.py before this was written).
+// Per-thread live state collapses (8 accumulator regs instead of 32, 4 keystream words
+// instead of 16) → target ~2.5–3× the resident warps to hide the very latency the
+// ablations measured, paying ~1.4× ChaCha ALU per slot, which is measured free.
+// Escalation and modByRecip are word-order-independent, so the keystream stays in COLUMN
+// order (lane k holds words {k,k+4,k+8,k+12}) through the whole escalation loop and is
+// lane-transposed to slot order exactly once per accepted block.
+// All shuffles use the 4-lane group mask; group lanes never diverge from each other (the
+// escalation predicate is group-ORed first), which is what makes the masks legal.
+
+template <int KSK_BITS>
+__global__ void
+#if FIDESLIB_DOT_REGEN4_MINCTA
+    __launch_bounds__(128, FIDESLIB_DOT_REGEN4_MINCTA)
+#endif
+        hoistedRotateDotKSKRegen4_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
+                                   const int n, const int* indexes, void*** digits, int num_d, int id,
+                                   int num_special, int init, void** sc0, bool c0_modup,
+                                   const uint32_t* __restrict__ seeds, const uint32_t n16) {
+    constexpr int SLOTS = 4;
+    const uint32_t gtid = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);
+    const int base = (int)(gtid * SLOTS);      // first of this thread's 4 consecutive slots
+    const uint32_t b0 = gtid >> 2;             // the GROUP's ChaCha block (== slot >> 4, group-uniform)
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t k = lane & 3u;              // column index within the 4-lane group
+    const uint32_t gmask = 0xFu << (lane & ~3u);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint32_t pval = (uint32_t)C_.primes[primeid];
+    const uint32_t recip = 0xFFFFFFFFu / pval;
+    const uint32_t m_p = recip * pval;
+
+    const uint32_t* c0p = nullptr;
+    if (c0_modup || primeid < C_.L)
+        c0p = primeid < C_.L ? (const uint32_t*)c0[pos_dec] : (const uint32_t*)sc0[primeid - C_.L];
+    const bool c0_shoup = (!c0_modup && primeid < C_.L);
+
+    for (int j = 0; j < n; ++j) {
+        const int offset = j * 3 * 2 * C_.dnum;
+        const uint32_t* key = seeds + j * 8;
+        const uint32_t key0 = key[k];
+        const uint32_t key4 = key[4 + k];
+
+        uint32_t aux1[SLOTS], aux2[SLOTS];
+        if (c0p) {
+            const uint4 cv = *(const uint4*)(c0p + base);
+            const uint32_t c4[4] = {cv.x, cv.y, cv.z, cv.w};
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                aux1[w] = 0;
+                aux2[w] = c0_shoup ? modmult<ALGO_SHOUP>(c4[w], (uint32_t)C_.P[primeid], primeid,
+                                                        (uint32_t)C_.P_shoup[primeid])
+                                   : c4[w];
+            }
+        } else {
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                aux1[w] = 0;
+                aux2[w] = 0;
+            }
+        }
+
+        for (int i = 0; i < num_d; ++i) {
+            const bool decomp = (i == primeid_digit);
+            const int pos = C_.pos_in_digit[i][primeid];
+            const int p = decomp ? pos_dec : pos;
+            const uint32_t* dinp = (const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base;
+            const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+
+            // Issue both input streams before the ChaCha so the regen ALU hides their latency
+            // (the kbstage2 lesson, kept by construction here).
+            const uint4 dv = *(const uint4*)dinp;
+            uint32_t kb[5];
+            if constexpr (KSK_BITS == 28) {
+                const uint32_t bit0 = (uint32_t)base * KSK_BITS;  // == 112*gtid; &31 is 0 or 16
+#pragma unroll
+                for (int t = 0; t < 5; ++t)
+                    kb[t] = ((const uint32_t*)kskbp)[(bit0 >> 5) + t];
+            }
+
+            // --- cooperative regen, COLUMN order end to end (transpose once at the end) ---
+            uint32_t ca, cb, cc, cd;
+            chachaCoop4(gmask, k, key0, key4, b0, (uint32_t)i, pval, ca, cb, cc, cd);
+            uint32_t need = ((ca >= m_p) ? 1u : 0u) | ((cb >= m_p) ? 2u : 0u) | ((cc >= m_p) ? 4u : 0u) |
+                            ((cd >= m_p) ? 8u : 0u);
+            uint32_t gneed = need;
+            gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+            gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+            if (gneed) {
+                for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                    uint32_t ea, eb, ec, ed;
+                    chachaCoop4(gmask, k, key0, key4, b0 + t * n16, (uint32_t)i, pval, ea, eb, ec, ed);
+                    if (need & 1u) {
+                        ca = ea;
+                        if (ea < m_p)
+                            need &= ~1u;
+                    }
+                    if (need & 2u) {
+                        cb = eb;
+                        if (eb < m_p)
+                            need &= ~2u;
+                    }
+                    if (need & 4u) {
+                        cc = ec;
+                        if (ec < m_p)
+                            need &= ~4u;
+                    }
+                    if (need & 8u) {
+                        cd = ed;
+                        if (ed < m_p)
+                            need &= ~8u;
+                    }
+                    gneed = need;
+                    gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+                    gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+                    if (!gneed)
+                        break;
+                }
+            }
+
+            // --- lane transpose to slot order: ks[r] = word 4k+r = lane r's column word k.
+            // Step s: publish column word (k−s)&3, read from group lane (k+s)&3, store ks[(k+s)&3].
+            uint32_t ks[SLOTS] = {0u, 0u, 0u, 0u};
+#pragma unroll
+            for (int s = 0; s < 4; ++s) {
+                const uint32_t pub = sel4((k - (uint32_t)s) & 3u, ca, cb, cc, cd);
+                const uint32_t rcv = __shfl_sync(gmask, pub, (k + (uint32_t)s) & 3u, 4);
+                const uint32_t r = (k + (uint32_t)s) & 3u;
+                ks[0] = (r == 0) ? rcv : ks[0];
+                ks[1] = (r == 1) ? rcv : ks[1];
+                ks[2] = (r == 2) ? rcv : ks[2];
+                ks[3] = (r == 3) ? rcv : ks[3];
+            }
+
+            // --- the dot on this thread's 4 slots ---
+            const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w};
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                const uint32_t kska = modByRecip(ks[w], pval, recip);
+                uint32_t kskb;
+                if constexpr (KSK_BITS == 28) {
+                    // bit0&31 is 16 for odd gtid, 0 for even — branch so lo stays compile-time.
+                    if (gtid & 1u) {
+                        const uint32_t lo = 16u + (uint32_t)(w * KSK_BITS);
+                        kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                    } else {
+                        const uint32_t lo = (uint32_t)(w * KSK_BITS);
+                        kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                    }
+                } else if constexpr (KSK_BITS)
+                    kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
+                else
+                    kskb = ((const uint32_t*)kskbp)[base + w];
+                aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[w], kska, primeid), primeid);
+                aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(d4[w], kskb, primeid), primeid);
+            }
+        }
+
+        const int rot_index = indexes[j];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+            if (primeid < C_.L) {
+                ((uint32_t*)out1[j][pos_dec])[out_idx] = aux1[w];
+                ((uint32_t*)out2[j][pos_dec])[out_idx] = aux2[w];
+            } else {
+                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = aux1[w];
+                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = aux2[w];
+            }
+        }
+    }
+}
+
 void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
@@ -1233,8 +1737,25 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
  * template argument (Lever 1b-i measured a runtime-width variant at +2.4%), so the arms have
  * to be selected by a switch over instantiations. The macro keeps the argument list — 15+
  * parameters — written once per launcher instead of once per (width x arm) pair. */
+    // Shape selection for the regen arm: 16 = the shipped one-block-per-thread kernel,
+    // 4 = the cooperative 4-slot kernel (grid.x grows 4x — caller passes the /16 grid).
+    static const int regen_slots = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_REGEN_SLOTS");
+        // Default 4 = the cooperative shape (banked 2026-07-31: -0.95 ms/bts, trio-gated);
+        // 16 = the previous one-block-per-thread kernel, kept as the fallback arm.
+        const int v = e ? std::atoi(e) : 4;
+        return (v == 4 || v == 16) ? v : 4;
+    }();
+    const bool coop4 = seeds && regen_slots == 4;
+    dim3 grid4 = grid;
+    if (coop4)
+        grid4.x *= 4u;
 #define FIDESLIB_HOISTED_DOT_ARM(BITS)                                                                             \
-    if (seeds)                                                                                                     \
+    if (coop4)                                                                                                     \
+        hoistedRotateDotKSKRegen4_<BITS><<<grid4, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n,        \
+                                                                      indexes, digits, num_d, id, num_special,      \
+                                                                      init, sc0, c0_modup, seeds, n16);            \
+    else if (seeds)                                                                                                \
         hoistedRotateDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes, \
                                                                     digits, num_d, id, num_special, init, sc0,      \
                                                                     c0_modup, seeds, n16);                         \
