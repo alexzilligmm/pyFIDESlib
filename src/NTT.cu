@@ -8,6 +8,20 @@
 #include "ModMult.cuh"
 #include "NTT.cuh"
 
+// Evict-first loads for the NTT's read-once global streams (2026-07-31 late session; the
+// same L2-hygiene mechanism that paid 4x in the dot class). Every data limb is read exactly
+// once per stage, so keeping those lines resident only evicts streams that ARE reused
+// (twiddles, digits, LT inputs) in co-resident kernels. Loads only — the inter-stage buffer
+// stores must stay normal (the consumer stage reads them through L2).
+#ifndef FIDESLIB_NTT_LDCS
+#define FIDESLIB_NTT_LDCS 1
+#endif
+#if FIDESLIB_NTT_LDCS
+#define FIDESLIB_NTT_STREAM_LD(p) __ldcs(p)
+#else
+#define FIDESLIB_NTT_STREAM_LD(p) (*(p))
+#endif
+
 #include <cooperative_groups.h>
 #include <algorithm>
 #include <cassert>
@@ -95,11 +109,11 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             for (int i = 0; i < M; ++i) {
                 if constexpr (sizeof(T) == 8) {
                     int4 aux;
-                    aux = ((int4*)dat)[OFFSET_2T(i)];
+                    aux = FIDESLIB_NTT_STREAM_LD((const int4*)dat + OFFSET_2T(i));
                     ((int4*)(A(i)))[j >> 1] = aux;
                 } else {
                     int2 aux;
-                    aux = ((int2*)dat)[OFFSET_2T(i)];
+                    aux = FIDESLIB_NTT_STREAM_LD((const int2*)dat + OFFSET_2T(i));
                     // swizzled: logical j / j+1 live at pos / pos^1 (same quad, lane bit 0),
                     // so the 8-B store stays aligned — only the pair ORDER can flip.
                     const int pos = swz_pos<T>(i, j);
@@ -495,13 +509,13 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
 #endif
                     const int pos_res = (col_init + i);
                     //((int4*)aux)[0] = ((int4*)dat)[pos_transp >> 1];
-                    aux = ((int4*)dat)[pos_transp >> 1];
+                    aux = FIDESLIB_NTT_STREAM_LD((const int4*)dat + (pos_transp >> 1));
                     //aux[0] = dat[pos_transp];
                     //aux[1] = dat[pos_transp + 1];
                     if constexpr (mode == NTT_RESCALE2 && !second) {
                         // fused double drop: dat = qb limb (x2c), pt = qa top (va), both coeff
                         // domain, loaded with the identical transposed pattern (coalesced).
-                        const int4 aux2 = ((const int4*)pt)[pos_transp >> 1];
+                        const int4 aux2 = FIDESLIB_NTT_STREAM_LD((const int4*)pt + (pos_transp >> 1));
                         ((T*)&aux)[0] = rescale2_combine<T, algo>(((T*)&aux)[0], ((const T*)&aux2)[0], r2_ra, r2_rb,
                                                                   primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
                         ((T*)&aux)[1] = rescale2_combine<T, algo>(((T*)&aux)[1], ((const T*)&aux2)[1], r2_ra, r2_rb,
@@ -534,11 +548,11 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     const int pos_transp = (M / 2) * (gridDim.x * (col_init + i) + blockIdx.x) + (j & 2);
 #endif
                     //                   const int pos_res = (col_init + i);
-                    aux = ((int4*)dat)[pos_transp >> 1];
+                    aux = FIDESLIB_NTT_STREAM_LD((const int4*)dat + (pos_transp >> 1));
                     if constexpr (mode == NTT_RESCALE2 && !second) {
                         // fused double drop: dat = qb limb (x2c), pt = qa top (va), both coeff
                         // domain, loaded with the identical transposed pattern (coalesced).
-                        const int4 aux2 = ((const int4*)pt)[pos_transp >> 1];
+                        const int4 aux2 = FIDESLIB_NTT_STREAM_LD((const int4*)pt + (pos_transp >> 1));
                         aux.x = (int)rescale2_combine<T, algo>((T)aux.x, (T)aux2.x, r2_ra, r2_rb, primeid, r2_qinv_ab,
                                                                r2_K_ab, r2_C1, r2_K_bj);
                         aux.y = (int)rescale2_combine<T, algo>((T)aux.y, (T)aux2.y, r2_ra, r2_rb, primeid, r2_qinv_ab,
@@ -1005,6 +1019,8 @@ __global__ void NTT_(const Global::Globals* Globals, void** __restrict__ dat, co
         void** __restrict__ res, void** __restrict__ pt, const int __grid_constant__ primeid_rescale,      \
         void** __restrict__ res2, void** __restrict__ kskb);
 #include "ntt_types.inc"
+
+
 
 #undef VVV
 
