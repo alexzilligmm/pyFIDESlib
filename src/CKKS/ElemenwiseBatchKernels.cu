@@ -1626,7 +1626,9 @@ __global__ void
             const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
 
             // Issue both input streams before the ChaCha so the regen ALU hides their latency
-            // (the kbstage2 lesson, kept by construction here).
+            // (the kbstage2 lesson, kept by construction here). A software pipeline of the
+            // NEXT digit's loads was BUILT and lost +0.51 ms (0/3): +13 regs -> 9 -> 7
+            // blocks/SM, and occupancy is the binding resource at this shape.
             const uint4 dv = *(const uint4*)dinp;
             uint32_t kb[5];
             if constexpr (KSK_BITS == 28) {
@@ -2316,6 +2318,42 @@ __device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*
 // coefficients 2*idx and 2*idx+1 into one word and every store splattered 8 bytes across two
 // logical coefficients — the homomorphic DFT was decorrelated from its input. It did not fault
 // only because U32 limbs are over-allocated to 2N elements (Limb.cu:34).
+/* GSTEP-specialized variant (2026-07-31 late session): the generic body's runtime j-loop
+ * serializes the gStep plaintext loads behind one another, and ncu shows the kernel 45.6/issue
+ * on long_scoreboard with the pt stream 5 % L2-hit — pure cold-DRAM latency. Compile-time
+ * GSTEP (1) unrolls the pt loads so all of an i-iteration's loads are in flight together,
+ * (2) moves the accumulators from shared memory into registers, and (3) double-buffers the
+ * ciphertext read one i ahead. The generic body stays for every other (gStep, width). */
+template <typename T, typename ACC, int GSTEP>
+__device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void*** c1_out, void*** c0_in,
+                                                            void*** c1_in, void*** pts, const int bStep, const int n,
+                                                            const int idx, const int primeid) {
+    const bool im_c0 = threadIdx.y == 0;
+    void*** inputs = im_c0 ? c0_in : c1_in;
+    void*** outputs = im_c0 ? c0_out : c1_out;
+
+    for (int k = blockIdx.z; k < n; k += gridDim.z) {
+        ACC acc[GSTEP];
+        T in_next = ((T*)inputs[k * bStep][blockIdx.y])[idx];
+        for (int i = 0; i < bStep; ++i) {
+            const T in = in_next;
+            if (i + 1 < bStep)
+                in_next = ((T*)inputs[k * bStep + i + 1][blockIdx.y])[idx];
+#pragma unroll
+            for (int j = 0; j < GSTEP; ++j) {
+                void** pt_partition = pts[k * bStep * GSTEP + j * bStep + i];
+                ACC mult = 0;
+                if (pt_partition != nullptr)
+                    mult = (ACC)in * (ACC)((T*)pt_partition[blockIdx.y])[idx];
+                acc[j] = (i == 0) ? mult : acc[j] + mult;
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < GSTEP; ++j)
+            ((T*)outputs[k * GSTEP + j][blockIdx.y])[idx] = modreduce<ALGO_NATIVE>(acc[j], primeid);
+    }
+}
+
 __global__ void dotProductLtBatchedPt3___(void*** c0_out, void*** c1_out, void*** c0_in, void*** c1_in, void*** pts,
                                           const int bStep, const int gStep, const int primeidInit, const int n) {
     int idx = threadIdx.x + threadIdx.z * blockDim.x + blockIdx.x * blockDim.x * blockDim.z;
@@ -2326,6 +2364,12 @@ __global__ void dotProductLtBatchedPt3___(void*** c0_out, void*** c1_out, void**
     if (ISU64(primeid))
         dotProductLtBatchedPt3Body<uint64_t, __uint128_t>(c0_out, c1_out, c0_in, c1_in, pts, bStep, gStep, n, idx,
                                                           primeid, buffer);
+    else if (gStep == 2)
+        dotProductLtBatchedPt3BodyG<uint32_t, uint64_t, 2>(c0_out, c1_out, c0_in, c1_in, pts, bStep, n, idx, primeid);
+    else if (gStep == 4)
+        dotProductLtBatchedPt3BodyG<uint32_t, uint64_t, 4>(c0_out, c1_out, c0_in, c1_in, pts, bStep, n, idx, primeid);
+    else if (gStep == 1)
+        dotProductLtBatchedPt3BodyG<uint32_t, uint64_t, 1>(c0_out, c1_out, c0_in, c1_in, pts, bStep, n, idx, primeid);
     else
         dotProductLtBatchedPt3Body<uint32_t, uint64_t>(c0_out, c1_out, c0_in, c1_in, pts, bStep, gStep, n, idx,
                                                        primeid, buffer);
