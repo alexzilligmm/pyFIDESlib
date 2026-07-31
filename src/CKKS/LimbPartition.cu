@@ -2791,8 +2791,14 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
-        Scalar_mult_<ALGO_BARRETT><<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, elems, PARTITION(id, i), nullptr);
+        const int smul_bpt = fideslibAddBytes();
+        const size_t smul_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (smul_bpl && smul_bpt >= 16 && (smul_bpl % (size_t)(smul_bpt * 128)) == 0)
+            launchScalarMultBytes(dim3{(uint32_t)(smul_bpl / (smul_bpt * 128)), num_limbs}, dim3{128},
+                                  STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), nullptr, smul_bpt);
+        else
+            Scalar_mult_<ALGO_BARRETT><<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
+                limbptr.data + i, elems, PARTITION(id, i), nullptr);
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -3035,9 +3041,16 @@ void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*>
     //cudaMalloc(&d_psptr, psptr.size() * sizeof(void**));
     cudaMemcpyAsync(d_psptr, psptr.data(), psptr.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
 
-    if (!limb.empty())
-        eval_linear_w_sum_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
-            n, limbptr.data, d_psptr, elems, PARTITION(id, 0));
+    {
+        const int elws_bpt = fideslibAddBytes();
+        const size_t elws_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, 0, (size_t)limbsize, cc.N) : 0;
+        if (!limb.empty() && elws_bpl && elws_bpt >= 16 && (elws_bpl % (size_t)(elws_bpt * 128)) == 0)
+            launchEvalLinearWSumBytes(dim3{(uint32_t)(elws_bpl / (elws_bpt * 128)), (uint32_t)limbsize}, dim3{128},
+                                      s.ptr(), n, limbptr.data, d_psptr, elems, PARTITION(id, 0), elws_bpt);
+        else if (!limb.empty())
+            eval_linear_w_sum_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
+                n, limbptr.data, d_psptr, elems, PARTITION(id, 0));
+    }
     cudaFreeAsync(elems, s.ptr());
     cudaFreeAsync(d_psptr, s.ptr());
     for (uint32_t i = 0; i < n; ++i) {

@@ -65,6 +65,21 @@ __global__ void add_(void** a, void** b, const int primeid_init) {
 // fall back to the scalar kernel.
 template <int BYTES>
 __global__ void add_bytes_(void** a, void** b, const int primeid_init) {
+    if constexpr (BYTES == 8) {
+        const int i8 = threadIdx.x + blockIdx.x * blockDim.x;
+        const int primeid8 = C_.primeid_flattened[primeid_init + blockIdx.y];
+        if (ISU64(primeid8)) {
+            ((uint64_t*)a[blockIdx.y])[i8] =
+                modadd(((uint64_t*)a[blockIdx.y])[i8], ((const uint64_t*)b[blockIdx.y])[i8], primeid8);
+        } else {
+            uint2 va = ((uint2*)a[blockIdx.y])[i8];
+            const uint2 vb = ((const uint2*)b[blockIdx.y])[i8];
+            va.x = modadd(va.x, vb.x, primeid8);
+            va.y = modadd(va.y, vb.y, primeid8);
+            ((uint2*)a[blockIdx.y])[i8] = va;
+        }
+        return;
+    }
     constexpr int V = BYTES / 16;  // 16-byte chunks per thread
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -93,6 +108,21 @@ __global__ void add_bytes_(void** a, void** b, const int primeid_init) {
 
 template <int BYTES>
 __global__ void sub_bytes_(void** a, void** b, const int primeid_init) {
+    if constexpr (BYTES == 8) {
+        const int i8 = threadIdx.x + blockIdx.x * blockDim.x;
+        const int primeid8 = C_.primeid_flattened[primeid_init + blockIdx.y];
+        if (ISU64(primeid8)) {
+            ((uint64_t*)a[blockIdx.y])[i8] =
+                modsub(((uint64_t*)a[blockIdx.y])[i8], ((const uint64_t*)b[blockIdx.y])[i8], primeid8);
+        } else {
+            uint2 va = ((uint2*)a[blockIdx.y])[i8];
+            const uint2 vb = ((const uint2*)b[blockIdx.y])[i8];
+            va.x = modsub(va.x, vb.x, primeid8);
+            va.y = modsub(va.y, vb.y, primeid8);
+            ((uint2*)a[blockIdx.y])[i8] = va;
+        }
+        return;
+    }
     constexpr int V = BYTES / 16;
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -121,6 +151,22 @@ __global__ void sub_bytes_(void** a, void** b, const int primeid_init) {
 
 template <int BYTES, bool SUB>
 __global__ void scalar_addsub_bytes_(void** a, const uint64_t* b, const int primeid_init) {
+    if constexpr (BYTES == 8) {
+        const int i8 = threadIdx.x + blockIdx.x * blockDim.x;
+        const int primeid8 = C_.primeid_flattened[primeid_init + blockIdx.y];
+        if (ISU64(primeid8)) {
+            const uint64_t s8 = b[primeid8];
+            const uint64_t v8 = ((uint64_t*)a[blockIdx.y])[i8];
+            ((uint64_t*)a[blockIdx.y])[i8] = SUB ? modsub(v8, s8, primeid8) : modadd(v8, s8, primeid8);
+        } else {
+            const uint32_t s8 = (uint32_t)b[primeid8];
+            uint2 va = ((uint2*)a[blockIdx.y])[i8];
+            va.x = SUB ? modsub(va.x, s8, primeid8) : modadd(va.x, s8, primeid8);
+            va.y = SUB ? modsub(va.y, s8, primeid8) : modadd(va.y, s8, primeid8);
+            ((uint2*)a[blockIdx.y])[i8] = va;
+        }
+        return;
+    }
     constexpr int V = BYTES / 16;
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -162,7 +208,9 @@ int fideslibAddBytes() {
     static const int v = [] {
         const char* e = std::getenv("FIDESLIB_ADD_BYTES");
         const int x = (e && *e) ? std::atoi(e) : 16;
-        return (x == 16 || x == 32 || x == 64) ? x : 16;
+        // 12 B is deliberately absent: it does not TILE the limb (262144/(12*128) = 170.67) and
+        // these kernels carry no length, so the grid must cover the limb exactly.
+        return (x == 8 || x == 16 || x == 32 || x == 64) ? x : 16;
     }();
     return v;
 }
@@ -172,6 +220,7 @@ int fideslibAddBytes() {
 void launchAddBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int primeid_init,
                     int bytes_per_thread) {
     switch (bytes_per_thread) {
+        case 8: add_bytes_<8><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         case 32: add_bytes_<32><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         case 64: add_bytes_<64><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         default: add_bytes_<16><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
@@ -181,6 +230,7 @@ void launchAddBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void**
 void launchSubBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int primeid_init,
                     int bytes_per_thread) {
     switch (bytes_per_thread) {
+        case 8: sub_bytes_<8><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         case 32: sub_bytes_<32><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         case 64: sub_bytes_<64><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         default: sub_bytes_<16><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
@@ -191,12 +241,14 @@ void launchScalarAddSubBytes(dim3 grid, dim3 block, cudaStream_t stream, void** 
                              int primeid_init, int bytes_per_thread, bool sub) {
     if (sub) {
         switch (bytes_per_thread) {
+            case 8: scalar_addsub_bytes_<8, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             case 32: scalar_addsub_bytes_<32, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             case 64: scalar_addsub_bytes_<64, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             default: scalar_addsub_bytes_<16, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         }
     } else {
         switch (bytes_per_thread) {
+            case 8: scalar_addsub_bytes_<8, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             case 32: scalar_addsub_bytes_<32, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             case 64: scalar_addsub_bytes_<64, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
             default: scalar_addsub_bytes_<16, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;

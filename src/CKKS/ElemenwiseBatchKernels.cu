@@ -311,6 +311,102 @@ __global__ void copy_bytes_(void** a, void** b) {
 /* Cross-TU launcher. A __global__ TEMPLATE launched from a TU that only sees its declaration
  * gets a weak local stub with no device code in that TU's fatbin => 'invalid device function'
  * (documented for the dot kernels above, job 50426241). Keep every instantiation here. */
+
+// ── TO-TRY §2.3: bytes-indexed vectorizations of the last two 1-element-per-thread pointwise
+// kernels. Same rationale and same conventions as AddSub.cu's family (16 B/thread default; the
+// optimum is set by the grid shape, grid.y == nlimbs, not by the kernel's arithmetic).
+template <int BYTES, ALGO algo>
+__global__ void Scalar_mult_bytes_(void** a, const uint64_t* b, const __grid_constant__ int primeid_init,
+                                   const uint64_t* shoup_mu) {
+    constexpr int V = BYTES / 16;
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (ISU64(primeid)) {
+        const uint64_t s = b[primeid], mu = shoup_mu ? shoup_mu[primeid] : 0;
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            ulonglong2 va = ((ulonglong2*)a[blockIdx.y])[V * i + q];
+            va.x = modmult<algo>((uint64_t)va.x, s, primeid, mu);
+            va.y = modmult<algo>((uint64_t)va.y, s, primeid, mu);
+            ((ulonglong2*)a[blockIdx.y])[V * i + q] = va;
+        }
+    } else {
+        const uint32_t s = (uint32_t)b[primeid], mu = (uint32_t)(shoup_mu ? shoup_mu[primeid] : 0);
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            uint4 va = ((uint4*)a[blockIdx.y])[V * i + q];
+            va.x = modmult<algo>(va.x, s, primeid, mu);
+            va.y = modmult<algo>(va.y, s, primeid, mu);
+            va.z = modmult<algo>(va.z, s, primeid, mu);
+            va.w = modmult<algo>(va.w, s, primeid, mu);
+            ((uint4*)a[blockIdx.y])[V * i + q] = va;
+        }
+    }
+}
+
+template <int BYTES>
+__global__ void eval_linear_w_sum_bytes_(const __grid_constant__ int n, void** a, void*** bs, uint64_t* w,
+                                         const __grid_constant__ int primeid_init) {
+    constexpr int V = BYTES / 16;
+    constexpr ALGO algo = ALGO_BARRETT;
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (ISU64(primeid)) {
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            ulonglong2 acc;
+            const ulonglong2 v0 = ((const ulonglong2*)(bs[0])[blockIdx.y])[V * idx + q];
+            acc.x = modmult<algo>((uint64_t)v0.x, w[primeid], primeid);
+            acc.y = modmult<algo>((uint64_t)v0.y, w[primeid], primeid);
+            for (int i = 1; i < n; ++i) {
+                const ulonglong2 vi = ((const ulonglong2*)(bs[i])[blockIdx.y])[V * idx + q];
+                const uint64_t wi = w[i * MAXP + primeid];
+                acc.x = modadd((uint64_t)acc.x, modmult<algo>((uint64_t)vi.x, wi, primeid), primeid);
+                acc.y = modadd((uint64_t)acc.y, modmult<algo>((uint64_t)vi.y, wi, primeid), primeid);
+            }
+            ((ulonglong2*)a[blockIdx.y])[V * idx + q] = acc;
+        }
+    } else {
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            uint4 acc;
+            const uint4 v0 = ((const uint4*)(bs[0])[blockIdx.y])[V * idx + q];
+            const uint32_t w0 = (uint32_t)w[primeid];
+            acc.x = modmult<algo>(v0.x, w0, primeid);
+            acc.y = modmult<algo>(v0.y, w0, primeid);
+            acc.z = modmult<algo>(v0.z, w0, primeid);
+            acc.w = modmult<algo>(v0.w, w0, primeid);
+            for (int i = 1; i < n; ++i) {
+                const uint4 vi = ((const uint4*)(bs[i])[blockIdx.y])[V * idx + q];
+                const uint32_t wi = (uint32_t)w[i * MAXP + primeid];
+                acc.x = modadd(acc.x, modmult<algo>(vi.x, wi, primeid), primeid);
+                acc.y = modadd(acc.y, modmult<algo>(vi.y, wi, primeid), primeid);
+                acc.z = modadd(acc.z, modmult<algo>(vi.z, wi, primeid), primeid);
+                acc.w = modadd(acc.w, modmult<algo>(vi.w, wi, primeid), primeid);
+            }
+            ((uint4*)a[blockIdx.y])[V * idx + q] = acc;
+        }
+    }
+}
+
+void launchScalarMultBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, const uint64_t* b, int primeid_init,
+                           const uint64_t* shoup_mu, int bytes_per_thread) {
+    switch (bytes_per_thread) {
+        case 32: Scalar_mult_bytes_<32, ALGO_BARRETT><<<grid, block, 0, stream>>>(a, b, primeid_init, shoup_mu); break;
+        case 64: Scalar_mult_bytes_<64, ALGO_BARRETT><<<grid, block, 0, stream>>>(a, b, primeid_init, shoup_mu); break;
+        default: Scalar_mult_bytes_<16, ALGO_BARRETT><<<grid, block, 0, stream>>>(a, b, primeid_init, shoup_mu); break;
+    }
+}
+
+void launchEvalLinearWSumBytes(dim3 grid, dim3 block, cudaStream_t stream, int n, void** a, void*** bs, uint64_t* w,
+                               int primeid_init, int bytes_per_thread) {
+    switch (bytes_per_thread) {
+        case 32: eval_linear_w_sum_bytes_<32><<<grid, block, 0, stream>>>(n, a, bs, w, primeid_init); break;
+        case 64: eval_linear_w_sum_bytes_<64><<<grid, block, 0, stream>>>(n, a, bs, w, primeid_init); break;
+        default: eval_linear_w_sum_bytes_<16><<<grid, block, 0, stream>>>(n, a, bs, w, primeid_init); break;
+    }
+}
+
 void launchCopyBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int bytes_per_thread) {
     switch (bytes_per_thread) {
         case 16: copy_bytes_<16><<<grid, block, 0, stream>>>(a, b); break;

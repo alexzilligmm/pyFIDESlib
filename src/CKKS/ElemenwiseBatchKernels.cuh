@@ -126,6 +126,10 @@ __global__ void addScaleB_(void** a, void** b, void** c, const int primeid_init)
 __global__ void scaleByP_(void** a, const int primeid_init);
 
 __global__ void add___(void*** a, const int primeid_init, const int n);
+void launchScalarMultBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, const uint64_t* b, int primeid_init,
+                           const uint64_t* shoup_mu, int bytes_per_thread);
+void launchEvalLinearWSumBytes(dim3 grid, dim3 block, cudaStream_t stream, int n, void** a, void*** bs, uint64_t* w,
+                               int primeid_init, int bytes_per_thread);
 __global__ void add_reuse_b___(void*** a, void*** b, const int primeid_init, const int n, const int its);
 __global__ void sub_reuse_b___(void*** a, void*** b, const int primeid_init, const int n, const int its);
 __global__ void mult_reuse_b___(void*** a, void*** b, const int primeid_init, const int n, const int its);
