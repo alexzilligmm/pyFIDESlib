@@ -178,6 +178,15 @@ void RNSPoly::binomialMult(RNSPoly& c1, RNSPoly& in, const RNSPoly& d0, const RN
 }
 
 void RNSPoly::add(const RNSPoly& p) {
+#if FIDESLIB_COPY_CENSUS
+    {
+        void* bt[4];
+        const int n = backtrace(bt, 4);
+        void* site = (n > 2) ? bt[2] : (n > 1 ? bt[1] : nullptr);
+        std::lock_guard<std::mutex> g(g_copy_mu);
+        g_add_sites[site]++;
+    }
+#endif
 
     if (p.isModUp() && !this->isModUp()) {
         //std::cout << "Adapt non modup destination add" << std::endl;
@@ -739,6 +748,15 @@ void RNSPoly::multScalar(std::vector<uint64_t>& vector1) {
     }
 }
 void RNSPoly::add(const RNSPoly& a, const RNSPoly& b) {
+#if FIDESLIB_COPY_CENSUS
+    {
+        void* bt[4];
+        const int n = backtrace(bt, 4);
+        void* site = (n > 2) ? bt[2] : (n > 1 ? bt[1] : nullptr);
+        std::lock_guard<std::mutex> g(g_copy_mu);
+        g_add_sites[site]++;
+    }
+#endif
     assert(level <= a.level);
     assert(level <= b.level);
 #pragma omp parallel for num_threads(cc.GPUid.size())
@@ -798,6 +816,7 @@ void RNSPoly::subScalar(std::vector<uint64_t>& vector1) {
 namespace {
 std::mutex g_copy_mu;
 std::map<void*, long> g_copy_sites;
+std::map<void*, long> g_add_sites;
 struct CopyCensusDump {
     ~CopyCensusDump() {
         std::lock_guard<std::mutex> g(g_copy_mu);
@@ -805,6 +824,21 @@ struct CopyCensusDump {
         for (auto& kv : g_copy_sites) tot += kv.second;
         std::fprintf(stderr, "[copycensus] total RNSPoly::copy = %ld across %zu sites\n", tot,
                      g_copy_sites.size());
+        long atot = 0;
+        for (auto& kv : g_add_sites) atot += kv.second;
+        std::fprintf(stderr, "[addcensus] total RNSPoly::add = %ld across %zu sites\n", atot,
+                     g_add_sites.size());
+        {
+            std::vector<std::pair<void*, long>> av(g_add_sites.begin(), g_add_sites.end());
+            std::sort(av.begin(), av.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            for (auto& kv : av) {
+                Dl_info info{};
+                size_t off = 0;
+                if (dladdr(kv.first, &info) && info.dli_fbase)
+                    off = (size_t)((char*)kv.first - (char*)info.dli_fbase);
+                std::fprintf(stderr, "[addcensus] %6ld  +0x%zx\n", kv.second, off);
+            }
+        }
         std::vector<std::pair<void*, long>> v(g_copy_sites.begin(), g_copy_sites.end());
         std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
         for (auto& kv : v) {

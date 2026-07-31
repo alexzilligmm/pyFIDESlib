@@ -736,7 +736,54 @@ void LimbPartition::INTT(int batch, bool sync, INTT_fusion_fields fields) {
 #include "ntt_types.inc"
 #undef WWW
 
+#ifndef FIDESLIB_ADD_CENSUS
+#define FIDESLIB_ADD_CENSUS 0
+#endif
+#if FIDESLIB_ADD_CENSUS
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <cstdio>
+#include <map>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+#include <utility>
+namespace {
+std::mutex g_add_mu;
+std::map<void*, long> g_add_sites;
+struct AddCensusDump {
+    ~AddCensusDump() {
+        std::lock_guard<std::mutex> g(g_add_mu);
+        long tot = 0;
+        for (auto& kv : g_add_sites) tot += kv.second;
+        std::fprintf(stderr, "[addcensus] total LimbPartition::add = %ld across %zu sites\n", tot,
+                     g_add_sites.size());
+        std::vector<std::pair<void*, long>> v(g_add_sites.begin(), g_add_sites.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        for (auto& kv : v) {
+            Dl_info info{};
+            size_t off = 0;
+            if (dladdr(kv.first, &info) && info.dli_fbase)
+                off = (size_t)((char*)kv.first - (char*)info.dli_fbase);
+            std::fprintf(stderr, "[addcensus] %6ld  +0x%zx\n", kv.second, off);
+        }
+    }
+} g_add_dump;
+#define FIDESLIB_ADD_CENSUS_HIT()                                     \
+    do {                                                              \
+        void* bt[6];                                                  \
+        const int n_ = backtrace(bt, 6);                              \
+        void* site = (n_ > 4) ? bt[4] : (n_ > 1 ? bt[n_ - 1] : nullptr); \
+        std::lock_guard<std::mutex> g_(g_add_mu);                     \
+        g_add_sites[site]++;                                          \
+    } while (0)
+}  // namespace
+#else
+#define FIDESLIB_ADD_CENSUS_HIT() ((void)0)
+#endif
+
 void LimbPartition::add(const LimbPartition& p, const bool ext) {
+    FIDESLIB_ADD_CENSUS_HIT();
     cudaSetDevice(device);
     const int limbsize = getLimbSize(*level);
     s.wait(p.getS());
@@ -2765,6 +2812,7 @@ void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
 }
 
 void LimbPartition::add(const LimbPartition& a, const LimbPartition& b, const bool ext_a, const bool ext_b) {
+    FIDESLIB_ADD_CENSUS_HIT();
     cudaSetDevice(device);
     s.wait(a.getS());
     s.wait(b.getS());
