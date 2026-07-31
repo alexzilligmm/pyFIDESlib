@@ -121,8 +121,46 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
     __syncthreads();
 
     if constexpr (second) {
+        // EOT: the middle-scale exponent is affine in i, so hoist the base and iterate.
+        [[maybe_unused]] T eot_tw[2], eot_step[2];
+#if FIDESLIB_NTT_EOT
+        {
+            const uint32_t logBD_ = 32 - __clz(blockDim.x);
+            const uint32_t mask_lo_exp = (((C_.N) >> 1) | ((C_.N >> (logBD_)) - 1));
+            const uint32_t clzN = __clz(C_.N) + 2;
+            const uint32_t block_pos0 = blockIdx.x * M;  // the i = 0 term
+#pragma unroll
+            for (int k = 0; k < 2; ++k) {
+                const uint32_t br_j = __brev(j + k) >> (32 - logBD_);
+                const uint32_t exp = block_pos0 * br_j;
+                const uint32_t hi_exp_br = __brev(exp << clzN) & (blockDim.x - 1);
+                const uint32_t lo_exp = exp & mask_lo_exp;
+                if constexpr (algo == 3) {
+                    eot_tw[k] = modmult<algo>(((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
+                                              psi_shoup[hi_exp_br]);
+                } else {
+                    eot_tw[k] = modmult<algo>(psi[hi_exp_br], ((T*)G_->inv_psi_no[primeid])[lo_exp << 1], primeid);
+                }
+                // The per-i ratio is w^(-br_j). NOTE it comes from the FORWARD table at the
+                // complementary exponent, w^(N-br_j): `psi_no` is a clean power series
+                // (`psi_no[0] == 1`), whereas `inv_psi_no` is NOT — `inv_psi_no[0] != 1` and
+                // `inv_psi_no[2e]` is not even a root of unity, so it is only meaningful in
+                // combination with the `psi[hi]` factor of the split formula. Verified on device:
+                // psi_no[2*(N-br_j)] reproduces the measured ratio exactly, and psi_no[2*br_j] is
+                // its modular inverse. br_j == 0 would index 2N (one past the table) and its
+                // exponent is constant in i anyway, so the ratio is 1.
+                eot_step[k] = br_j ? ((T*)G_->psi_no[primeid])[(C_.N - br_j) << 1] : (T)1;
+            }
+        }
+#endif
         for (int i = 0; i < M; ++i) {
             T psi_aux[2];
+#if FIDESLIB_NTT_EOT
+            psi_aux[0] = eot_tw[0];
+            psi_aux[1] = eot_tw[1];
+            eot_tw[0] = modmult<ALGO_BARRETT>(eot_tw[0], eot_step[0], primeid);
+            eot_tw[1] = modmult<ALGO_BARRETT>(eot_tw[1], eot_step[1], primeid);
+#else
             if constexpr (0) {
                 if constexpr (sizeof(T) == 8) {
                     ((int4*)psi_aux)[0] = ((int4*)G_->inv_psi_middle_scale)[OFFSET_2T(i)];
@@ -143,7 +181,10 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                     uint32_t hi_exp_br = __brev(exp << clzN) & (blockDim.x - 1);
                     uint32_t lo_exp = exp & mask_lo_exp;
 
-                    if constexpr (algo == 3) {
+                    if constexpr (FIDESLIB_NTT_TWIDDLE_ABLATE) {
+                        // WRONG RESULTS BY DESIGN — traffic ablation, see NTThelper.cuh.
+                        psi_aux[k] = psi[1];
+                    } else if constexpr (algo == 3) {
                         psi_aux[k] = modmult<algo>(((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
                                                    psi_shoup[hi_exp_br]);
                     } else {
@@ -151,6 +192,7 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                     }
                 }
             }
+#endif
 
             if constexpr (algo == FIDESlib::ALGO_SHOUP) {
                 AS(i, j) = modmult<FIDESlib::ALGO_BARRETT>(AS(i, j), psi_aux[0], primeid);
@@ -165,6 +207,54 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
     int m = 1;
     int maskPsi = (blockDim.x - 1);
     uint32_t log_psi = 0;
+
+    // TO-TRY §2.2: mirror image of the NTT side — the FIRST NTT_SHFL_STAGES inverse stages
+    // (m = 1..16) are intra-warp, so they run on registers with one __shfl_xor between stages.
+    // The pair exchange is an involution, hence the same helper; only the stage order flips.
+#if FIDESLIB_NTT_WARP_SHFL
+    const bool use_shfl = (blockDim.x >= (1u << NTT_SHFL_STAGES));
+#else
+    constexpr bool use_shfl = false;
+#endif
+    if (use_shfl) {
+        T psis[NTT_SHFL_STAGES];
+        [[maybe_unused]] T psis_shoup[NTT_SHFL_STAGES];
+#pragma unroll
+        for (int k = 0; k < NTT_SHFL_STAGES; ++k) {
+            const int psiid = (tid & maskPsi) >> log_psi;
+            psis[k] = psi[psiid];
+            if constexpr (algo == 3)
+                psis_shoup[k] = psi_shoup[psiid];
+            maskPsi &= (maskPsi << 1);
+            ++log_psi;
+        }
+
+        __syncwarp();
+        // Entry pair = the m = 1 assignment (j, j+1) — exactly what this thread's load wrote.
+        // Exit pair = the m = 16 assignment, i.e. the same insert-a-0-bit index the shared loop
+        // would have used at that stage.
+        constexpr int m_out = 1 << (NTT_SHFL_STAGES - 1);
+        const int j1_out = ((m_out - 1) & tid) | ((~(m_out - 1) & tid) << 1);
+        for (int i = 0; i < M; ++i) {
+            T a0 = AS(i, j);
+            T a1 = AS(i, j + 1);
+#pragma unroll
+            for (int k = 0; k < NTT_SHFL_STAGES; ++k) {
+                if (k)  // re-assign the pair for the stage being entered
+                    warp_pair_exchange<T>(a0, a1, tid, k - 1);
+                if constexpr (algo == 3) {
+                    GS_butterfly<T, algo>(a0, a1, psis[k], primeid, psis_shoup[k]);
+                } else {
+                    GS_butterfly<T, algo>(a0, a1, psis[k], primeid);
+                }
+            }
+            // Hand the pair back to shared for the m >= 32 stages, whose first act is a
+            // __syncthreads() — that is what makes it visible to the rest of the block.
+            AS(i, j1_out) = a0;
+            AS(i, j1_out + m_out) = a1;
+        }
+        m = 1 << NTT_SHFL_STAGES;
+    }
 
     for (; m < blockDim.x; m <<= 1, maskPsi &= (maskPsi << 1), ++log_psi) {
         if (m >= warpSize)
@@ -501,7 +591,16 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
             maskPsi |= (maskPsi >> 1);
             int log_psi = __ffs(blockDim.x) - 2;  // Ojo al logaritmo.
 
-            for (; m >= 1 /*warpSize*/; m >>= 1, log_psi--, maskPsi |= (maskPsi >> 1)) {
+            // TO-TRY §2.2: the last NTT_SHFL_STAGES stages are intra-warp and run in registers
+            // (see NTThelper.cuh). The shared-memory loop then stops at m = 2^NTT_SHFL_STAGES.
+#if FIDESLIB_NTT_WARP_SHFL
+            const bool use_shfl = (blockDim.x >= (1u << NTT_SHFL_STAGES));
+#else
+            constexpr bool use_shfl = false;
+#endif
+            const int m_stop = use_shfl ? (1 << NTT_SHFL_STAGES) : 1;
+
+            for (; m >= m_stop; m >>= 1, log_psi--, maskPsi |= (maskPsi >> 1)) {
                 const int mask = m - 1;
                 int j1 = (mask & tid) | ((~mask & tid) << 1);
                 int j2 = j1 + m;
@@ -522,6 +621,44 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     } else {
                         CT_butterfly<T, algo>(aux1, aux2, psiaux, primeid);
                     }
+                }
+            }
+
+            if (use_shfl) {
+                // m == 2^(NTT_SHFL_STAGES-1) == 16 here (blockDim.x is a power of two >= 32).
+                // The twiddles are row-invariant, so hoist all five out of the row loop; that
+                // keeps only two data registers live per row instead of 2*M.
+                T psis[NTT_SHFL_STAGES];
+                [[maybe_unused]] T psis_shoup[NTT_SHFL_STAGES];
+#pragma unroll
+                for (int k = 0; k < NTT_SHFL_STAGES; ++k) {
+                    const int psiid = (tid & maskPsi) >> log_psi;
+                    psis[k] = psi[psiid];
+                    if constexpr (algo == 3)
+                        psis_shoup[k] = psi_barret[psiid];
+                    log_psi--;
+                    maskPsi |= (maskPsi >> 1);
+                }
+
+                // Entry pair = the m = 16 assignment; the warp's own lanes wrote it at m = 32.
+                const int j1_in = ((m - 1) & tid) | ((~(m - 1) & tid) << 1);
+                __syncwarp();
+                for (int i = 0; i < M; i += 1) {
+                    T a0 = AS(i, j1_in);
+                    T a1 = AS(i, j1_in + m);
+#pragma unroll
+                    for (int k = 0; k < NTT_SHFL_STAGES; ++k) {
+                        if (k)  // re-assign the pair for the stage being entered
+                            warp_pair_exchange<T>(a0, a1, tid, NTT_SHFL_STAGES - 1 - k);
+                        if constexpr (algo == 3) {
+                            CT_butterfly<T, algo>(a0, a1, psis[k], primeid, psis_shoup[k]);
+                        } else {
+                            CT_butterfly<T, algo>(a0, a1, psis[k], primeid);
+                        }
+                    }
+                    // After m = 1 the thread holds exactly (j, j+1) — what the epilogue reads.
+                    AS(i, j) = a0;
+                    AS(i, j + 1) = a1;
                 }
             }
 
@@ -657,10 +794,39 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
 
             // Idea: calcular full_psi en función de ambos arrays psi
             if (!second) {
+                // EOT: the middle-scale exponent is affine in i, so hoist the base and iterate.
+                [[maybe_unused]] T eot_tw[2], eot_step[2];
+#if FIDESLIB_NTT_EOT
+                {
+                    const uint32_t logBD_ = 32 - __clz(blockDim.x);
+                    const uint32_t mask_lo_exp = (((C_.N) >> 1) | ((C_.N >> (logBD_)) - 1));
+                    const uint32_t clzN = __clz(C_.N) + 2;
+                    const uint32_t block_pos0 = blockIdx.x * M;  // the i = 0 term
+#pragma unroll
+                    for (int k = 0; k < 2; ++k) {
+                        const uint32_t br_j = __brev(j + k) >> (32 - logBD_);
+                        const uint32_t exp = block_pos0 * br_j;
+                        const uint32_t hi_exp_br = __brev(exp << clzN) & (blockDim.x - 1);
+                        const uint32_t lo_exp = exp & mask_lo_exp;
+                        if constexpr (algo == 3) {
+                            eot_tw[k] = modmult<algo>(((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br], primeid,
+                                                      psi_barret[hi_exp_br]);
+                        } else {
+                            eot_tw[k] = modmult<algo>(psi[hi_exp_br], ((T*)G_->psi_no[primeid])[lo_exp * 2], primeid);
+                        }
+                        eot_step[k] = ((T*)G_->psi_no[primeid])[br_j * 2];  // W(br_j), the per-i ratio
+                    }
+                }
+#endif
 
                 for (int i = 0; i < M; i += 1) {
                     int4 aux;
-
+#if FIDESLIB_NTT_EOT
+                    ((T*)&aux)[0] = eot_tw[0];
+                    ((T*)&aux)[1] = eot_tw[1];
+                    eot_tw[0] = modmult<ALGO_BARRETT>(eot_tw[0], eot_step[0], primeid);
+                    eot_tw[1] = modmult<ALGO_BARRETT>(eot_tw[1], eot_step[1], primeid);
+#else
                     {  // Low bandwidth
                         // index = j* bit_reverse(k, auxWidth), where j := blockIdx.x & k := 2*threadIdx.x + 1/0
                         const uint32_t logBD = 32 - __clz(blockDim.x);
@@ -687,7 +853,10 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
 
                             //assert(aux[k] == ((T*)G_::psi_middle_scale[primeid])[OFFSET_T(i) + k]);
 
-                            if constexpr (algo == 3) {
+                            if constexpr (FIDESLIB_NTT_TWIDDLE_ABLATE) {
+                                // WRONG RESULTS BY DESIGN — traffic ablation, see NTThelper.cuh.
+                                ((T*)&aux)[k] = psi[1];
+                            } else if constexpr (algo == 3) {
                                 ((T*)&aux)[k] = modmult<algo>(((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br],
                                                               primeid, psi_barret[hi_exp_br]);
                             } else {
@@ -696,6 +865,7 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                             }
                         }
                     }
+#endif
 
                     if constexpr (algo == ALGO_SHOUP) {
                         ((T*)&aux)[0] = modmult<ALGO_BARRETT>(AS(i, j), (T)((T*)&aux)[0], primeid);
