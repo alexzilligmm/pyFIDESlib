@@ -771,6 +771,20 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #ifndef FIDESLIB_DOT_REGEN4_MINCTA
 #define FIDESLIB_DOT_REGEN4_MINCTA 0
 #endif
+// i-pair unroll in the GSTEP-specialized LT dot (doubles the loads in flight per warp).
+#ifndef FIDESLIB_LT_I2
+#define FIDESLIB_LT_I2 1
+#endif
+// Evict-first (__ldcs) loads on the two STREAMED-ONCE inputs — kskb (42 % L2 hit) and the
+// LT plaintexts (5 % hit) — so they stop evicting the n×-reused digit reads.
+#ifndef FIDESLIB_KSK_LDCS
+#define FIDESLIB_KSK_LDCS 1
+#endif
+#if FIDESLIB_KSK_LDCS
+#define FIDESLIB_STREAM_LD(p) __ldcs(p)
+#else
+#define FIDESLIB_STREAM_LD(p) (*(p))
+#endif
 
 /* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
  * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
@@ -1017,7 +1031,7 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
             const uint32_t bit0 = (uint32_t)base * KSK_BITS;
 #pragma unroll
             for (int t = 0; t < 5; ++t)
-                kb[t] = ((const uint32_t*)kskbp)[(bit0 >> 5) + t];
+                kb[t] = FIDESLIB_STREAM_LD((const uint32_t*)kskbp + (bit0 >> 5) + t);
         }
 
         uint32_t ca, cb, cc, cd;
@@ -1635,7 +1649,7 @@ __global__ void
                 const uint32_t bit0 = (uint32_t)base * KSK_BITS;  // == 112*gtid; &31 is 0 or 16
 #pragma unroll
                 for (int t = 0; t < 5; ++t)
-                    kb[t] = ((const uint32_t*)kskbp)[(bit0 >> 5) + t];
+                    kb[t] = FIDESLIB_STREAM_LD((const uint32_t*)kskbp + (bit0 >> 5) + t);
             }
 
             // --- cooperative regen, COLUMN order end to end (transpose once at the end) ---
@@ -2334,18 +2348,34 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
 
     for (int k = blockIdx.z; k < n; k += gridDim.z) {
         ACC acc[GSTEP];
-        T in_next = ((T*)inputs[k * bStep][blockIdx.y])[idx];
-        for (int i = 0; i < bStep; ++i) {
-            const T in = in_next;
-            if (i + 1 < bStep)
-                in_next = ((T*)inputs[k * bStep + i + 1][blockIdx.y])[idx];
+#pragma unroll
+        for (int j = 0; j < GSTEP; ++j)
+            acc[j] = 0;
+        int i = 0;
+#if FIDESLIB_LT_I2
+        // i-pair unroll: both ciphertext reads and both plaintext batches issue together.
+        for (; i + 1 < bStep; i += 2) {
+            const T in0 = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
+            const T in1 = ((T*)inputs[k * bStep + i + 1][blockIdx.y])[idx];
+#pragma unroll
+            for (int j = 0; j < GSTEP; ++j) {
+                void** p0 = pts[k * bStep * GSTEP + j * bStep + i];
+                void** p1 = pts[k * bStep * GSTEP + j * bStep + i + 1];
+                ACC m0 = (p0 != nullptr) ? (ACC)in0 * (ACC)FIDESLIB_STREAM_LD((T*)p0[blockIdx.y] + idx) : (ACC)0;
+                ACC m1 = (p1 != nullptr) ? (ACC)in1 * (ACC)FIDESLIB_STREAM_LD((T*)p1[blockIdx.y] + idx) : (ACC)0;
+                acc[j] = acc[j] + m0 + m1;
+            }
+        }
+#endif
+        for (; i < bStep; ++i) {
+            const T in = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
 #pragma unroll
             for (int j = 0; j < GSTEP; ++j) {
                 void** pt_partition = pts[k * bStep * GSTEP + j * bStep + i];
                 ACC mult = 0;
                 if (pt_partition != nullptr)
-                    mult = (ACC)in * (ACC)((T*)pt_partition[blockIdx.y])[idx];
-                acc[j] = (i == 0) ? mult : acc[j] + mult;
+                    mult = (ACC)in * (ACC)FIDESLIB_STREAM_LD((T*)pt_partition[blockIdx.y] + idx);
+                acc[j] = acc[j] + mult;
             }
         }
 #pragma unroll
