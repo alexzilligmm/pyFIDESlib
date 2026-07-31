@@ -785,6 +785,15 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #else
 #define FIDESLIB_STREAM_LD(p) (*(p))
 #endif
+// Second tier: evict-first on the LT dot's ciphertext reads too (each read exactly once).
+#ifndef FIDESLIB_LT_CTIN_LDCS
+#define FIDESLIB_LT_CTIN_LDCS 1
+#endif
+#if FIDESLIB_LT_CTIN_LDCS
+#define FIDESLIB_STREAM_LD2(p) __ldcs(p)
+#else
+#define FIDESLIB_STREAM_LD2(p) (*(p))
+#endif
 
 /* Exact v % p from the SAME reciprocal the spec's rejection threshold already needs — the
  * naive `v % p` on a runtime divisor is a ~25-instruction sequence, which at 16 coefficients
@@ -1025,7 +1034,7 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
         const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
         const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
 
-        const uint4 iv = *(const uint4*)inp;
+        const uint4 iv = FIDESLIB_STREAM_LD((const uint4*)inp);  // single-use in the fused (n=1) kernel
         uint32_t kb[5];
         if constexpr (KSK_BITS == 28) {
             const uint32_t bit0 = (uint32_t)base * KSK_BITS;
@@ -2355,8 +2364,8 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
 #if FIDESLIB_LT_I2
         // i-pair unroll: both ciphertext reads and both plaintext batches issue together.
         for (; i + 1 < bStep; i += 2) {
-            const T in0 = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
-            const T in1 = ((T*)inputs[k * bStep + i + 1][blockIdx.y])[idx];
+            const T in0 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i][blockIdx.y] + idx);
+            const T in1 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i + 1][blockIdx.y] + idx);
 #pragma unroll
             for (int j = 0; j < GSTEP; ++j) {
                 void** p0 = pts[k * bStep * GSTEP + j * bStep + i];
@@ -2368,7 +2377,7 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
         }
 #endif
         for (; i < bStep; ++i) {
-            const T in = ((T*)inputs[k * bStep + i][blockIdx.y])[idx];
+            const T in = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i][blockIdx.y] + idx);
 #pragma unroll
             for (int j = 0; j < GSTEP; ++j) {
                 void** pt_partition = pts[k * bStep * GSTEP + j * bStep + i];
