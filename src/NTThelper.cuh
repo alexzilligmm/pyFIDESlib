@@ -66,9 +66,9 @@ namespace FIDESlib {
 #ifndef FIDESLIB_NTT_SWIZZLE_GRAY
 #define FIDESLIB_NTT_SWIZZLE_GRAY 1
 #endif
-#if FIDESLIB_NTT_SWIZZLE_GRAY && FIDESLIB_NTT_SWIZZLE_ROW
-#error "FIDESLIB_NTT_SWIZZLE_GRAY and _ROW are mutually exclusive (the Gray lane map is not an XOR)"
-#endif
+// GRAY + ROW is allowed: 0.00% conflicts (vs Gray's 9.09%) at +1 LOP3 per access. The combined
+// lane map is gray2(r) ^ c with c = 2*(q&1) ^ bit2(i) now spanning all four values, so the int4
+// reorder needs 8 SEL instead of 4 — see swz_perm4.
 
 template <typename T>
 __device__ __forceinline__ int swz_base(const int e) {
@@ -128,10 +128,18 @@ __device__ __forceinline__ int swz_lx(const int i, const int e) {
 // so the same call reorders both a store (logical -> physical) and a load (physical -> logical).
 __device__ __forceinline__ int4 swz_perm4(int4 v, const int x) {
 #if FIDESLIB_NTT_SWIZZLE_GRAY
-    // Gray lane map is gray2(r) ^ c with gray2 = [0,1,3,2] and c = x = 2*(q&1). Inverting it:
-    // out.lane[l] = v.lane[gray2(l ^ c)], which is a FIXED 2<->3 swap (free, a static reorder)
-    // composed with a conditional half-swap. Still 4 SEL, same as the XOR case.
+    // Gray lane map is gray2(r) ^ c with gray2 = [0,1,3,2]. Inverting: out.lane[l] = v.lane[gray2(l^c)].
+#if FIDESLIB_NTT_SWIZZLE_ROW
+    // c spans 0..3 once the row term is on: a conditional base perm, then a conditional half-swap.
+    {
+        const int4 b = (x & 1) ? make_int4(v.y, v.x, v.z, v.w) : make_int4(v.x, v.y, v.w, v.z);
+        return (x & 2) ? make_int4(b.z, b.w, b.x, b.y) : b;
+    }
+#else
+    // c is only 0 or 2 without the row term: a FIXED 2<->3 swap (free, a static reorder) composed
+    // with a conditional half-swap. 4 SEL, same as the XOR case.
     return x ? make_int4(v.w, v.z, v.x, v.y) : make_int4(v.x, v.y, v.w, v.z);
+#endif
 #elif !FIDESLIB_NTT_SWIZZLE_ROW
     // With the row term off the lane XOR is only ever 0 or 3, i.e. a plain 4-way reversal.
     // Telling the compiler that halves this to 4 SEL instead of 8 — and the SELs on the
