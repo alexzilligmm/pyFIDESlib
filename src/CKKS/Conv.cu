@@ -7,6 +7,16 @@
 
 #include <cuda_runtime.h>
 
+// Evict-first loads on the base-conversion input limbs (read exactly once each).
+#ifndef FIDESLIB_BC_LDCS
+#define FIDESLIB_BC_LDCS 0
+#endif
+#if FIDESLIB_BC_LDCS
+#define FIDESLIB_BC_STREAM_LD(p) __ldcs(p)
+#else
+#define FIDESLIB_BC_STREAM_LD(p) (*(p))
+#endif
+
 /* Lever 3 (2026-07-30): LAZY REDUCTION in the u32 BConv arms — accumulate the raw 32x32->64
  * products and reduce once (modreduce_lazy) instead of a Shoup multiply + modadd per term.
  * Default ON; build with -DFIDESLIB_LAZY_BCONV=0 to restore the eager reference arm, which is
@@ -67,24 +77,24 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
             constexpr ALGO algo_ = algo == ALGO_SHOUP ? ALGO_BARRETT : algo;
             if (ISU64(primeid)) {
                 stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo_>(((uint64_t*)(b[i]))[idx], TABLE64(C_.L, C_.L + i), C_.L + i));
+                    modmult<algo_>(FIDESLIB_BC_STREAM_LD((const uint64_t*)(b[i]) + idx), TABLE64(C_.L, C_.L + i), C_.L + i));
             } else {
                 stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo_>(((uint32_t*)b[i])[idx], (uint32_t)TABLE32(C_.L, C_.L + i), C_.L + i));
+                    modmult<algo_>(FIDESLIB_BC_STREAM_LD((const uint32_t*)(b[i]) + idx), (uint32_t)TABLE32(C_.L, C_.L + i), C_.L + i));
             }
         } else {
             if constexpr (algo != 3) {
                 if (ISU64(primeid)) {
                     stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid], primeid));
+                    modmult<algo>(FIDESLIB_BC_STREAM_LD((const uint64_t*)(b[i]) + idx), G_->ModDown_pre_scale[primeid], primeid));
                 } else {
                     stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo>((uint64_t)((uint32_t*)b[i])[idx], G_->ModDown_pre_scale[primeid], primeid));
+                    modmult<algo>((uint64_t)FIDESLIB_BC_STREAM_LD((const uint32_t*)(b[i]) + idx), G_->ModDown_pre_scale[primeid], primeid));
                 }
             } else {
                 if (ISU64(primeid)) {
                     stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo>(((uint64_t*)(b[i]))[idx], G_->ModDown_pre_scale[primeid],
+                    modmult<algo>(FIDESLIB_BC_STREAM_LD((const uint64_t*)(b[i]) + idx), G_->ModDown_pre_scale[primeid],
                                                                primeid, G_->ModDown_pre_scale_shoup[primeid]));
                 } else {
                     // U32 primes carry 2^32-scaled Shoup constants: the multiply must run in the
@@ -94,7 +104,7 @@ __global__ void ModDown2(void** __restrict__ a, const __grid_constant__ int n, v
                     // base conversion needs the exact representative -> k*p excess -> the converted
                     // limbs go mutually CRT-inconsistent.
                     stBuff(u32buf, buff, buff32, tid + blockDim.x * i,
-                    modmult<algo>(((uint32_t*)b[i])[idx], (uint32_t)G_->ModDown_pre_scale[primeid], primeid,
+                    modmult<algo>(FIDESLIB_BC_STREAM_LD((const uint32_t*)(b[i]) + idx), (uint32_t)G_->ModDown_pre_scale[primeid], primeid,
                                       (uint32_t)G_->ModDown_pre_scale_shoup[primeid]));
                 }
             }
