@@ -798,10 +798,11 @@ void LimbPartition::add(const LimbPartition& p, const bool ext) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+        const int add_bpt = fideslibAddBytes();
         const size_t add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
-        if (add_bpl && (add_bpl % (16 * 128)) == 0)
-            launchAddBytes(dim3{(uint32_t)(add_bpl / (16 * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
-                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), 16);
+        if (add_bpl && (add_bpl % (size_t)(add_bpt * 128)) == 0)
+            launchAddBytes(dim3{(uint32_t)(add_bpl / (add_bpt * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
+                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), add_bpt);
         else
             add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
                 limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
@@ -813,12 +814,13 @@ void LimbPartition::add(const LimbPartition& p, const bool ext) {
             STREAM(SPECIALlimb[i]).wait(s);
             uint32_t size = std::min((int)start + num_limbs - (int)i, cc.batch);
             {
+                const int sadd_bpt = fideslibAddBytes();
                 const size_t sadd_bpl =
                     FIDESLIB_ADD_VEC ? uniform_limb_bytes(SPECIALmeta, (size_t)i, (size_t)size, cc.N) : 0;
-                if (sadd_bpl && (sadd_bpl % (16 * 128)) == 0)
-                    launchAddBytes(dim3{(uint32_t)(sadd_bpl / (16 * 128)), size}, dim3{128},
+                if (sadd_bpl && (sadd_bpl % (size_t)(sadd_bpt * 128)) == 0)
+                    launchAddBytes(dim3{(uint32_t)(sadd_bpl / (sadd_bpt * 128)), size}, dim3{128},
                                    STREAM(SPECIALlimb[i]).ptr(), SPECIALlimbptr.data + i, p.SPECIALlimbptr.data + i,
-                                   SPECIAL(id, i), 16);
+                                   SPECIAL(id, i), sadd_bpt);
                 else
                 add_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
                     SPECIALlimbptr.data + i, p.SPECIALlimbptr.data + i,
@@ -858,6 +860,12 @@ void LimbPartition::sub(const LimbPartition& p) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+        const int sub_bpt = fideslibAddBytes();
+        const size_t sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (sub_bpl && (sub_bpl % (size_t)(sub_bpt * 128)) == 0)
+            launchSubBytes(dim3{(uint32_t)(sub_bpl / (sub_bpt * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
+                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), sub_bpt);
+        else
         sub_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
             limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
     }
@@ -2803,6 +2811,12 @@ void LimbPartition::addScalar(std::vector<uint64_t>& vector) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         int primeid_init = PARTITION(id, i);
+        const int scalar_add_bpt = fideslibAddBytes();
+        const size_t scalar_add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (scalar_add_bpl && (scalar_add_bpl % (size_t)(scalar_add_bpt * 128)) == 0)
+            launchScalarAddSubBytes(dim3{(uint32_t)(scalar_add_bpl / (scalar_add_bpt * 128)), num_limbs}, dim3{128},
+                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), scalar_add_bpt, false);
+        else
         scalar_add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i, elems,
                                                                                               primeid_init);
     }
@@ -2822,6 +2836,12 @@ void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+        const int scalar_sub_bpt = fideslibAddBytes();
+        const size_t scalar_sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (scalar_sub_bpl && (scalar_sub_bpl % (size_t)(scalar_sub_bpt * 128)) == 0)
+            launchScalarAddSubBytes(dim3{(uint32_t)(scalar_sub_bpl / (scalar_sub_bpt * 128)), num_limbs}, dim3{128},
+                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), scalar_sub_bpt, true);
+        else
         scalar_sub_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i, elems,
                                                                                               PARTITION(id, i));
     }

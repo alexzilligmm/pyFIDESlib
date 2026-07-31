@@ -3,6 +3,7 @@
 //
 #include <cassert>
 #include "AddSub.cuh"
+#include <cstdlib>
 
 namespace FIDESlib {
 
@@ -90,14 +91,116 @@ __global__ void add_bytes_(void** a, void** b, const int primeid_init) {
     }
 }
 
-/* Cross-TU launcher: a __global__ TEMPLATE launched from a TU that only sees its declaration
+template <int BYTES>
+__global__ void sub_bytes_(void** a, void** b, const int primeid_init) {
+    constexpr int V = BYTES / 16;
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (ISU64(primeid)) {
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            ulonglong2 va = ((ulonglong2*)a[blockIdx.y])[V * i + q];
+            const ulonglong2 vb = ((const ulonglong2*)b[blockIdx.y])[V * i + q];
+            va.x = modsub((uint64_t)va.x, (uint64_t)vb.x, primeid);
+            va.y = modsub((uint64_t)va.y, (uint64_t)vb.y, primeid);
+            ((ulonglong2*)a[blockIdx.y])[V * i + q] = va;
+        }
+    } else {
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            uint4 va = ((uint4*)a[blockIdx.y])[V * i + q];
+            const uint4 vb = ((const uint4*)b[blockIdx.y])[V * i + q];
+            va.x = modsub((uint32_t)va.x, (uint32_t)vb.x, primeid);
+            va.y = modsub((uint32_t)va.y, (uint32_t)vb.y, primeid);
+            va.z = modsub((uint32_t)va.z, (uint32_t)vb.z, primeid);
+            va.w = modsub((uint32_t)va.w, (uint32_t)vb.w, primeid);
+            ((uint4*)a[blockIdx.y])[V * i + q] = va;
+        }
+    }
+}
+
+template <int BYTES, bool SUB>
+__global__ void scalar_addsub_bytes_(void** a, const uint64_t* b, const int primeid_init) {
+    constexpr int V = BYTES / 16;
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    const int i = threadIdx.x + blockIdx.x * blockDim.x;
+    if (ISU64(primeid)) {
+        const uint64_t s = b[primeid];
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            ulonglong2 va = ((ulonglong2*)a[blockIdx.y])[V * i + q];
+            va.x = SUB ? modsub((uint64_t)va.x, s, primeid) : modadd((uint64_t)va.x, s, primeid);
+            va.y = SUB ? modsub((uint64_t)va.y, s, primeid) : modadd((uint64_t)va.y, s, primeid);
+            ((ulonglong2*)a[blockIdx.y])[V * i + q] = va;
+        }
+    } else {
+        const uint32_t s = (uint32_t)b[primeid];
+#pragma unroll
+        for (int q = 0; q < V; ++q) {
+            uint4 va = ((uint4*)a[blockIdx.y])[V * i + q];
+            va.x = SUB ? modsub((uint32_t)va.x, s, primeid) : modadd((uint32_t)va.x, s, primeid);
+            va.y = SUB ? modsub((uint32_t)va.y, s, primeid) : modadd((uint32_t)va.y, s, primeid);
+            va.z = SUB ? modsub((uint32_t)va.z, s, primeid) : modadd((uint32_t)va.z, s, primeid);
+            va.w = SUB ? modsub((uint32_t)va.w, s, primeid) : modadd((uint32_t)va.w, s, primeid);
+            ((uint4*)a[blockIdx.y])[V * i + q] = va;
+        }
+    }
+}
+
+/* FIDESLIB_ADD_BYTES selects bytes-per-thread for the whole vectorized pointwise family
+ * (16/32/64, default 16), expressed in BYTES so it retunes cleanly on other hardware — the same
+ * convention FIDESLIB_COPY_BYTES uses.
+ *
+ * WHY IT IS A KNOB AND NOT A CONSTANT. The copy path settled on 16 because 64 B/thread won an
+ * ISOLATED sweep and was a 26 % PRODUCTION regression (grid.y == nlimbs, so wider work gives
+ * proportionally fewer blocks, and fewer blocks take a smaller share of the machine under
+ * contention). That verdict was measured on COPIES, which carry no arithmetic to hide latency —
+ * these kernels do (a modadd/modmult per element), so the balance is not obviously the same and
+ * is worth re-deriving here. Retune ONLY with an in-situ wall A/B (`scripts/level_ab.sh`), never
+ * with an isolated kernel sweep. */
+int fideslibAddBytes() {
+    static const int v = [] {
+        const char* e = std::getenv("FIDESLIB_ADD_BYTES");
+        const int x = (e && *e) ? std::atoi(e) : 16;
+        return (x == 16 || x == 32 || x == 64) ? x : 16;
+    }();
+    return v;
+}
+
+/* Cross-TU launchers: a __global__ TEMPLATE launched from a TU that only sees its declaration
  * gets a weak local stub with no device code. Keep every instantiation here. */
 void launchAddBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int primeid_init,
                     int bytes_per_thread) {
     switch (bytes_per_thread) {
-        case 16: add_bytes_<16><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         case 32: add_bytes_<32><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+        case 64: add_bytes_<64><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
         default: add_bytes_<16><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+    }
+}
+
+void launchSubBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, void** b, int primeid_init,
+                    int bytes_per_thread) {
+    switch (bytes_per_thread) {
+        case 32: sub_bytes_<32><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+        case 64: sub_bytes_<64><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+        default: sub_bytes_<16><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+    }
+}
+
+void launchScalarAddSubBytes(dim3 grid, dim3 block, cudaStream_t stream, void** a, const uint64_t* b,
+                             int primeid_init, int bytes_per_thread, bool sub) {
+    if (sub) {
+        switch (bytes_per_thread) {
+            case 32: scalar_addsub_bytes_<32, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+            case 64: scalar_addsub_bytes_<64, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+            default: scalar_addsub_bytes_<16, true><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+        }
+    } else {
+        switch (bytes_per_thread) {
+            case 32: scalar_addsub_bytes_<32, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+            case 64: scalar_addsub_bytes_<64, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+            default: scalar_addsub_bytes_<16, false><<<grid, block, 0, stream>>>(a, b, primeid_init); break;
+        }
     }
 }
 
