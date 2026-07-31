@@ -777,7 +777,67 @@ void RNSPoly::subScalar(std::vector<uint64_t>& vector1) {
         GPU[i].subScalar(vector1);
     }
 }
+// DIAGNOSTIC CENSUS (FIDESLIB_COPY_CENSUS=1, default 0): attribute every RNSPoly::copy to its
+// CALL SITE, so TO-TRY §2.3's -0.801 ms delete-all ceiling can be split into what a real
+// in-place/move refactor could actually remove. Results are correct; this only counts.
+// Return addresses are resolved offline with addr2line against the same binary.
+#ifndef FIDESLIB_COPY_CENSUS
+#define FIDESLIB_COPY_CENSUS 0
+#endif
+#if FIDESLIB_COPY_CENSUS
+#include <execinfo.h>
+#include <dlfcn.h>
+#include <cxxabi.h>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+#include <utility>
+namespace {
+std::mutex g_copy_mu;
+std::map<void*, long> g_copy_sites;
+struct CopyCensusDump {
+    ~CopyCensusDump() {
+        std::lock_guard<std::mutex> g(g_copy_mu);
+        long tot = 0;
+        for (auto& kv : g_copy_sites) tot += kv.second;
+        std::fprintf(stderr, "[copycensus] total RNSPoly::copy = %ld across %zu sites\n", tot,
+                     g_copy_sites.size());
+        std::vector<std::pair<void*, long>> v(g_copy_sites.begin(), g_copy_sites.end());
+        std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        for (auto& kv : v) {
+            Dl_info info{};
+            const char* nm = "?";
+            char* dem = nullptr;
+            size_t off = 0;
+            if (dladdr(kv.first, &info) && info.dli_sname) {
+                int st = 0;
+                dem = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &st);
+                nm = st == 0 && dem ? dem : info.dli_sname;
+            }
+            if (info.dli_fbase)
+                off = (size_t)((char*)kv.first - (char*)info.dli_fbase);
+            std::fprintf(stderr, "[copycensus] %6ld  +0x%zx  %s\n", kv.second, off, nm);
+            std::free(dem);
+        }
+    }
+} g_copy_dump;
+}  // namespace
+#endif
+
 void RNSPoly::copy(const RNSPoly& poly) {
+#if FIDESLIB_COPY_CENSUS
+    {
+        // frame 2 skips RNSPoly::copy and Ciphertext::copy, landing on the real caller
+        void* bt[4];
+        const int n = backtrace(bt, 4);
+        void* site = (n > 2) ? bt[2] : (n > 1 ? bt[1] : nullptr);
+        std::lock_guard<std::mutex> g(g_copy_mu);
+        g_copy_sites[site]++;
+    }
+#endif
     //std::cout << "Copy level: " << poly.level << std::endl;
     this->dropToLevel(poly.level);
     this->grow(poly.level);
