@@ -12,6 +12,16 @@
 
 #include <cooperative_groups.h>
 #include <cuda/barrier>
+
+// Evict-first loads on read-once copy sources (see AddSub.cu; same knob).
+#ifndef FIDESLIB_PW_LDCS
+#define FIDESLIB_PW_LDCS 1
+#endif
+#if FIDESLIB_PW_LDCS
+#define FIDESLIB_PW_STREAM_LD(p) __ldcs(p)
+#else
+#define FIDESLIB_PW_STREAM_LD(p) (*(p))
+#endif
 //#include "cooperative_groups/memcpy_async.h"
 namespace cg = cooperative_groups;
 
@@ -305,7 +315,7 @@ __global__ void copy_bytes_(void** a, void** b) {
     const int i = threadIdx.x + blockIdx.x * blockDim.x;
 #pragma unroll
     for (int q = 0; q < V; ++q)
-        ((uint4*)b[blockIdx.y])[V * i + q] = ((uint4*)a[blockIdx.y])[V * i + q];
+        ((uint4*)b[blockIdx.y])[V * i + q] = FIDESLIB_PW_STREAM_LD((const uint4*)a[blockIdx.y] + V * i + q);
 }
 
 /* Cross-TU launcher. A __global__ TEMPLATE launched from a TU that only sees its declaration

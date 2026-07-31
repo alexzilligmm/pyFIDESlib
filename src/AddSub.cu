@@ -2,6 +2,16 @@
 // Created by carlosad on 25/03/24.
 //
 #include <cassert>
+// Evict-first loads on the pure-input streams (read exactly once; the in-place operand's
+// store re-establishes its line regardless). Same L2-hygiene mechanism as FIDESLIB_NTT_LDCS.
+#ifndef FIDESLIB_PW_LDCS
+#define FIDESLIB_PW_LDCS 1
+#endif
+#if FIDESLIB_PW_LDCS
+#define FIDESLIB_PW_STREAM_LD(p) __ldcs(p)
+#else
+#define FIDESLIB_PW_STREAM_LD(p) (*(p))
+#endif
 #include "AddSub.cuh"
 #include <cstdlib>
 
@@ -96,7 +106,7 @@ __global__ void add_bytes_(void** a, void** b, const int primeid_init) {
 #pragma unroll
         for (int q = 0; q < V; ++q) {  // 16 B == 4 x uint32
             uint4 va = ((uint4*)a[blockIdx.y])[V * i + q];
-            const uint4 vb = ((const uint4*)b[blockIdx.y])[V * i + q];
+            const uint4 vb = FIDESLIB_PW_STREAM_LD((const uint4*)b[blockIdx.y] + V * i + q);
             va.x = modadd((uint32_t)va.x, (uint32_t)vb.x, primeid);
             va.y = modadd((uint32_t)va.y, (uint32_t)vb.y, primeid);
             va.z = modadd((uint32_t)va.z, (uint32_t)vb.z, primeid);
@@ -139,7 +149,7 @@ __global__ void sub_bytes_(void** a, void** b, const int primeid_init) {
 #pragma unroll
         for (int q = 0; q < V; ++q) {
             uint4 va = ((uint4*)a[blockIdx.y])[V * i + q];
-            const uint4 vb = ((const uint4*)b[blockIdx.y])[V * i + q];
+            const uint4 vb = FIDESLIB_PW_STREAM_LD((const uint4*)b[blockIdx.y] + V * i + q);
             va.x = modsub((uint32_t)va.x, (uint32_t)vb.x, primeid);
             va.y = modsub((uint32_t)va.y, (uint32_t)vb.y, primeid);
             va.z = modsub((uint32_t)va.z, (uint32_t)vb.z, primeid);
