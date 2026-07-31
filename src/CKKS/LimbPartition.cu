@@ -736,6 +736,14 @@ void LimbPartition::INTT(int batch, bool sync, INTT_fusion_fields fields) {
 #include "ntt_types.inc"
 #undef WWW
 
+// TO-TRY §2.3: route the in-place limb add through the BYTES-indexed vectorized kernel.
+// Forward declaration — the definition sits with the copy dispatch further down this file.
+static inline size_t uniform_limb_bytes(const std::vector<LimbRecord>& meta, size_t begin, size_t n, int N);
+
+#ifndef FIDESLIB_ADD_VEC
+#define FIDESLIB_ADD_VEC 1
+#endif
+
 #ifndef FIDESLIB_ADD_CENSUS
 #define FIDESLIB_ADD_CENSUS 0
 #endif
@@ -790,8 +798,13 @@ void LimbPartition::add(const LimbPartition& p, const bool ext) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
-        add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
+        const size_t add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (add_bpl && (add_bpl % (16 * 128)) == 0)
+            launchAddBytes(dim3{(uint32_t)(add_bpl / (16 * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
+                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), 16);
+        else
+            add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
+                limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
     }
     if (ext) {
         int start = cc.splitSpecialMeta.at(id).at(0).id - (cc.L + 1);
@@ -800,6 +813,13 @@ void LimbPartition::add(const LimbPartition& p, const bool ext) {
             STREAM(SPECIALlimb[i]).wait(s);
             uint32_t size = std::min((int)start + num_limbs - (int)i, cc.batch);
             {
+                const size_t sadd_bpl =
+                    FIDESLIB_ADD_VEC ? uniform_limb_bytes(SPECIALmeta, (size_t)i, (size_t)size, cc.N) : 0;
+                if (sadd_bpl && (sadd_bpl % (16 * 128)) == 0)
+                    launchAddBytes(dim3{(uint32_t)(sadd_bpl / (16 * 128)), size}, dim3{128},
+                                   STREAM(SPECIALlimb[i]).ptr(), SPECIALlimbptr.data + i, p.SPECIALlimbptr.data + i,
+                                   SPECIAL(id, i), 16);
+                else
                 add_<<<dim3{(uint32_t)cc.N / 128, size}, 128, 0, STREAM(SPECIALlimb[i]).ptr()>>>(
                     SPECIALlimbptr.data + i, p.SPECIALlimbptr.data + i,
                     SPECIAL(
