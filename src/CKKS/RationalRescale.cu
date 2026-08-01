@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <optional>
 
 #include "CKKS/Context.cuh"
@@ -195,6 +196,36 @@ void RNSPoly::rrRescale() {
 // nothing else. Fusing it into the shipping *ModupDotKSK paths is (c).4.
 //==================================================================================
 
+namespace {
+/* Mirror of the (TU-local) kskRegenSeed/kskRegenEligible pair in LimbPartitionMGPU.cu — same
+ * gates, same shape numbering. Duplicated rather than exported because that file is compiled
+ * only in NCCL-enabled builds; keep the two in step if the gates ever change. */
+const uint32_t* rrRegenSeed(const LimbPartition& ka, const int block_x, int* shape) {
+    *shape          = 0;
+    const int lvl   = kskRegenLevel();
+    const bool elig = ka.ksk_seed_set && ka.cc.GPUid.size() == 1 && ka.cc.precom.constants[0].type == 0;
+    if (lvl < 2 || !elig) {
+        if (ka.ksk_a_released)
+            throw std::runtime_error("RRKeySwitchCore: the key's `a` was released at load "
+                                     "(FIDESLIB_KSK_REGEN>=2) but no regen arm is armed for this launch");
+        return nullptr;
+    }
+    if (lvl >= 3) {
+        *shape = 2;  // stage-A smem arm: diagnostic only, kept for arm parity
+        return ka.ksk_seed;
+    }
+    if (ka.cc.N % (block_x * 16) != 0)  // stage B needs whole 16-coefficient threads
+        return nullptr;
+    *shape = 1;
+    static const bool once = [] {  // run marker: proof the arm engaged, not just the env
+        std::cerr << "[ksk_regen] active: RRKeySwitchCore regenerating kska from seed (stage B)\n";
+        return true;
+    }();
+    (void)once;
+    return ka.ksk_seed;
+}
+}  // namespace
+
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1) {
     ContextData& cc = *key.cc;  // Context is a shared_ptr<ContextData>
     assert(cc.isRR() && "RRKeySwitchCore is only defined on an RR chain");
@@ -228,12 +259,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
 
     const LimbPartition& ka = key.a.GPU.at(0);
     const LimbPartition& kb = key.b.GPU.at(0);
-    if (ka.key_pack_bits || kb.key_pack_bits)
-        throw std::runtime_error("RRKeySwitchCore: packed keys are not RR-window aware yet "
-                                 "(FIDESLIB_KSK_PACK=0 on an RR chain)");
-    if (ka.ksk_a_released)
-        throw std::runtime_error("RRKeySwitchCore: the key's `a` rows were released for in-kernel regen, "
-                                 "which is not RR-window aware yet (FIDESLIB_KSK_REGEN=0 on an RR chain)");
+    assert(ka.key_pack_bits == kb.key_pack_bits);
 
     Stream& s = src.getS();
     s.wait(ka.getS());
@@ -258,9 +284,17 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     cudaMemcpyAsync(dDigits, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
     // Argument order: the launcher's out1 collects the `a`-key product and out2 the `b`-key
     // product, whereas RRChain::KeySwitchCore returns (b-part, a-part) — so out1/out0 here.
+    // Packed keys and in-kernel regen both work at RR levels (milestone (c).4a): packing is
+    // per-row so it rides the same key-row index, and the regenerated `a` is a pure function
+    // of (digit, prime) — the window only has to name the right prime. This is the shipping
+    // config (FIDESLIB_KSK_PACK=1 FIDESLIB_KSK_REGEN=2), so RR must run it or no RR wall
+    // number would mean anything.
+    int regenShape                 = 0;
+    const uint32_t* regenSeed      = rrRegenSeed(ka, 128, &regenShape);
     launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)(nSpecial + nLimbs)}, 128, s.ptr(), o1.limbptr.data,
                         o1.SPECIALlimbptr.data, o0.limbptr.data, o0.SPECIALlimbptr.data, dDigits, nDigits, id,
-                        nSpecial, 0, 0, nullptr, 0, 0, /*qbase=*/src.pbase, /*dbase=*/dBase);
+                        nSpecial, 0, ka.key_pack_bits, regenSeed, (uint32_t)cc.N >> 4, regenShape,
+                        /*qbase=*/src.pbase, /*dbase=*/dBase);
     cudaFreeAsync(dDigits, s.ptr());
     cudaStreamSynchronize(s.ptr());  // h_digits is host-staged; unfused path, correctness first
     CudaCheckErrorModNoSync;
@@ -344,6 +378,47 @@ std::vector<std::vector<uint32_t>> rrStoreWindow(RNSPoly& p) {
     return out;
 }
 }  // namespace
+
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RREvalMultRelinHost(
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, const std::vector<std::vector<uint32_t>>& a1,
+    const std::vector<std::vector<uint32_t>>& b0, const std::vector<std::vector<uint32_t>>& b1, const int level,
+    const std::string& keyid, const bool rescale) {
+    assert(cc.isRR());
+    cudaSetDevice(cc.GPUid[0]);
+
+    // load the four components of the two degree-1 operands, EVAL
+    RNSPoly A0(cc, level), A1(cc, level), B0(cc, level), B1(cc, level);
+    RNSPoly* in[4]                                     = {&A0, &A1, &B0, &B1};
+    const std::vector<std::vector<uint32_t>>* src[4]   = {&a0, &a1, &b0, &b1};
+    for (int k = 0; k < 4; ++k) {
+        rrLoadWindow(cc, *in[k], *src[k], level);
+        in[k]->NTT(1, false);
+    }
+
+    // the textbook degree-2 product — the same three lines RRChain::EvalMultRelin computes
+    RNSPoly c0(cc, level), c1(cc, level), c2(cc, level), tmp(cc, level);
+    c0.multElement(A0, B0);
+    c1.multElement(A0, B1);
+    tmp.multElement(A1, B0);
+    c1.add(tmp);
+    c2.multElement(A1, B1);
+
+    // relinearize: the degree-2 term is keyswitched and folded back in
+    RNSPoly d0(cc, level), d1(cc, level);
+    RRKeySwitchCore(c2, cc.GetEvalKey(keyid), d0, d1);
+    c0.add(d0);
+    c1.add(d1);
+
+    if (rescale) {
+        c0.rrRescale();
+        c1.rrRescale();
+    }
+    c0.INTT(1, false);
+    c1.INTT(1, false);
+    c0.sync();
+    c1.sync();
+    return {rrStoreWindow(c0), rrStoreWindow(c1)};
+}
 
 std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RRKeySwitchHost(
     ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level, const std::string& keyid) {

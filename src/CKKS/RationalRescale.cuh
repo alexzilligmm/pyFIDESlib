@@ -80,6 +80,18 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
                                                          int level, uint64_t scalar = 1);
 
 /**
+ * Milestone (c).4b gate harness: a full RR ct*ct -> relinearize -> (optionally) rr-rescale,
+ * i.e. RRChain::EvalMultRelin followed by RRChain::RescaleInPlace, driven end to end on the
+ * GPU. Inputs are the two operands' components as coefficient-domain host limbs at RR level
+ * `level`; the return is the output pair's windows, coefficient domain, at `level` (or at
+ * `level - 1` when `rescale`). Same TU-boundary rule as the other harnesses here.
+ */
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RREvalMultRelinHost(
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, const std::vector<std::vector<uint32_t>>& a1,
+    const std::vector<std::vector<uint32_t>>& b0, const std::vector<std::vector<uint32_t>>& b1, int level,
+    const std::string& keyid, bool rescale);
+
+/**
  * Milestone (c).3 gate harness. Loads `c` (the degree-2 term) at RR level `level` from
  * coefficient-domain host limbs, keyswitches it against the context's eval key, and returns
  * the two output windows as coefficient-domain host limbs — {b-part, a-part}. Same

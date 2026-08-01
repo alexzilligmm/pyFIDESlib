@@ -928,14 +928,17 @@ __device__ __forceinline__ void chachaCoop4(const uint32_t gmask, const uint32_t
 template <int KSK_BITS>
 __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
     fusedDotKSKRegen_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
-                      int num_special, int init, KskSeedWords aseed, const uint32_t n16) {
+                      int num_special, int init, KskSeedWords aseed, const uint32_t n16, int qbase, int dbase) {
     constexpr int SLOTS = 16;
     const uint32_t b0 = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);  // == slot>>4 for this thread
     const int base = (int)(b0 << 4);
     const int blky = blockIdx.y + init;
 
-    const int primeid =
-        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    // RR (RR_PLAN (c).4a): ciphertext SLOT vs evk ROW — see fusedDotKSK_2_. qbase == 0 on a
+    // classic prefix chain. The regenerated `a` needs no row index of its own (it is a pure
+    // function of (digit, prime)), but `primeid` must be the WINDOW's prime for pval to match.
+    const int primeid = (blky < num_special) ? C_.primeid_digit_to[0][blky]
+                                             : C_.primeid_partition[id][blky - num_special + qbase];
     const int primeid_digit = C_.primeid_digit[primeid];
     const int pos_dec = blky - num_special;
 
@@ -952,12 +955,13 @@ __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
         a2[w] = 0;
     }
 
-    for (int i = 0; i < num_d; ++i) {
+    for (int i = dbase; i < dbase + num_d; ++i) {
         const bool decomp = (i == primeid_digit);
         const int pos = C_.pos_in_digit[i][primeid];
-        const int p = decomp ? pos_dec : pos;
+        const int p = decomp ? pos_dec : pos;             // ciphertext / extended-digit slot
+        const int pk = decomp ? (pos_dec + qbase) : pos;  // KEY row (full-chain layout)
         const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
-        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk];
 
 #if FIDESLIB_KSKB_STAGE >= 2
         uint32_t kb[15];
@@ -1060,7 +1064,8 @@ __global__ void __launch_bounds__(128, FIDESLIB_FUSED_REGEN_MINCTA)
 // above the launcher). No rotation loop, no automorphism: stores stay coalesced uint4.
 template <int KSK_BITS>
 __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d,
-                                   int id, int num_special, int init, KskSeedWords aseed, const uint32_t n16) {
+                                   int id, int num_special, int init, KskSeedWords aseed, const uint32_t n16,
+                                   int qbase, int dbase) {
     constexpr int SLOTS = 4;
     const uint32_t gtid = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);
     const int base = (int)(gtid * SLOTS);
@@ -1070,8 +1075,11 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
     const uint32_t gmask = 0xFu << (lane & ~3u);
     const int blky = blockIdx.y + init;
 
-    const int primeid =
-        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    // RR (RR_PLAN (c).4a): ciphertext SLOT vs evk ROW — see fusedDotKSK_2_. qbase == 0 on a
+    // classic prefix chain. The regenerated `a` needs no row index of its own (it is a pure
+    // function of (digit, prime)), but `primeid` must be the WINDOW's prime for pval to match.
+    const int primeid = (blky < num_special) ? C_.primeid_digit_to[0][blky]
+                                             : C_.primeid_partition[id][blky - num_special + qbase];
     const int primeid_digit = C_.primeid_digit[primeid];
     const int pos_dec = blky - num_special;
 
@@ -1092,12 +1100,13 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
         a2[w] = 0;
     }
 
-    for (int i = 0; i < num_d; ++i) {
+    for (int i = dbase; i < dbase + num_d; ++i) {
         const bool decomp = (i == primeid_digit);
         const int pos = C_.pos_in_digit[i][primeid];
-        const int p = decomp ? pos_dec : pos;
+        const int p = decomp ? pos_dec : pos;             // ciphertext / extended-digit slot
+        const int pk = decomp ? (pos_dec + qbase) : pos;  // KEY row (full-chain layout)
         const uint32_t* inp = (const uint32_t*)digits[i + decomp * 3 * C_.dnum][p] + base;
-        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+        const void* kskbp = digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk];
 
         const uint4 iv = FIDESLIB_STREAM_LD((const uint4*)inp);  // single-use in the fused (n=1) kernel
         uint32_t kb[5];
@@ -1225,11 +1234,6 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
         return (v == 4 || v == 16) ? v : 4;
     }();
     const bool coop4 = regen_shape == 1 && regen_slots == 4;
-    // Only fusedDotKSK_2_ carries the window base so far; the regen kernels are milestone
-    // (c).4 territory. Loud rather than silently wrong.
-    if ((qbase != 0 || dbase != 0) && regen_shape == 1)
-        throw std::runtime_error("launchFusedDotKSK_2: the regen arms are not RR-window aware "
-                                 "(FIDESLIB_KSK_REGEN=0 on an RR chain)");
     if (regen_shape == 1) {
         if (grid.x % 16u != 0u)
             throw std::runtime_error("launchFusedDotKSK_2: regen shape 1 needs grid.x % 16 == 0");
@@ -1243,10 +1247,10 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
 #define FIDESLIB_FUSED_DOT_ARM(BITS)                                                                             \
     if (coop4)                                                                                                   \
         fusedDotKSKRegen4_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,         \
-                                                             num_special, init, sw, n16);                        \
+                                                             num_special, init, sw, n16, qbase, dbase);                        \
     else if (regen_shape == 1)                                                                                   \
         fusedDotKSKRegen_<BITS><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,          \
-                                                            num_special, init, sw, n16);                         \
+                                                            num_special, init, sw, n16, qbase, dbase);                         \
     else if (regen_shape == 2)                                                                                   \
         fusedDotKSK_2_<BITS, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,    \
                                                                   num_special, init, sw, n16, qbase, dbase);                   \
