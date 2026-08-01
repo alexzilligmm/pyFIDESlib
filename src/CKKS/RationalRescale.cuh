@@ -88,6 +88,10 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
  * `level`; the return is the output pair's windows, coefficient domain, at `level` (or at
  * `level - 1` when `rescale`). Same TU-boundary rule as the other harnesses here.
  */
+/** Gate harness for RR ModRaise (RR_PLAN (c).4c step 2): level-0 window in, top window out,
+ *  coefficient domain throughout so the check sees only the CRT extension. */
+std::vector<std::vector<uint32_t>> RRModRaiseHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& level0);
+
 std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RREvalMultRelinHost(
     ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, const std::vector<std::vector<uint32_t>>& a1,
     const std::vector<std::vector<uint32_t>>& b0, const std::vector<std::vector<uint32_t>>& b1, int level,

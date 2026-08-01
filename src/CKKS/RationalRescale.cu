@@ -563,6 +563,22 @@ std::vector<std::vector<uint32_t>> rrStoreWindow(RNSPoly& p) {
 }
 }  // namespace
 
+/* Gate harness for RR ModRaise (RR_PLAN (c).4c step 2). Loads the level-0 window in the
+ * COEFFICIENT domain (which is where bootstrap raises from — classic does INTT then raise),
+ * raises, and hands back the whole top window. No transform is involved, so what the caller
+ * checks is the CRT extension itself and nothing else. */
+std::vector<std::vector<uint32_t>> RRModRaiseHost(ContextData& cc,
+                                                  const std::vector<std::vector<uint32_t>>& level0) {
+    assert(cc.isRR());
+    cudaSetDevice(cc.GPUid[0]);
+    assert((int)level0.size() == cc.windowSize(0));
+    RNSPoly p(cc, 0);
+    rrLoadWindow(cc, p, level0, 0);
+    p.rrModRaise();
+    p.sync();
+    return rrStoreWindow(p);
+}
+
 std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RREvalMultRelinHost(
     ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, const std::vector<std::vector<uint32_t>>& a1,
     const std::vector<std::vector<uint32_t>>& b0, const std::vector<std::vector<uint32_t>>& b1, const int level,

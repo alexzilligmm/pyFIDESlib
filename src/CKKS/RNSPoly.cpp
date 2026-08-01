@@ -1227,6 +1227,60 @@ static uint64_t host_powmod(uint64_t base, uint64_t exp, uint64_t m) {
     return r;
 }
 
+/* RR ModRaise (RR_PLAN (c).4c step 2).
+ *
+ * Classic bootstrap comes DOWN to the composite bottom (dropToLevel) and raises from the d
+ * bottom primes. An RR ciphertext cannot be dropped anywhere — level r-1's window contains
+ * primes level r's does not — so it ARRIVES at level 0 by rescaling, which the chain's own
+ * schedule already does. Level 0's window is {tau14, tau15, q0}: a THREE-limb ~2^78 bottom
+ * modulus, which is structurally exactly what compositeModRaise already handles (it CRT-extends
+ * the bottom d limbs). So the generalization is not the arithmetic, it is the ADDRESSING: the
+ * sources are the level-0 window's w limbs at their GLOBAL primeids, and the targets are the
+ * top window's, rather than both being prefixes from 0.
+ *
+ * The widen is not a level transition and does not go through rrRescale — the residues the
+ * ciphertext holds are untouched, they just move to the slots their primeids name in the wider
+ * window, and every new limb is overwritten by the extension below. */
+void RNSPoly::rrModRaise() {
+    assert(cc.isRR() && "rrModRaise is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR is single-GPU");
+    if (level != 0)
+        throw std::runtime_error("RR ModRaise: the ciphertext must be at level 0 (it gets there by rescaling, "
+                                 "not by dropping) — got level " + std::to_string(level));
+    const int top = cc.rrNumLevels() - 1;
+    const int sLo = cc.windowLo(0), sHi = cc.windowHi(0);
+    const int d   = sHi - sLo + 1;   // the RR bottom is w limbs wide, not compositeDegree()
+    const int tLo = cc.windowLo(top), tHi = cc.windowHi(top);
+    const int limbsize = tHi - tLo + 1;
+    assert(d >= 1 && limbsize > d);
+
+    // qhatinv[k] = (Q0/q_k)^{-1} mod q_k over the SOURCE window;
+    // qhat[k*limbsize + i] = (Q0/q_k) mod q_i over the TARGET window, indexed by target SLOT.
+    std::vector<uint64_t> qhatinv(d), qhat((size_t)d * limbsize);
+    for (int k = 0; k < d; ++k) {
+        const uint64_t qk = cc.prime[sLo + k].p;
+        uint64_t qhat_mod_qk = 1;
+        for (int j = 0; j < d; ++j)
+            if (j != k)
+                qhat_mod_qk = host_mulmod(qhat_mod_qk, cc.prime[sLo + j].p % qk, qk);
+        qhatinv[k] = host_powmod(qhat_mod_qk, qk - 2, qk);
+        for (int i = 0; i < limbsize; ++i) {
+            const uint64_t qi = cc.prime[tLo + i].p;
+            uint64_t v = 1;
+            for (int j = 0; j < d; ++j)
+                if (j != k)
+                    v = host_mulmod(v, cc.prime[sLo + j].p % qi, qi);
+            qhat[(size_t)k * limbsize + i] = v;
+        }
+    }
+
+    for (auto& g : GPU)
+        g.rrWidenToLevel(top);
+    level = top;
+    for (auto& g : GPU)
+        g.compositeModRaise(d, qhatinv, qhat, /*src_base=*/sLo);
+}
+
 void RNSPoly::compositeModRaise() {
     const int d = cc.compositeDegree();
     assert(d > 1);

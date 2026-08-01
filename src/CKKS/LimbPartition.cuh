@@ -136,6 +136,12 @@ class LimbPartition {
     void binomialMult(LimbPartition& c1, LimbPartition& c2, const LimbPartition& d0, const LimbPartition& d1,
                       bool extend_ins, bool square);
     void generateLimbToLevel(int new_level);
+    /** RR (RR_PLAN (c).4c step 2): widen a LIVE window onto a containing one, for ModRaise.
+     *  Rebuilds the limb vector — existing limbs move to the slot their primeid names, fresh
+     *  ones fill the rest and are left uninitialised for the ModRaise that overwrites them.
+     *  Not a level transition: residues are untouched. See the definition for why this does
+     *  not violate (c).2's no-widen rule. */
+    void rrWidenToLevel(int new_level);
 
     enum GENERATION_MODE { AUTOMATIC, SINGLE_BUFFER, DUAL_BUFFER };
 
@@ -337,7 +343,11 @@ class LimbPartition {
     /** COMPOSITESCALING ModRaise: CRT-extend the bottom d limbs across ALL current limbs
      *  (call after grow()). qhatinv[k] = (Q0/q_k)^{-1} mod q_k; qhat is the flattened
      *  (Q0/q_k) mod q_i table with stride = current limb count. Single-GPU only. */
-    void compositeModRaise(int d, const std::vector<uint64_t>& qhatinv, const std::vector<uint64_t>& qhat);
+    /** src_base = the GLOBAL primeid of the first of the d source limbs. 0 on a classic prefix
+     *  chain (the bottom d primes); on an RR window it is windowLo(0), and the target base is
+     *  this partition's own pbase. See compositeModRaise_ (ElemenwiseBatchKernels.cu). */
+    void compositeModRaise(int d, const std::vector<uint64_t>& qhatinv, const std::vector<uint64_t>& qhat,
+                           int src_base = 0);
     void evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights);
     void rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, const LimbPartition& ksk_a,
                            const LimbPartition& ksk_b);

@@ -40,8 +40,11 @@ __global__ void broadcastLimb0_mgpu(void** a, const __grid_constant__ int primei
  *  i.e. OpenFHE's ExtendCiphertext CRT recomposition ([a]_{q0q1} = [a*q1^-1]_{q0}*q1 + ...).
  *  src must NOT alias a (the low limbs of a are overwritten) — pass snapshot copies.
  *  qhatinv[k] = (Q0/q_k)^{-1} mod q_k;  qhat[k*limbs+i] = (Q0/q_k) mod q_i. */
+// dst_base/src_base default to 0 = the classic prefix chain (target slot i IS primeid i).
+// Non-zero only on RR windows — see the definition.
 __global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
-                                   const uint64_t* qhat);
+                                   const uint64_t* qhat, const __grid_constant__ int dst_base = 0,
+                                   const __grid_constant__ int src_base = 0);
 __global__ void copy_(void** a, void** b);
 /* 4-elements-per-thread copy_ — THE limb-copy kernel since 2026-07-29. Launch via
  * LimbPartition's launch_copy_limbs helper, which uses it whenever N % 512 == 0 and falls

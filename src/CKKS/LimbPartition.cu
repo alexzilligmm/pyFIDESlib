@@ -356,15 +356,65 @@ void LimbPartition::generateLimb() {
 }
 */
 
+/* RR (RR_PLAN (c).4c step 2): WIDEN a live window onto a containing one.
+ *
+ * The (c).2 rule stands for level TRANSITIONS — a rescale moves both edges and changes the
+ * residues, so it must go through rrRescale and never through a widen. ModRaise is not a level
+ * transition: it takes the ciphertext that already sits at level 0 (whose window is the 3-limb
+ * ~2^78 bottom {tau14, tau15, q0}) and CRT-extends it onto the top window, leaving the residues
+ * it already holds exactly where they are. The extension itself is compositeModRaise's job; all
+ * this does is make the storage the right shape for it.
+ *
+ * No data moves. Each Limb owns its own buffer and carries its own primeid, so widening is a
+ * REBUILD of the limb vector in the shape of rrRescale's zero-extension merge: the existing
+ * limbs are moved into the slots their primeids name in the new window, and fresh limbs are
+ * constructed for the rest. The new limbs are deliberately left UNINITIALISED — every one of
+ * them is written by the ModRaise that follows, and zeroing 45 limbs to overwrite them
+ * immediately is pure cost.
+ *
+ * Containment is required and asserted: this cannot express a window that drops primes, which
+ * is exactly the operation (c).2 forbids. */
+void LimbPartition::rrWidenToLevel(const int new_level) {
+    cudaSetDevice(device);
+    assert(cc.isRR() && "rrWidenToLevel is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR is single-GPU");
+    const int lo = cc.windowLo(new_level), hi = cc.windowHi(new_level);
+    if (limb.empty()) {  // nothing live yet: the ordinary fresh allocation
+        pbase = lo;
+        generate(meta, limb, limbptr, cc.windowSize(new_level) - 1, &auxptr, nullptr, 0, nullptr, 0, false, pbase);
+        return;
+    }
+    const int oldLo = pbase, oldHi = pbase + (int)limb.size() - 1;
+    assert(lo <= oldLo && hi >= oldHi && "RR widen: the new window must CONTAIN the old one");
+    if (lo == oldLo && hi == oldHi)
+        return;
+
+    std::vector<LimbImpl> widened;
+    widened.reserve(hi - lo + 1);
+    for (int pid = lo; pid <= hi; ++pid) {
+        if (pid >= oldLo && pid <= oldHi) {
+            assert(PRIMEID(limb[pid - oldLo]) == pid && "RR widen: live limb is not at the primeid its slot names");
+            widened.emplace_back(std::move(limb[pid - oldLo]));
+        } else {
+            widened.emplace_back(Limb<uint32_t>(cc, id, s, pid));
+        }
+    }
+    limb  = std::move(widened);
+    pbase = lo;
+    refreshLimbPtrs();
+    CudaCheckErrorModNoSync;
+}
+
 void LimbPartition::generateLimbToLevel(int new_level) {
     cudaSetDevice(device);
     int new_size = getLimbSize(new_level);
     if (cc.isRR()) {
         // On an RR chain the window base is part of the identity of the storage: slot k must
-        // be built from meta[pbase + k]. Widening an EXISTING window is not a thing an RR
-        // level transition ever does (both edges move, and the residues change) — only a
-        // fresh allocation is legal here, which RNSPoly::grow enforces.
-        assert(limb.empty() && "RR: growing a live window must go through RNSPoly::rrRescale");
+        // be built from meta[pbase + k]. A level TRANSITION never widens a live window (both
+        // edges move and the residues change) — that must go through rrRescale. The one legal
+        // widen is ModRaise's, and it has its own entry point (rrWidenToLevel) so that this
+        // assert keeps catching everything else.
+        assert(limb.empty() && "RR: growing a live window must go through rrRescale (or rrWidenToLevel for ModRaise)");
         pbase = cc.windowLo(new_level);
     }
     if (new_size > limb.size()) {
@@ -3583,7 +3633,7 @@ void LimbPartition::broadcastLimb0() {
 }
 
 void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& qhatinv,
-                                      const std::vector<uint64_t>& qhat) {
+                                      const std::vector<uint64_t>& qhat, const int src_base) {
     const int limbsize = getLimbSize(*level);
     cudaSetDevice(device);
     assert(limbsize > d);
@@ -3601,19 +3651,25 @@ void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& 
     uint64_t* dev_qhat = dev_qhatinv + qhatinv.size();
 
     std::vector<void*> hostptrs(d);
+    // The d SOURCE limbs sit at slots (src_base - pbase) .. +d on an RR window; on a classic
+    // prefix chain src_base == pbase == 0 and this is the old `limb.at(k)`.
+    const int src_slot0 = src_base - pbase;
+    assert(src_slot0 >= 0 && src_slot0 + d <= (int)limb.size());
     for (int k = 0; k < d; ++k) {
         hostptrs[k] = snap + (size_t)k * slot;
         void* v = nullptr;
-        SWITCH_RET(limb.at(k), v.data, v);
-        const size_t bytes = (size_t)cc.N * (limb.at(k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
+        SWITCH_RET(limb.at(src_slot0 + k), v.data, v);
+        assert(PRIMEID(limb.at(src_slot0 + k)) == src_base + k);
+        const size_t bytes =
+            (size_t)cc.N * (limb.at(src_slot0 + k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
         cudaMemcpyAsync(hostptrs[k], v, bytes, cudaMemcpyDeviceToDevice, s.ptr());
     }
     cudaMemcpyAsync(srcptrs, hostptrs.data(), d * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
     cudaMemcpyAsync(dev_qhatinv, qhatinv.data(), qhatinv.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
     cudaMemcpyAsync(dev_qhat, qhat.data(), qhat.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
 
-    compositeModRaise_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(limbptr.data, srcptrs, d,
-                                                                                           dev_qhatinv, dev_qhat);
+    compositeModRaise_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
+        limbptr.data, srcptrs, d, dev_qhatinv, dev_qhat, /*dst_base=*/pbase, /*src_base=*/src_base);
     cudaFreeAsync(snap, s.ptr());
 }
 void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights) {

@@ -118,6 +118,10 @@ class RNSPoly {
      *  cc.compositeDegree() limbs to the whole current basis (OpenFHE ExtendCiphertext).
      *  Constants are derived from cc.prime on the fly (host-side, trivial cost). */
     void compositeModRaise();
+    /** RR ModRaise (RR_PLAN (c).4c step 2): widen the level-0 window onto the top window and
+     *  CRT-extend the level-0 residues across it. The RR bottom is a w-limb (~2^78) modulus,
+     *  so this is compositeModRaise's shape with window addressing instead of prefixes. */
+    void rrModRaise();
     void evalLinearWSum(uint32_t i, std::vector<const RNSPoly*>& vector1, std::vector<uint64_t>& vector2);
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2);
     void loadConstant(const std::vector<std::vector<uint64_t>>& vector1, const std::vector<uint64_t>& vector2,

@@ -204,44 +204,51 @@ __global__ void broadcastLimb0_(void** a) {
 // COMPOSITESCALING ModRaise (see header). Grid: {N/threads, limbs}; src[k] holds a SNAPSHOT
 // of source limb k's coefficients (raw device copy, width of prime k). All arithmetic is
 // width-branched per prime; the accumulator uses the TARGET prime's width.
+/* dst_base / src_base (RR_PLAN (c).4c step 2): the WINDOW bases. On a classic prefix chain
+ * target slot i IS primeid i and source slot k IS primeid k, which is what this kernel assumed;
+ * both bases are 0 there and the arithmetic is unchanged. On an RR chain a level owns a window
+ * [lo, hi] of the layout, so the target primeid is dst_base + blockIdx.y and the source primeid
+ * is src_base + k — and the primeid is not bookkeeping here, it selects the modulus every
+ * modmult/SwitchModulus below reduces against. */
 __global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
-                                   const uint64_t* qhat) {
+                                   const uint64_t* qhat, const __grid_constant__ int dst_base,
+                                   const __grid_constant__ int src_base) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    const int primeid = blockIdx.y;
+    const int primeid = dst_base + blockIdx.y;
     const int limbs = gridDim.y;
 
     if (ISU64(primeid)) {
         uint64_t acc = 0;
         for (int k = 0; k < d; ++k) {
             uint64_t x;
-            if (ISU64(k)) {
+            if (ISU64(src_base + k)) {
                 x = ((const uint64_t*)src[k])[idx];
-                x = modmult<ALGO_BARRETT>(x, qhatinv[k], k);
+                x = modmult<ALGO_BARRETT>(x, qhatinv[k], src_base + k);
             } else {
                 uint32_t x32 = ((const uint32_t*)src[k])[idx];
-                x32 = modmult<ALGO_BARRETT>(x32, (uint32_t)qhatinv[k], k);
+                x32 = modmult<ALGO_BARRETT>(x32, (uint32_t)qhatinv[k], src_base + k);
                 x = x32;
             }
-            SwitchModulus(x, k, primeid);
-            acc = modadd(acc, modmult<ALGO_BARRETT>(x, qhat[k * limbs + primeid], primeid), primeid);
+            SwitchModulus(x, src_base + k, primeid);
+            acc = modadd(acc, modmult<ALGO_BARRETT>(x, qhat[k * limbs + blockIdx.y], primeid), primeid);
         }
         ((uint64_t*)a[primeid])[idx] = acc;
     } else {
         uint32_t acc = 0;
         for (int k = 0; k < d; ++k) {
             uint32_t x;
-            if (ISU64(k)) {
+            if (ISU64(src_base + k)) {
                 // wide source, narrow target: switch modulus in 64-bit, then narrow
                 uint64_t x64 = ((const uint64_t*)src[k])[idx];
-                x64 = modmult<ALGO_BARRETT>(x64, qhatinv[k], k);
-                SwitchModulus(x64, k, primeid);
+                x64 = modmult<ALGO_BARRETT>(x64, qhatinv[k], src_base + k);
+                SwitchModulus(x64, src_base + k, primeid);
                 x = (uint32_t)x64;
             } else {
                 x = ((const uint32_t*)src[k])[idx];
-                x = modmult<ALGO_BARRETT>(x, (uint32_t)qhatinv[k], k);
-                SwitchModulus(x, k, primeid);
+                x = modmult<ALGO_BARRETT>(x, (uint32_t)qhatinv[k], src_base + k);
+                SwitchModulus(x, src_base + k, primeid);
             }
-            acc = modadd(acc, modmult<ALGO_BARRETT>(x, (uint32_t)qhat[k * limbs + primeid], primeid), primeid);
+            acc = modadd(acc, modmult<ALGO_BARRETT>(x, (uint32_t)qhat[k * limbs + blockIdx.y], primeid), primeid);
         }
         ((uint32_t*)a[primeid])[idx] = acc;
     }
