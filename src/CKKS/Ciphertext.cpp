@@ -427,6 +427,7 @@ void Ciphertext::loadStaged(const uint8_t* base, const StagedCtMeta& m, cudaStre
 void Ciphertext::modDown(bool free) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	c0.moddown(true, false, 0);
 	c1.moddown(true, false, 1);
 	if (free) {
@@ -529,6 +530,7 @@ RNSPoly& MGPUkeySwitchCore(RNSPoly& in, const KeySwitchingKey& kskEval, const bo
 void Ciphertext::mult(const Ciphertext& b, bool rescale, const bool moddown) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	assert(keyID == b.keyID);
 	if (cc.rescaleTechnique == FIXEDAUTO || cc.rescaleTechnique == FLEXIBLEAUTO || cc.rescaleTechnique == FLEXIBLEAUTOEXT) {
 		if (!adjustForMult(b)) {
@@ -878,6 +880,7 @@ void Ciphertext::extend(bool init) {
 void Ciphertext::rotate(const int index_, const bool moddown) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	op_count[OPS::ROTATE]++;
 	int index = normalyzeIndex(index_);
 
@@ -1055,6 +1058,7 @@ void Ciphertext::rotate(const Ciphertext& c, const int index) {
 void Ciphertext::conjugate(const Ciphertext& c) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	op_count[OPS::CONJUGATE]++;
 
 	if (0 && cc.GPUid.size() == 1) {
@@ -1180,6 +1184,7 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
+	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	op_count[OPS::HOISTEDROTATE]++;
 	op_count[OPS::HOISTEDROTATEOUTS] += indexes.size();
 

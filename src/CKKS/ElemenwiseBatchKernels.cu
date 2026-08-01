@@ -12,6 +12,7 @@
 
 #include <cooperative_groups.h>
 #include <cuda/barrier>
+#include <cuda_pipeline.h>
 
 // Evict-first loads on read-once copy sources (see AddSub.cu; same knob).
 #ifndef FIDESLIB_PW_LDCS
@@ -785,6 +786,12 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #ifndef FIDESLIB_LT_I2
 #define FIDESLIB_LT_I2 1
 #endif
+// V7 (TO-TRY §2.0): i-QUAD unroll — doubles the batch again over I2. Costs ~+6 regs at the
+// measured register cliff (40 regs = 12 blocks/SM = 100% occupancy), so expect ±0.1 either
+// way; A/B-only, default 0. Takes precedence over I2 when both are set.
+#ifndef FIDESLIB_LT_I4
+#define FIDESLIB_LT_I4 0
+#endif
 // Evict-first (__ldcs) loads on the two STREAMED-ONCE inputs — kskb (42 % L2 hit) and the
 // LT plaintexts (5 % hit) — so they stop evicting the n×-reused digit reads.
 #ifndef FIDESLIB_KSK_LDCS
@@ -794,6 +801,16 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #define FIDESLIB_STREAM_LD(p) __ldcs(p)
 #else
 #define FIDESLIB_STREAM_LD(p) (*(p))
+#endif
+// V1 (TO-TRY §2.0, 2026-08-01): LAZY u64 ACCUMULATION in the coop4 dot kernels. The inner
+// loop was modadd(modmult(d, kska)) per digit — ~6 dependent Barrett ops per accumulate,
+// twice per word — but d·(ks mod p) ≡ d·ks (mod p), so accumulate the RAW product
+// (u64)d·ks (one IMAD.WIDE per digit) and reduce ONCE after the digit loop with
+// modreduce_lazy (exact for any a < 2^64). This deletes the per-digit reductions AND
+// modByRecip outright. Overflow-safe: d < 2^28, ks < 2^32 ⇒ each product < 2^60, so the
+// u64 accumulator holds ≥15 digits and num_d ≤ dnum = 7. Bit-exact by congruence.
+#ifndef FIDESLIB_LAZY_DOT_ACC
+#define FIDESLIB_LAZY_DOT_ACC 1
 #endif
 // Second tier: evict-first on the LT dot's ciphertext reads too (each read exactly once).
 #ifndef FIDESLIB_LT_CTIN_LDCS
@@ -1030,7 +1047,11 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
     const uint32_t key0 = sel4(k, aseed.k[0], aseed.k[1], aseed.k[2], aseed.k[3]);
     const uint32_t key4 = sel4(k, aseed.k[4], aseed.k[5], aseed.k[6], aseed.k[7]);
 
+#if FIDESLIB_LAZY_DOT_ACC
+    uint64_t a1[SLOTS], a2[SLOTS];
+#else
     uint32_t a1[SLOTS], a2[SLOTS];
+#endif
 #pragma unroll
     for (int w = 0; w < SLOTS; ++w) {
         a1[w] = 0;
@@ -1107,7 +1128,9 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
         const uint32_t in4[4] = {iv.x, iv.y, iv.z, iv.w};
 #pragma unroll
         for (int w = 0; w < SLOTS; ++w) {
+#if !FIDESLIB_LAZY_DOT_ACC
             const uint32_t kska = modByRecip(ks[w], pval, recip);
+#endif
             uint32_t kskb;
             if constexpr (KSK_BITS == 28) {
                 if (gtid & 1u) {
@@ -1121,15 +1144,27 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
                 kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
             else
                 kskb = ((const uint32_t*)kskbp)[base + w];
+#if FIDESLIB_LAZY_DOT_ACC
+            a1[w] += (uint64_t)in4[w] * ks[w];  // raw keystream word — congruent mod p
+            a2[w] += (uint64_t)in4[w] * kskb;
+#else
             a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(in4[w], kska, primeid), primeid);
             a2[w] = modadd(a2[w], modmult<ALGO_BARRETT>(in4[w], kskb, primeid), primeid);
+#endif
         }
     }
 
     uint32_t* o1 = (primeid < C_.L) ? (uint32_t*)out1[pos_dec] : (uint32_t*)sout1[primeid - C_.L];
     uint32_t* o2 = (primeid < C_.L) ? (uint32_t*)out2[pos_dec] : (uint32_t*)sout2[primeid - C_.L];
+#if FIDESLIB_LAZY_DOT_ACC
+    *(uint4*)(o1 + base) = make_uint4(modreduce_lazy(a1[0], primeid), modreduce_lazy(a1[1], primeid),
+                                      modreduce_lazy(a1[2], primeid), modreduce_lazy(a1[3], primeid));
+    *(uint4*)(o2 + base) = make_uint4(modreduce_lazy(a2[0], primeid), modreduce_lazy(a2[1], primeid),
+                                      modreduce_lazy(a2[2], primeid), modreduce_lazy(a2[3], primeid));
+#else
     *(uint4*)(o1 + base) = make_uint4(a1[0], a1[1], a1[2], a1[3]);
     *(uint4*)(o2 + base) = make_uint4(a2[0], a2[1], a2[2], a2[3]);
+#endif
 }
 
 // Same-TU launcher (see the .cuh note: cross-TU template-kernel launches hit
@@ -1632,7 +1667,11 @@ __global__ void
         const uint32_t key0 = key[k];
         const uint32_t key4 = key[4 + k];
 
+#if FIDESLIB_LAZY_DOT_ACC
+        uint64_t aux1[SLOTS], aux2[SLOTS];
+#else
         uint32_t aux1[SLOTS], aux2[SLOTS];
+#endif
         if (c0p) {
             const uint4 cv = *(const uint4*)(c0p + base);
             const uint32_t c4[4] = {cv.x, cv.y, cv.z, cv.w};
@@ -1729,7 +1768,9 @@ __global__ void
             const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w};
 #pragma unroll
             for (int w = 0; w < SLOTS; ++w) {
+#if !FIDESLIB_LAZY_DOT_ACC
                 const uint32_t kska = modByRecip(ks[w], pval, recip);
+#endif
                 uint32_t kskb;
                 if constexpr (KSK_BITS == 28) {
                     // bit0&31 is 16 for odd gtid, 0 for even — branch so lo stays compile-time.
@@ -1744,8 +1785,13 @@ __global__ void
                     kskb = kskUnpack(kskbp, (uint32_t)(base + w), KSK_BITS, (1u << KSK_BITS) - 1u);
                 else
                     kskb = ((const uint32_t*)kskbp)[base + w];
+#if FIDESLIB_LAZY_DOT_ACC
+                aux1[w] += (uint64_t)d4[w] * ks[w];  // raw keystream word — congruent mod p
+                aux2[w] += (uint64_t)d4[w] * kskb;
+#else
                 aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[w], kska, primeid), primeid);
                 aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(d4[w], kskb, primeid), primeid);
+#endif
             }
         }
 
@@ -1753,12 +1799,228 @@ __global__ void
 #pragma unroll
         for (int w = 0; w < SLOTS; ++w) {
             const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+#if FIDESLIB_LAZY_DOT_ACC
+            const uint32_t r1 = modreduce_lazy(aux1[w], primeid);
+            const uint32_t r2 = modreduce_lazy(aux2[w], primeid);
+#else
+            const uint32_t r1 = aux1[w];
+            const uint32_t r2 = aux2[w];
+#endif
             if (primeid < C_.L) {
-                ((uint32_t*)out1[j][pos_dec])[out_idx] = aux1[w];
-                ((uint32_t*)out2[j][pos_dec])[out_idx] = aux2[w];
+                ((uint32_t*)out1[j][pos_dec])[out_idx] = r1;
+                ((uint32_t*)out2[j][pos_dec])[out_idx] = r2;
             } else {
-                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = aux1[w];
-                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = aux2[w];
+                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = r1;
+                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = r2;
+            }
+        }
+    }
+}
+
+/* V4 (TO-TRY §2.0, 2026-08-01): cp.async DOUBLE-BUFFERED variant of the coop4 hoisted kernel.
+ * ncu on the post-V1 kernel: long_scoreboard 7.79 cyc/issue (44 % of 17.7) — global-load
+ * latency dominates even though the loads issue before the ChaCha, because digit i's loads
+ * still wait inside digit i. This kernel prefetches digit i+1's kskb span (5×4 B) and din
+ * uint4 (16 B) per thread into SHARED MEMORY via cp.async while digit i computes — the same
+ * one-digit-ahead pipeline FAILURE §2.14 measured at +0.51 ms when built with REGISTERS
+ * (+13 regs, occupancy-bound); cp.async lands in smem without touching the register budget.
+ * smem: 2×(128×5 + guard) u32 + 2×128 uint4 ≈ 9.2 KB/block — 7 blocks/SM keeps ≈64 KB/SM,
+ * occupancy-neutral. Each thread consumes ONLY its own smem span: no __syncthreads needed,
+ * per-thread __pipeline_commit/wait_prior ordering suffices. KSK_BITS==28 only (the live
+ * width); selection is env-only: FIDESLIB_KSK_PREFETCH=1 (+ the coop4 conditions). */
+template <int KSK_BITS>
+__global__ void
+#if FIDESLIB_DOT_REGEN4_MINCTA
+    __launch_bounds__(128, FIDESLIB_DOT_REGEN4_MINCTA)
+#endif
+        hoistedRotateDotKSKRegen4P_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
+                                    const int n, const int* indexes, void*** digits, int num_d, int id,
+                                    int num_special, int init, void** sc0, bool c0_modup,
+                                    const uint32_t* __restrict__ seeds, const uint32_t n16) {
+    static_assert(KSK_BITS == 28, "prefetch variant is only built for the live 28-bit packed width");
+    constexpr int SLOTS = 4;
+    __shared__ uint32_t skb[2][128 * 5];
+    __shared__ uint4 sdin[2][128];
+    const uint32_t gtid = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);
+    const int base = (int)(gtid * SLOTS);
+    const uint32_t b0 = gtid >> 2;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t k = lane & 3u;
+    const uint32_t gmask = 0xFu << (lane & ~3u);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint32_t pval = (uint32_t)C_.primes[primeid];
+    const uint32_t recip = 0xFFFFFFFFu / pval;
+    const uint32_t m_p = recip * pval;
+
+    const uint32_t* c0p = nullptr;
+    if (c0_modup || primeid < C_.L)
+        c0p = primeid < C_.L ? (const uint32_t*)c0[pos_dec] : (const uint32_t*)sc0[primeid - C_.L];
+    const bool c0_shoup = (!c0_modup && primeid < C_.L);
+
+    // Per-digit tile prefetch: this thread's 5 kskb words + its din uint4 into buffer i&1.
+    const auto stage = [&](const int i, const int offset) {
+        const bool decomp = (i == primeid_digit);
+        const int pos = C_.pos_in_digit[i][primeid];
+        const int p = decomp ? pos_dec : pos;
+        const uint32_t* dinp = (const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base;
+        const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
+        __pipeline_memcpy_async(&sdin[i & 1][threadIdx.x], dinp, 16);
+        const uint32_t bit0 = (uint32_t)base * (uint32_t)KSK_BITS;
+        uint32_t* dst = &skb[i & 1][threadIdx.x * 5];
+        const uint32_t* src = (const uint32_t*)kskbp + (bit0 >> 5);
+#pragma unroll
+        for (int t = 0; t < 5; ++t)
+            __pipeline_memcpy_async(&dst[t], &src[t], 4);
+    };
+
+    for (int j = 0; j < n; ++j) {
+        const int offset = j * 3 * 2 * C_.dnum;
+        const uint32_t* key = seeds + j * 8;
+        const uint32_t key0 = key[k];
+        const uint32_t key4 = key[4 + k];
+
+#if FIDESLIB_LAZY_DOT_ACC
+        uint64_t aux1[SLOTS], aux2[SLOTS];
+#else
+        uint32_t aux1[SLOTS], aux2[SLOTS];
+#endif
+        if (c0p) {
+            const uint4 cv = *(const uint4*)(c0p + base);
+            const uint32_t c4[4] = {cv.x, cv.y, cv.z, cv.w};
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                aux1[w] = 0;
+                aux2[w] = c0_shoup ? modmult<ALGO_SHOUP>(c4[w], (uint32_t)C_.P[primeid], primeid,
+                                                        (uint32_t)C_.P_shoup[primeid])
+                                   : c4[w];
+            }
+        } else {
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                aux1[w] = 0;
+                aux2[w] = 0;
+            }
+        }
+
+        stage(0, offset);
+        __pipeline_commit();
+
+        for (int i = 0; i < num_d; ++i) {
+            if (i + 1 < num_d) {
+                stage(i + 1, offset);
+                __pipeline_commit();
+            }
+
+            // --- cooperative regen, COLUMN order end to end (transpose once at the end) ---
+            uint32_t ca, cb, cc, cd;
+            chachaCoop4(gmask, k, key0, key4, b0, (uint32_t)i, pval, ca, cb, cc, cd);
+            uint32_t need = ((ca >= m_p) ? 1u : 0u) | ((cb >= m_p) ? 2u : 0u) | ((cc >= m_p) ? 4u : 0u) |
+                            ((cd >= m_p) ? 8u : 0u);
+            uint32_t gneed = need;
+            gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+            gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+            if (gneed) {
+                for (uint32_t t = 1; t < (uint32_t)kskexpand::kTMax; ++t) {
+                    uint32_t ea, eb, ec, ed;
+                    chachaCoop4(gmask, k, key0, key4, b0 + t * n16, (uint32_t)i, pval, ea, eb, ec, ed);
+                    if (need & 1u) {
+                        ca = ea;
+                        if (ea < m_p)
+                            need &= ~1u;
+                    }
+                    if (need & 2u) {
+                        cb = eb;
+                        if (eb < m_p)
+                            need &= ~2u;
+                    }
+                    if (need & 4u) {
+                        cc = ec;
+                        if (ec < m_p)
+                            need &= ~4u;
+                    }
+                    if (need & 8u) {
+                        cd = ed;
+                        if (ed < m_p)
+                            need &= ~8u;
+                    }
+                    gneed = need;
+                    gneed |= __shfl_xor_sync(gmask, gneed, 1, 4);
+                    gneed |= __shfl_xor_sync(gmask, gneed, 2, 4);
+                    if (!gneed)
+                        break;
+                }
+            }
+
+            // --- lane transpose to slot order ---
+            uint32_t ks[SLOTS] = {0u, 0u, 0u, 0u};
+#pragma unroll
+            for (int s = 0; s < 4; ++s) {
+                const uint32_t pub = sel4((k - (uint32_t)s) & 3u, ca, cb, cc, cd);
+                const uint32_t rcv = __shfl_sync(gmask, pub, (k + (uint32_t)s) & 3u, 4);
+                const uint32_t r = (k + (uint32_t)s) & 3u;
+                ks[0] = (r == 0) ? rcv : ks[0];
+                ks[1] = (r == 1) ? rcv : ks[1];
+                ks[2] = (r == 2) ? rcv : ks[2];
+                ks[3] = (r == 3) ? rcv : ks[3];
+            }
+
+            // Digit i's tiles must have landed; keep the one in-flight group (i+1) moving.
+            if (i + 1 < num_d)
+                __pipeline_wait_prior(1);
+            else
+                __pipeline_wait_prior(0);
+
+            // --- the dot on this thread's 4 slots, inputs from the smem tiles ---
+            const uint4 dv = sdin[i & 1][threadIdx.x];
+            const uint32_t* kb = &skb[i & 1][threadIdx.x * 5];
+            const uint32_t d4[4] = {dv.x, dv.y, dv.z, dv.w};
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+#if !FIDESLIB_LAZY_DOT_ACC
+                const uint32_t kska = modByRecip(ks[w], pval, recip);
+#endif
+                uint32_t kskb;
+                // bit0&31 is 16 for odd gtid, 0 for even — branch so lo stays compile-time.
+                if (gtid & 1u) {
+                    const uint32_t lo = 16u + (uint32_t)(w * KSK_BITS);
+                    kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                } else {
+                    const uint32_t lo = (uint32_t)(w * KSK_BITS);
+                    kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
+                }
+#if FIDESLIB_LAZY_DOT_ACC
+                aux1[w] += (uint64_t)d4[w] * ks[w];  // raw keystream word — congruent mod p
+                aux2[w] += (uint64_t)d4[w] * kskb;
+#else
+                aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[w], kska, primeid), primeid);
+                aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(d4[w], kskb, primeid), primeid);
+#endif
+            }
+        }
+
+        const int rot_index = indexes[j];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+#if FIDESLIB_LAZY_DOT_ACC
+            const uint32_t r1 = modreduce_lazy(aux1[w], primeid);
+            const uint32_t r2 = modreduce_lazy(aux2[w], primeid);
+#else
+            const uint32_t r1 = aux1[w];
+            const uint32_t r2 = aux2[w];
+#endif
+            if (primeid < C_.L) {
+                ((uint32_t*)out1[j][pos_dec])[out_idx] = r1;
+                ((uint32_t*)out2[j][pos_dec])[out_idx] = r2;
+            } else {
+                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = r1;
+                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = r2;
             }
         }
     }
@@ -1782,9 +2044,21 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
         return (v == 4 || v == 16) ? v : 4;
     }();
     const bool coop4 = seeds && regen_slots == 4;
+    // V4: cp.async one-digit-ahead prefetch variant (28-bit packed width only; see the
+    // hoistedRotateDotKSKRegen4P_ header comment). Env-only A/B arm.
+    static const bool prefetch = [] {
+        const char* e = std::getenv("FIDESLIB_KSK_PREFETCH");
+        return e && *e && *e != '0';
+    }();
     dim3 grid4 = grid;
     if (coop4)
         grid4.x *= 4u;
+    if (coop4 && prefetch && ksk_pack_bits == 28) {
+        hoistedRotateDotKSKRegen4P_<28><<<grid4, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
+                                                                     digits, num_d, id, num_special, init, sc0,
+                                                                     c0_modup, seeds, n16);
+        return;
+    }
 #define FIDESLIB_HOISTED_DOT_ARM(BITS)                                                                             \
     if (coop4)                                                                                                     \
         hoistedRotateDotKSKRegen4_<BITS><<<grid4, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n,        \
@@ -2371,6 +2645,27 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
         for (int j = 0; j < GSTEP; ++j)
             acc[j] = 0;
         int i = 0;
+#if FIDESLIB_LT_I4
+        // i-quad unroll: four ciphertext reads and four plaintext batches issue together.
+        for (; i + 3 < bStep; i += 4) {
+            const T in0 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i][blockIdx.y] + idx);
+            const T in1 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i + 1][blockIdx.y] + idx);
+            const T in2 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i + 2][blockIdx.y] + idx);
+            const T in3 = FIDESLIB_STREAM_LD2((T*)inputs[k * bStep + i + 3][blockIdx.y] + idx);
+#pragma unroll
+            for (int j = 0; j < GSTEP; ++j) {
+                void** p0 = pts[k * bStep * GSTEP + j * bStep + i];
+                void** p1 = pts[k * bStep * GSTEP + j * bStep + i + 1];
+                void** p2 = pts[k * bStep * GSTEP + j * bStep + i + 2];
+                void** p3 = pts[k * bStep * GSTEP + j * bStep + i + 3];
+                ACC m0 = (p0 != nullptr) ? (ACC)in0 * (ACC)FIDESLIB_STREAM_LD((T*)p0[blockIdx.y] + idx) : (ACC)0;
+                ACC m1 = (p1 != nullptr) ? (ACC)in1 * (ACC)FIDESLIB_STREAM_LD((T*)p1[blockIdx.y] + idx) : (ACC)0;
+                ACC m2 = (p2 != nullptr) ? (ACC)in2 * (ACC)FIDESLIB_STREAM_LD((T*)p2[blockIdx.y] + idx) : (ACC)0;
+                ACC m3 = (p3 != nullptr) ? (ACC)in3 * (ACC)FIDESLIB_STREAM_LD((T*)p3[blockIdx.y] + idx) : (ACC)0;
+                acc[j] = acc[j] + m0 + m1 + m2 + m3;
+            }
+        }
+#endif
 #if FIDESLIB_LT_I2
         // i-pair unroll: both ciphertext reads and both plaintext batches issue together.
         for (; i + 1 < bStep; i += 2) {

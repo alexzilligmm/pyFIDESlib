@@ -357,28 +357,45 @@ std::vector<std::vector<int>> ContextData::generateGPUdigits(const int dnum, con
     return res;
 }
 
-RNSPoly& ContextData::getKeySwitchAux() {
-    if (key_switch_aux == nullptr)
-        key_switch_aux = std::make_unique<RNSPoly>(*this, L, false);
+// Workspace pool size: 1 (legacy, byte-identical) or 2 (dual-slot — see Context.cuh).
+static int ksAuxPool() {
+    static const int v = [] {
+        const char* e = std::getenv("FIDESLIB_KS_AUX_POOL");
+        const int n = e ? std::atoi(e) : 1;
+        return n == 2 ? 2 : 1;
+    }();
+    return v;
+}
 
-    key_switch_aux->generateDecompAndDigit(false);
-    key_switch_aux->generateSpecialLimbs(false, false);
-    return *key_switch_aux;
+void ContextData::advanceKsAuxSlot() {
+    ks_aux_slot = (ks_aux_slot + 1) % ksAuxPool();
+}
+
+RNSPoly& ContextData::getKeySwitchAux() {
+    auto& p = key_switch_aux[ks_aux_slot];
+    if (p == nullptr)
+        p = std::make_unique<RNSPoly>(*this, L, false);
+
+    p->generateDecompAndDigit(false);
+    p->generateSpecialLimbs(false, false);
+    return *p;
 }
 
 RNSPoly& ContextData::getKeySwitchAux2() {
-    if (key_switch_aux2 == nullptr)
-        key_switch_aux2 = std::make_unique<RNSPoly>(*this, L, false);
-    key_switch_aux2->generateDecompAndDigit(false);
-    key_switch_aux2->generateSpecialLimbs(false, false);
-    return *key_switch_aux2;
+    auto& p = key_switch_aux2[ks_aux_slot];
+    if (p == nullptr)
+        p = std::make_unique<RNSPoly>(*this, L, false);
+    p->generateDecompAndDigit(false);
+    p->generateSpecialLimbs(false, false);
+    return *p;
 }
 
 RNSPoly& ContextData::getModdownAux(const int num) {
-    if (moddown_aux[num % moddown_aux.size()] == nullptr)
-        moddown_aux[num % moddown_aux.size()] = std::make_unique<RNSPoly>(*this, L, false);
-    moddown_aux[num % moddown_aux.size()]->generateSpecialLimbs(false, true);
-    return *moddown_aux[num % moddown_aux.size()];
+    auto& p = moddown_aux[ks_aux_slot * 2 + (num & 1)];
+    if (p == nullptr)
+        p = std::make_unique<RNSPoly>(*this, L, false);
+    p->generateSpecialLimbs(false, true);
+    return *p;
 }
 std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double operand, int level_in) {
 
@@ -999,9 +1016,13 @@ std::vector<std::vector<LimbRecord>> ContextData::generateSplitSpecialMeta(std::
 
 ContextData::~ContextData() {
     CudaCheckErrorMod;
-    key_switch_aux.reset(nullptr);
+    for (auto& i : key_switch_aux) {
+        i.reset(nullptr);
+    }
     //   CudaCheckErrorMod;
-    key_switch_aux2.reset(nullptr);
+    for (auto& i : key_switch_aux2) {
+        i.reset(nullptr);
+    }
     //   CudaCheckErrorMod;
     for (auto& i : moddown_aux) {
         i.reset(nullptr);

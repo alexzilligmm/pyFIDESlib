@@ -81,9 +81,18 @@ class ContextData {
     std::vector<int> GPUrank;
 #endif
 
-    std::unique_ptr<RNSPoly> key_switch_aux = nullptr;
-    std::unique_ptr<RNSPoly> key_switch_aux2 = nullptr;
-    std::array<std::unique_ptr<RNSPoly>, 2> moddown_aux = {nullptr};
+    // V2 (TO-TRY §2.0, 2026-08-01): the keyswitch workspaces are a SLOT POOL. With
+    // FIDESLIB_KS_AUX_POOL=2 consecutive keyswitch-bearing ops draw alternating workspace
+    // sets, so two independent ops (EvalMod's two Chebyshev branches) stop serializing
+    // through the shared aux polys — the nsys stream audit showed their dots convoying
+    // back-to-back with the other branch's transforms never co-resident. Pool=1 (default)
+    // is byte-identical legacy behaviour. The slot advances ONLY at Ciphertext-level op
+    // entries (advanceKsAuxSlot), never mid-op: every getter call within one op must see
+    // the same workspace set.
+    std::array<std::unique_ptr<RNSPoly>, 2> key_switch_aux = {nullptr};
+    std::array<std::unique_ptr<RNSPoly>, 2> key_switch_aux2 = {nullptr};
+    std::array<std::unique_ptr<RNSPoly>, 4> moddown_aux = {nullptr};
+    int ks_aux_slot = 0;
     std::vector<Stream> top_limb_stream;
     std::vector<uint64_t*> top_limb_buffer;
     std::vector<void*> top_limb_buffer_handle;
@@ -108,6 +117,7 @@ class ContextData {
     RNSPoly& getKeySwitchAux();
     RNSPoly& getKeySwitchAux2();
     RNSPoly& getModdownAux(const int num);
+    void advanceKsAuxSlot();  // no-op at FIDESLIB_KS_AUX_POOL=1 (the default)
 
     bool isValidPrimeId(const int i) const;
 
