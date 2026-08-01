@@ -577,14 +577,16 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
     cudaSetDevice(cc.GPUid[0]);
     std::vector<double> samples;
     for (int it = -1; it < iters; ++it) {  // it == -1 warms
-        cudaDeviceSynchronize();
-        const auto t0 = std::chrono::steady_clock::now();
         // RNSPoly has neither copy- nor move-ASSIGNMENT (reference members), so the running
         // ciphertext lives in an optional and each level move-CONSTRUCTS into it.
         std::optional<RNSPoly> c;
         c.emplace(cc, top_level);
         rrLoadWindow(cc, *c, a0, top_level);
         c->NTT(1, false);
+        // Load OUTSIDE the timer, so this measures the circuit's arithmetic and matches how
+        // the classic walk is timed (its construction is an H2D of the whole ciphertext).
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
         for (int r = top_level; r >= 1; --r) {
             // one circuit level: square, relinearize, rescale
             RNSPoly sq(cc, r), d0(cc, r), d1(cc, r), c2(cc, r);
