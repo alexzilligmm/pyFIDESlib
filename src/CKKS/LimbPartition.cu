@@ -72,6 +72,9 @@ LimbPartition::LimbPartition(LimbPartition&& l) noexcept
     key_pack_bits = l.key_pack_bits;
     bufferKSKPACK = l.bufferKSKPACK;
     bufferKSKPACKbytes = l.bufferKSKPACKbytes;
+    bufferSPECIALbytes = l.bufferSPECIALbytes;
+    bufferSPECIALcudaMalloc = l.bufferSPECIALcudaMalloc;
+    bufferLIMBbytes = l.bufferLIMBbytes;
     l.bufferKSKPACK = nullptr;
     l.bufferSPECIAL = nullptr;
     l.bufferLIMB = nullptr;
@@ -187,16 +190,19 @@ LimbPartition::~LimbPartition() {
 #endif
     } else {
         if (bufferDECOMPandDIGIT)
+            // FAILURE §7: bytes=0 mis-files the block in GPUfree's 1 KB bucket. Left as-is
+            // ONLY because this branch is unreachable — both allocation sites for
+            // bufferDECOMPandDIGIT (the GPUmalloc and the NCCL one) are commented out, so the
+            // pointer is always null here and the NCCL path takes the handle branch above.
             GPUfree(bufferDECOMPandDIGIT, id, 0, s.ptr());
         // cudaFreeAsync(bufferDECOMPandDIGIT, s.ptr());
     }
-    if (bufferSPECIAL)
-        GPUfree(bufferSPECIAL, id, 0, s.ptr());
+    freeSpecialBuffer();  // FAILURE §7: correct size AND route, not GPUfree(..., 0, ...)
     //cudaFreeAsync(bufferSPECIAL, s.ptr());
     if (bufferKSKPACK)
         GPUfree(bufferKSKPACK, id, (int)bufferKSKPACKbytes, s.ptr());
     if (bufferLIMB) {
-        GPUfree(bufferLIMB, id, 0, s.ptr());
+        GPUfree(bufferLIMB, id, (int)bufferLIMBbytes, s.ptr());  // FAILURE §7
         //cudaFreeAsync(bufferLIMB, s.ptr());
     }
     if (bufferAUXptrs)
@@ -214,6 +220,10 @@ LimbPartition::~LimbPartition() {
 #endif
     } else {
         if (bufferGATHER)
+            // FAILURE §7: same bytes=0 defect, left as-is — bufferGATHER is allocated only by
+            // ncclMemAlloc, whose companion handle sends it down the branch above; reaching
+            // here would mean an NCCL alloc with no registered handle. Fix it with the size if
+            // that combination ever becomes real.
             GPUfree(bufferGATHER, id, 0, s.ptr());
         //cudaFreeAsync(bufferGATHER, s.ptr());
     }
@@ -551,12 +561,16 @@ void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_comm
         (!(for_communication && cc.GPUid.size() > 0) && SPECIALlimb.size() == 0 && SPECIALmeta.size() > 0)) {
         if ((for_communication && cc.GPUid.size() > 0)) {
             assert(SPECIALlimb.size() == 0);
-            cudaMalloc(&bufferSPECIAL, std::max(1ul, cc.N * SPECIALmeta.size() * 2 * sizeof(uint64_t)));
+            bufferSPECIALbytes = std::max(1ul, cc.N * SPECIALmeta.size() * 2 * sizeof(uint64_t));
+            bufferSPECIALcudaMalloc = true;  // plain cudaMalloc: must be plain cudaFree
+            cudaMalloc(&bufferSPECIAL, bufferSPECIALbytes);
             generate(SPECIALmeta, SPECIALlimb, SPECIALlimbptr, (int)SPECIALmeta.size() - 1, &SPECIALauxptr,
                      bufferSPECIAL, 0, bufferSPECIAL, cc.N * SPECIALmeta.size());
         } else {
             assert(bufferSPECIAL == nullptr);
-            bufferSPECIAL = (uint64_t*)GPUmalloc(device, cc.N * SPECIALmeta.size() * 2 * sizeof(uint64_t), s.ptr());
+            bufferSPECIALbytes = cc.N * SPECIALmeta.size() * 2 * sizeof(uint64_t);
+            bufferSPECIALcudaMalloc = false;
+            bufferSPECIAL = (uint64_t*)GPUmalloc(device, (int)bufferSPECIALbytes, s.ptr());
             CudaCheckErrorModNoSync;
             //generate(SPECIALmeta, SPECIALlimb, SPECIALlimbptr, (int)SPECIALmeta.size() - 1, &SPECIALauxptr, nullptr, 0,
             //         nullptr, 0);
@@ -1233,11 +1247,33 @@ void LimbPartition::freeSpecialLimbs() {
         STREAM(SPECIALlimb.at(i)).wait(s);
     }
     SPECIALlimb.clear();
-    if (bufferSPECIAL != nullptr) {
-        GPUfree(bufferSPECIAL, id, 0, s.ptr());
-        //cudaFreeAsync(bufferSPECIAL, s.ptr());
-        bufferSPECIAL = nullptr;
+    freeSpecialBuffer();
+}
+
+/* FAILURE §7: hand GPUfree the byte count GPUmalloc was given, and match the ROUTE.
+ *
+ * This used to be `GPUfree(bufferSPECIAL, id, 0, s.ptr())`. GPUfree re-derives the free-list
+ * bucket from `bytes`: below 64 K it rounds up to a power of two and forces caching, so `0`
+ * became 1024 and a 12.58 MB buffer was pushed into the **1 KB** bucket of `size_to_memory`,
+ * where no allocation of the real size will ever look for it. Every keyswitch stranded one.
+ * MEASURED on the RR walk before the RR path stopped freeing these at all: 6514 MB vs 1314 MB
+ * of pool, and the arithmetic matches to within 2 % (21 iters x 10 levels x 2 polys x 12.58 MB).
+ *
+ * The route has to match too: generateSpecialLimb's `for_communication` arm uses a plain
+ * cudaMalloc, and a cudaMalloc'ed pointer must NOT be handed to cudaFreeAsync (which is where
+ * GPUfree sends a >=64 K non-cached block). */
+void LimbPartition::freeSpecialBuffer() {
+    if (bufferSPECIAL == nullptr)
+        return;
+    if (bufferSPECIALcudaMalloc) {
+        cudaFree(bufferSPECIAL);
+    } else {
+        assert(bufferSPECIALbytes > 0 && "special buffer freed without its GPUmalloc byte count");
+        GPUfree(bufferSPECIAL, id, (int)bufferSPECIALbytes, s.ptr());
     }
+    bufferSPECIAL = nullptr;
+    bufferSPECIALbytes = 0;
+    bufferSPECIALcudaMalloc = false;
 }
 
 /* FALLBACK limb-copy path. Since 2026-07-29 THE copy is the type-unaware copy_bytes_ (see
@@ -1610,7 +1646,8 @@ void LimbPartition::generateLimbSingleMalloc() {
     if (bufferLIMB == nullptr) {
         assert(limb.size() == 0);
 
-        bufferLIMB = (uint64_t*)GPUmalloc(device, cc.N * limbsize * 2 * sizeof(uint64_t), s.ptr());
+        bufferLIMBbytes = cc.N * limbsize * 2 * sizeof(uint64_t);
+        bufferLIMB = (uint64_t*)GPUmalloc(device, (int)bufferLIMBbytes, s.ptr());
         //cudaMallocAsync(&bufferLIMB, std::max(1ul, cc.N * limbsize * 2 * sizeof(uint64_t)), s.ptr());
     }
 
@@ -1631,8 +1668,9 @@ void LimbPartition::generateLimbConstant() {
         //bufferLIMB = (uint64_t*)GPUmalloc(device, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
         //cudaMallocAsync(&bufferLIMB, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
     } else {
-        GPUfree(bufferLIMB, id, 0, s.ptr());
+        GPUfree(bufferLIMB, id, (int)bufferLIMBbytes, s.ptr());  // FAILURE §7
         bufferLIMB = nullptr;
+        bufferLIMBbytes = 0;
         //cudaFreeAsync(&bufferLIMB, s.ptr());
         //bufferLIMB = (uint64_t*)GPUmalloc(device, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
         //cudaMallocAsync(&bufferLIMB, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
