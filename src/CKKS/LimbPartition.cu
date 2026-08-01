@@ -1080,6 +1080,117 @@ bool LimbPartition::rescale2() {
     return true;
 }
 
+/* RATIONAL RESCALING, FUSED (RR_PLAN milestone (c).4).
+ *
+ * The unfused reference (RRRescaleStep, milestone (c).1) launches, per dropped prime, one
+ * SwitchModulus + one full NTT + a sub + a scalar mult PER SURVIVING LIMB — ~200-470 kernel
+ * launches for one rescale on this chain, where the classic rescale uses 2-4. This is the same
+ * arithmetic through the existing NTT_RESCALE fusion instead.
+ *
+ * It fits because an RR payload rescale IS k classic rescales with a scalar multiply in front:
+ *   - the add-back is free (scale by prod(added), whose residues on the incoming primes are
+ *     exactly 0, so extending onto them is a zero-fill), and
+ *   - the k primes then divide out ONE AT A TIME by exactly the classic centered-lift step.
+ * The kernel never assumed the dropped limb was the top one — it takes it as a single dat[0]
+ * pointer and the survivors as res[blockIdx.y] — so the only generalization needed is to let
+ * the dropped slot sit anywhere and to launch one pass per contiguous run of survivors.
+ *
+ * ORDER MATTERS and is not free to choose: each step divides (x - [x]_d) by d, so the rounding
+ * of one step feeds the next. The drops are processed in the CPU reference's order
+ * (RRChain::RescaleElement: low edge ascending, then high edge ascending), which is why the
+ * survivor set can have a hole and the run-splitting below is not optional.
+ *
+ * The exact-division semantics come from the constants, not the kernel: on an RR chain
+ * QlQlInvModqlDivqlModq[d][p] is filled with -d^-1 mod p (ConstantsGPU.cu), which turns the
+ * fusion's rounding form q_inv*x + QQIMQDQ*lift into q_inv*(x - lift). */
+void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<int>& add, const int new_level) {
+    cudaSetDevice(device);
+    assert(cc.isRR() && "rrRescale is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR is single-GPU");
+    assert((int)limb.size() == cc.windowSize(new_level + 1));
+    constexpr ALGO algo = ALGO_SHOUP;
+
+    // --- 1. scale by prod(added), batched (one launch per cc.batch, not one per limb) ---
+    if (!add.empty()) {
+        std::vector<uint64_t> elems(cc.prime.size(), 1);
+        for (auto& li : limb) {
+            const int pid    = PRIMEID(li);
+            const uint64_t q = cc.prime[pid].p;
+            uint64_t acc     = 1;
+            for (int a : add)
+                acc = static_cast<uint64_t>(static_cast<unsigned __int128>(acc) * (cc.prime[a].p % q) % q);
+            elems[pid] = acc;
+        }
+        multScalar(elems);
+
+        // --- 2. zero-extension onto the incoming primes, merged in primeid order. Limb has
+        //        reference members (no assignment), so the vector is REBUILT by move. ---
+        std::vector<LimbImpl> merged;
+        merged.reserve(limb.size() + add.size());
+        std::vector<int> sortedAdd = add;
+        std::sort(sortedAdd.begin(), sortedAdd.end());
+        size_t li = 0, ai = 0;
+        while (li < limb.size() || ai < sortedAdd.size()) {
+            if (ai >= sortedAdd.size() || (li < limb.size() && PRIMEID(limb[li]) < sortedAdd[ai])) {
+                merged.emplace_back(std::move(limb[li++]));
+            } else {
+                Limb<uint32_t> nl(cc, id, s, sortedAdd[ai++]);
+                cudaMemsetAsync(nl.v.data, 0, sizeof(uint32_t) * cc.N, s.ptr());
+                merged.emplace_back(std::move(nl));
+            }
+        }
+        limb  = std::move(merged);
+        pbase = PRIMEID(limb.front());
+        refreshLimbPtrs();  // the union window's tables, ONCE
+    }
+
+    // --- 3. divide the dropped primes out, in the CPU reference's order ---
+    const int n = (int)limb.size();
+    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;
+    const dim3 bdF{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
+    const dim3 bdS{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+    const int byF = (32 / M) * bdF.x * (2 * M + 1 + 1);  // +1: ALGO_SHOUP carries a shoup table
+    const int byS = (32 / M) * bdS.x * (2 * M + 1 + 1);
+
+    std::vector<char> dead(n, 0);
+    for (int d : drop) {
+        const int ds = d - pbase;
+        assert(ds >= 0 && ds < n && PRIMEID(limb.at(ds)) == d && !dead[ds]);
+        SWITCH(limb.at(ds), INTT<ALGO_SHOUP>());  // dropped limb -> coefficient domain
+
+        // one NTT_RESCALE pass per contiguous run of still-live limbs (at most two: the
+        // reference's order can leave the dropped slot in the MIDDLE of the live set)
+        int beg = -1;
+        for (int k = 0; k <= n; ++k) {
+            const bool live = (k < n) && !dead[k] && k != ds;
+            if (live && beg < 0)
+                beg = k;
+            if ((!live) && beg >= 0) {
+                const uint32_t num = (uint32_t)(k - beg);
+                NTT_<false, algo, NTT_RESCALE><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF, s.ptr()>>>(
+                    getGlobals(), limbptr.data + ds, PB(beg), auxptr.data + beg, nullptr, d, nullptr, nullptr);
+                NTT_<true, algo, NTT_RESCALE><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
+                    getGlobals(), auxptr.data + beg, PB(beg), limbptr.data + beg, nullptr, d, nullptr, nullptr);
+                beg = -1;
+            }
+        }
+        dead[ds] = 1;
+    }
+
+    // --- 4. drop the dead slots and re-base ---
+    std::vector<LimbImpl> kept;
+    kept.reserve(n - (int)drop.size());
+    for (int k = 0; k < n; ++k)
+        if (!dead[k])
+            kept.emplace_back(std::move(limb[k]));
+    limb = std::move(kept);
+    assert((int)limb.size() == cc.windowSize(new_level));
+    pbase = cc.windowLo(new_level);
+    assert(limb.empty() || PRIMEID(limb.front()) == pbase);
+    refreshLimbPtrs();
+    CudaCheckErrorModNoSync;
+}
+
 void LimbPartition::multPt(const LimbPartition& p) {
     const int limbsize = getLimbSize(*level);
     // assert(SPECIALlimb.size() == 0 && p.SPECIALlimb.size() == 0);

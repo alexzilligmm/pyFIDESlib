@@ -51,7 +51,7 @@ void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vec
 std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
                                                      const std::vector<std::vector<uint32_t>>& coeffLimbs,
                                                      const std::vector<int>& primeids, const std::vector<int>& drop,
-                                                     const std::vector<int>& add);
+                                                     const std::vector<int>& add, double* only_step_ms = nullptr);
 
 class KeySwitchingKey;
 
@@ -77,7 +77,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
  */
 std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
                                                          const std::vector<std::vector<uint32_t>>& coeffLimbs,
-                                                         int level, uint64_t scalar = 1);
+                                                         int level, uint64_t scalar = 1,
+                                                         double* only_step_ms = nullptr);
 
 /**
  * Milestone (c).4b gate harness: a full RR ct*ct -> relinearize -> (optionally) rr-rescale,

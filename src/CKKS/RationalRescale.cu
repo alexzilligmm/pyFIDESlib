@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <iostream>
 #include <optional>
 
@@ -39,7 +40,7 @@ size_t RRNumPrimes(ContextData& cc) {
 std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
                                                      const std::vector<std::vector<uint32_t>>& coeffLimbs,
                                                      const std::vector<int>& primeids, const std::vector<int>& drop,
-                                                     const std::vector<int>& add) {
+                                                     const std::vector<int>& add, double* only_step_ms) {
     assert(coeffLimbs.size() == primeids.size());
     cudaSetDevice(cc.GPUid[0]);
     Stream s;
@@ -52,7 +53,17 @@ std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
         l.NTT();
         limbs.emplace_back(std::move(l));
     }
-    RRRescaleStep(cc, limbs, drop, add);
+    // Optional isolation for the (c).4 benchmark: time ONLY the step, not the harness's
+    // per-call limb construction — which otherwise dominates and hides what is being compared.
+    if (only_step_ms) {
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        RRRescaleStep(cc, limbs, drop, add);
+        cudaDeviceSynchronize();
+        *only_step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    } else {
+        RRRescaleStep(cc, limbs, drop, add);
+    }
     std::vector<std::vector<uint32_t>> out(limbs.size());
     for (size_t k = 0; k < limbs.size(); ++k) {
         auto& l = std::get<U32>(limbs[k]);
@@ -162,19 +173,9 @@ void LimbPartition::refreshLimbPtrs() {
     CudaCheckErrorModNoSync;
 }
 
-void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<int>& add, const int new_level) {
-    cudaSetDevice(device);
-    assert(cc.isRR() && "rrRescale is only defined on an RR chain");
-    assert(cc.GPUid.size() == 1 && "RR is single-GPU until milestone (c).3");
-    assert((int)limb.size() == cc.windowSize(new_level + 1));
-    RRRescaleStep(cc, limb, drop, add, id);
-    assert((int)limb.size() == cc.windowSize(new_level));
-    pbase = cc.windowLo(new_level);
-    assert(limb.empty() || PRIMEID(limb.front()) == pbase);
-    // Both window edges moved and the limb vector was REBUILT (not appended to), so every
-    // entry of the device pointer tables is stale — including slot 0's.
-    refreshLimbPtrs();
-}
+// LimbPartition::rrRescale lives in LimbPartition.cu: it launches NTT_<..., NTT_RESCALE>,
+// and a __global__ template launched from a TU that only sees its declaration gets a weak
+// local stub with no device code (the 'invalid device function' trap, ElemenwiseBatchKernels.cuh).
 
 void RNSPoly::rrRescale() {
     assert(cc.isRR() && "RNSPoly::rrRescale is only defined on an RR chain");
@@ -320,7 +321,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
 
 std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
                                                          const std::vector<std::vector<uint32_t>>& coeffLimbs,
-                                                         const int level, const uint64_t scalar) {
+                                                         const int level, const uint64_t scalar,
+                                                         double* only_step_ms) {
     assert(cc.isRR());
     assert((int)coeffLimbs.size() == cc.windowSize(level));
     cudaSetDevice(cc.GPUid[0]);
@@ -345,7 +347,15 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
             elems[lo + k] = scalar % cc.prime.at(lo + k).p;
         p.multScalar(elems);
     }
-    p.rrRescale();
+    if (only_step_ms) {
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        p.rrRescale();
+        cudaDeviceSynchronize();
+        *only_step_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    } else {
+        p.rrRescale();
+    }
     p.INTT(1, false);
     p.sync();
 

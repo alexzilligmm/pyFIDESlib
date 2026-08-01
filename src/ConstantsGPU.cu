@@ -574,6 +574,27 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
         auto param = static_cast<CKKS::Parameters>(parameters);
         if (param.raw) {
             {
+                if (!param.rrWindows.empty()) {
+                    // RR (RR_PLAN (c).4): reuse the NTT_RESCALE fusion kernel UNCHANGED by
+                    // giving this table the RR meaning. The fusion computes
+                    //     out = q_inv[d][p]*x + QlQlInvModqlDivqlModq[d][p]*lift
+                    // which is OpenFHE's ROUNDING rescale; RR's step is the exact centered-lift
+                    // division (x - lift)*d^-1. Those are the same expression iff this table
+                    // holds -d^-1 mod p. So: one constant, zero kernel changes.
+                    //
+                    // Two differences from the classic fill, both structural: it must cover
+                    // ALL ordered pairs (an RR drop can be BELOW its targets — the low window
+                    // edge moves), not just i < j; and it cannot come from
+                    // m_QlQlInvModqlDivqlModq, which OpenFHE built for prefix levels.
+                    for (size_t j = 0; j < q.size(); ++j) {
+                        for (size_t i = 0; i < q.size(); ++i) {
+                            if (i == j)
+                                continue;
+                            const uint64_t inv = modinv(q[j].p % q[i].p, q[i].p);  // d^-1 mod p
+                            hG_.QlQlInvModqlDivqlModq[j][i] = (q[i].p - inv) % q[i].p;
+                        }
+                    }
+                } else
                 for (size_t i = 0; i < q.size(); ++i) {
                     for (size_t j = 0; j < q.size(); ++j) {
                         if (i < j) {
