@@ -42,6 +42,11 @@ template <ALGO algo = DEFAULT_ALGO>
 __forceinline__ __device__ uint64_t modmult(const uint64_t a, const uint64_t b, const int primeid,
                                             const uint64_t shoup_b = 0);
 
+/** Exact `a mod p` for ANY a < 2^64, p < 2^32 (defined below; declared here because the u32
+ *  ALGO_BARRETT arm uses it). */
+__forceinline__ __device__ uint32_t modreduce_lazy(const uint64_t a, const int primeid);
+
+
 /** 64-bit integer improved Barret modular multiplication implementation. (p < 2^62) */
 __forceinline__ __device__ uint64_t Neal_mult_64(const uint64_t op1, const uint64_t op2, const uint64_t mu,
                                                  const uint64_t prime, const uint32_t qbit) {
@@ -250,7 +255,30 @@ __device__ uint32_t modmult(const uint32_t a, const uint32_t b, const int primei
     } else if constexpr (algo == 3) {
         res = Shoup_mult_32(a, b, shoup_b, p);
     } else if constexpr (algo == 4) {
+        // ALGO_BARRETT at u32 width goes through the LAZY reducer rather than Neal_mult_32.
+        //
+        // MEASURED (tests/dev/test_modmult_range.cu, 2026-08-02): Neal_mult_32 is the SOLE
+        // reason the u32 datapath was capped at p < 2^30 — every other u32 primitive
+        // (Shoup_mult_32, Mont_mult_32, this reducer) is exact to 2^31-1, and Neal_mult_32
+        // fails 4094/4096 for every p >= 2^30. Two independent overflows do it: its
+        // mu = 2^(2*qbit+1)/q is computed u64 but PASSED as uint32_t, and its reducer shifts
+        // by `30 - qbit`, i.e. by -1 at qbit = 31. Both are baked into a 30-bit assumption
+        // that cannot be lifted without changing the algorithm.
+        //
+        // modreduce_lazy is exact for any product with p < 2^32 (see its proof below), is
+        // already the reducer both base-conversion kernels rely on, and costs one
+        // __umul64hi where Neal_mult_32 paid a shift + __umulhi + shift. Below 2^30 both
+        // return the same canonical residue, so this is bit-identical on existing chains —
+        // it only makes previously-broken widths correct.
+        //
+        // KNOWLEDGE §10 records the wall and its (half-wrong) original attribution; the
+        // reason this is NOT the SMR path is that SMR replaces TWIDDLE multiplies, and the
+        // twiddles were never the ones failing.
+#if FIDESLIB_WIDE_PRIMES
+        res = modreduce_lazy((uint64_t)a * (uint64_t)b, primeid);
+#else
         res = Neal_mult_32(a, b, C_.prime_better_barret_mu[primeid], p, C_.prime_bits[primeid]);
+#endif
     } else if constexpr (algo == ALGO_SMR) {
         // The MONTGOMERY-FORM constant (b_true * 2^32 mod p) rides the SHOUP argument slot —
         // callers keep their (value, shoup) pair signature and the plain value arg goes dead

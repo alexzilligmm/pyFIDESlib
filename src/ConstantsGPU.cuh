@@ -15,6 +15,23 @@
 #define FIDESLIB_NTT_SMR 0
 #endif
 
+// FIDESLIB_WIDE_PRIMES — build for chains whose primes reach [2^30, 2^32) (rational
+// rescaling wants Cheddar's Pr~30 at ~2^30.1; see docs/RR_PLAN.md milestone (a)).
+//
+// This is a CAPABILITY flag, not a performance one, and that distinction is the whole reason
+// it is compile-time. MEASURED 2026-08-02 (tests/dev/test_modmult_range.cu +
+// scripts/bin_ab.sh): the u32 ALGO_BARRETT arm (Neal_mult_32) is the SOLE reason the datapath
+// caps at 2^30 — every other u32 primitive is exact to 2^31-1 — but routing it through the
+// lazy reducer instead costs the CLASSIC bootstrap +1.55 ms unconditionally, and +0.63 ms
+// even width-gated at runtime, because the wide arm's registers land in the NTT butterfly
+// loops whether or not the branch is taken. A chain that never exceeds 2^30 must not pay
+// that, so the choice is made once, by the build, from the chain it is for.
+//
+// At 0 (default) the generated code is BYTE-IDENTICAL to the pre-flag library.
+#ifndef FIDESLIB_WIDE_PRIMES
+#define FIDESLIB_WIDE_PRIMES 0
+#endif
+
 #include <cinttypes>
 #include <vector>
 #include "LimbUtils.cuh"
