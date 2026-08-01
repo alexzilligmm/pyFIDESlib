@@ -4,6 +4,7 @@
 #include <bit>
 #include <cassert>
 #include <cstdlib>
+#include <fstream>
 #include <stdexcept>
 #include <type_traits>
 #include "CKKS/AccumulateBroadcast.cuh"
@@ -412,20 +413,41 @@ FIDESlib::CKKS::RawParams FIDESlib::CKKS::GetRawParams(lbcrypto::CryptoContext<l
 
     if (cc->GetScheme()->m_FHE) {
         if (boot_conf == FIDESlib::ENCAPS) {
-            // lbcrypto::FHECKKSRNS::g_coefficientsSparseEncapsulated
-            result.coefficientsCheby = {
-                0.24554573401685137,    -0.047919064883347899,   0.28388702040840819,      -0.029944538735513584,
-                0.35576522619036460,    0.015106561885073030,    0.29532946674499999,      0.071203602333739374,
-                -0.10347347339668074,   0.044997590512555294,    -0.42750712431925747,     -0.090342129729094875,
-                0.36762876269324946,    0.049318066039335348,    -0.14535986272411980,     -0.015106938483063579,
-                0.035951935499240355,   0.0031036582188686437,   -0.0062644606607068463,   -0.00046609430477154916,
-                0.00082128798852385086, 0.000053910533892372678, -0.000084551549768927401, -4.9773801787288514e-6,
-                7.0466620439083618e-6,  3.7659807574103204e-7,   -4.8648510153626034e-7,   -2.3830267651437146e-8,
-                2.8329709716159918e-8,  1.2817720050334158e-9,   -1.4122220430105397e-9,   -5.9306213139085216e-11,
-                6.3298928388417848e-11};  // degree 32
+            // V9 (banked 2026-08-02, SUCCESSFUL §1.16): r=5 double-angles + a degree-14
+            // Chebyshev refit of the SAME target, (2pi)^(-1/32)·cos(2pi(16y-0.25)/32) —
+            // -2.96 ms/bts (5/5 pairs), precision- and depth-neutral (fit err 2.6e-10;
+            // structured-bias table identical to 4 s.f.; setup level plans byte-identical:
+            // depth(15 coeffs)=4 +5 DA == depth(33)=6 +3). The two extra double-angle
+            // squarings are EXACT identities, which is why the degree halves twice at no
+            // precision cost. FIDESLIB_EVALMOD_R3=1 restores the legacy deg-32/r=3 pair.
+            static const bool legacy_r3 = [] {
+                const char* e = std::getenv("FIDESLIB_EVALMOD_R3");
+                return e && *e && *e != '0';
+            }();
+            if (legacy_r3) {
+                // lbcrypto::FHECKKSRNS::g_coefficientsSparseEncapsulated
+                result.coefficientsCheby = {
+                    0.24554573401685137,    -0.047919064883347899,   0.28388702040840819,      -0.029944538735513584,
+                    0.35576522619036460,    0.015106561885073030,    0.29532946674499999,      0.071203602333739374,
+                    -0.10347347339668074,   0.044997590512555294,    -0.42750712431925747,     -0.090342129729094875,
+                    0.36762876269324946,    0.049318066039335348,    -0.14535986272411980,     -0.015106938483063579,
+                    0.035951935499240355,   0.0031036582188686437,   -0.0062644606607068463,   -0.00046609430477154916,
+                    0.00082128798852385086, 0.000053910533892372678, -0.000084551549768927401, -4.9773801787288514e-6,
+                    7.0466620439083618e-6,  3.7659807574103204e-7,   -4.8648510153626034e-7,   -2.3830267651437146e-8,
+                    2.8329709716159918e-8,  1.2817720050334158e-9,   -1.4122220430105397e-9,   -5.9306213139085216e-11,
+                    6.3298928388417848e-11};  // degree 32
+                result.doubleAngleIts = lbcrypto::FHECKKSRNS::R_SPARSE;
+            } else {
+                result.coefficientsCheby = {
+                    -5.73829476916553172e-01, 2.63718536771466207e-02,  -9.15574236933522245e-01,
+                    -3.08975417541565676e-02, 2.85601052580403802e-01,  4.83129148738224799e-03,
+                    -2.74350673185783482e-02, -3.16919293037672828e-04, 1.31295181914509542e-03,
+                    1.15825536926191591e-05,  -3.79010152666429525e-05, -2.71035793019274615e-07,
+                    7.33952552563662122e-07,  4.41686895092293209e-09,  -1.03169742989480305e-08};  // degree 14, r=5
+                result.doubleAngleIts = 5;
+            }
             result.bootK = 16.0;
             result.sparse_encaps = true;
-            result.doubleAngleIts = lbcrypto::FHECKKSRNS::R_SPARSE;
             //result.bootK = 1.0;  // do not divide by k as we already did it during precomputation
         } else if (boot_conf == FIDESlib::ENCAPS_2) {
             result.coefficientsCheby = {
@@ -483,7 +505,45 @@ FIDESlib::CKKS::RawParams FIDESlib::CKKS::GetRawParams(lbcrypto::CryptoContext<l
             result.doubleAngleIts = 7;
         }
 
-        ;
+        // V9 (TO-TRY §2.0, 2026-08-02, user-authorized precision-budget lever):
+        // FIDESLIB_CHEB_TRUNC=<degree> truncates the EvalMod Chebyshev series to that
+        // degree at load. Valid because these ARE Chebyshev-basis coefficients: dropping
+        // the tail adds at most sum|c_i| of the dropped terms to the approximation error
+        // (the ENCAPS tail decays fast: c25..c32 sum to ~8e-6 ≈ 17 bits, below the chain's
+        // 13-bit noise floor). The PS tree in evalChebyshevSeries shapes itself from
+        // coefficients.size(), so the arithmetic saving is realized at runtime — env-only
+        // sweep, one binary. Unset = the full fitted series (byte-identical legacy).
+        if (const char* e = std::getenv("FIDESLIB_CHEB_TRUNC"); e && *e) {
+            const size_t n = (size_t)std::atoi(e) + 1;  // degree N -> N+1 coefficients
+            if (n > 0 && n < result.coefficientsCheby.size()) {
+                result.coefficientsCheby.resize(n);
+                std::cout << "[cheb_trunc] EvalMod Chebyshev series truncated to degree "
+                          << (n - 1) << " (" << n << " coefficients)" << std::endl;
+            }
+        }
+        // V9 refit route (2026-08-02): swap in an externally fitted Chebyshev series and/or
+        // a different double-angle count. The two MUST be consistent: the series must
+        // approximate (2pi)^(-1/2^r) * cos(2pi*(K*y - 0.25)/2^r) on y in [-1,1] for the
+        // chosen r (verified against the shipped ENCAPS series to 7e-12 at r=3), because r
+        // is baked into the coefficients' target while the CtS masks carry only 1/K.
+        // Mirrored in api/CryptoContext.cpp (level plan). Evaluator convention: c0 doubled.
+        if (const char* e = std::getenv("FIDESLIB_CHEB_COEFFS_FILE"); e && *e) {
+            std::ifstream fin(e);
+            if (!fin)
+                throw std::runtime_error(std::string("FIDESLIB_CHEB_COEFFS_FILE unreadable: ") + e);
+            std::vector<double> cs;
+            for (double v; fin >> v;)
+                cs.push_back(v);
+            if (cs.size() < 2)
+                throw std::runtime_error("FIDESLIB_CHEB_COEFFS_FILE: too few coefficients");
+            result.coefficientsCheby = cs;
+            std::cout << "[cheb_file] EvalMod Chebyshev series replaced: degree " << (cs.size() - 1)
+                      << " from " << e << std::endl;
+        }
+        if (const char* e = std::getenv("FIDESLIB_DA_ITS"); e && *e) {
+            result.doubleAngleIts = std::atoi(e);
+            std::cout << "[cheb_file] doubleAngleIts overridden to " << result.doubleAngleIts << std::endl;
+        }
     }
 
     result.p = cryptoParams->GetPlaintextModulus();

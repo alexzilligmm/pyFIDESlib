@@ -22,6 +22,7 @@
 #include <any>
 #include <atomic>
 #include <cmath>
+#include <fstream>
 #include <complex>
 #include <cstdint>
 #include <cstring>
@@ -1048,40 +1049,56 @@ void CryptoContextImpl<DCRTPoly>::EvalBootstrapSetup(const std::vector<uint32_t>
 	int doubleAngleIts = 3;
 
 	if (this->keyDist == fideslib::SPARSE_ENCAPSULATED) {
-		coeffchebyshev = { 0.24554573401685137,
-			-0.047919064883347899,
-			0.28388702040840819,
-			-0.029944538735513584,
-			0.35576522619036460,
-			0.015106561885073030,
-			0.29532946674499999,
-			0.071203602333739374,
-			-0.10347347339668074,
-			0.044997590512555294,
-			-0.42750712431925747,
-			-0.090342129729094875,
-			0.36762876269324946,
-			0.049318066039335348,
-			-0.14535986272411980,
-			-0.015106938483063579,
-			0.035951935499240355,
-			0.0031036582188686437,
-			-0.0062644606607068463,
-			-0.00046609430477154916,
-			0.00082128798852385086,
-			0.000053910533892372678,
-			-0.000084551549768927401,
-			-4.9773801787288514e-6,
-			7.0466620439083618e-6,
-			3.7659807574103204e-7,
-			-4.8648510153626034e-7,
-			-2.3830267651437146e-8,
-			2.8329709716159918e-8,
-			1.2817720050334158e-9,
-			-1.4122220430105397e-9,
-			-5.9306213139085216e-11,
-			6.3298928388417848e-11 };
-		doubleAngleIts = lbcrypto::FHECKKSRNS::R_SPARSE;
+		// V9 default (banked 2026-08-02): r=5 / degree-14 refit — MUST stay in lockstep with
+		// GetRawParams' ENCAPS branch (this copy only feeds `modall`, i.e. the level plan).
+		// FIDESLIB_EVALMOD_R3=1 restores the legacy deg-32/r=3 pair in BOTH places.
+		static const bool legacy_r3 = [] {
+			const char* e = std::getenv("FIDESLIB_EVALMOD_R3");
+			return e && *e && *e != '0';
+		}();
+		if (legacy_r3) {
+			coeffchebyshev = { 0.24554573401685137,
+				-0.047919064883347899,
+				0.28388702040840819,
+				-0.029944538735513584,
+				0.35576522619036460,
+				0.015106561885073030,
+				0.29532946674499999,
+				0.071203602333739374,
+				-0.10347347339668074,
+				0.044997590512555294,
+				-0.42750712431925747,
+				-0.090342129729094875,
+				0.36762876269324946,
+				0.049318066039335348,
+				-0.14535986272411980,
+				-0.015106938483063579,
+				0.035951935499240355,
+				0.0031036582188686437,
+				-0.0062644606607068463,
+				-0.00046609430477154916,
+				0.00082128798852385086,
+				0.000053910533892372678,
+				-0.000084551549768927401,
+				-4.9773801787288514e-6,
+				7.0466620439083618e-6,
+				3.7659807574103204e-7,
+				-4.8648510153626034e-7,
+				-2.3830267651437146e-8,
+				2.8329709716159918e-8,
+				1.2817720050334158e-9,
+				-1.4122220430105397e-9,
+				-5.9306213139085216e-11,
+				6.3298928388417848e-11 };
+			doubleAngleIts = lbcrypto::FHECKKSRNS::R_SPARSE;
+		} else {
+			coeffchebyshev = { -5.73829476916553172e-01, 2.63718536771466207e-02, -9.15574236933522245e-01,
+				-3.08975417541565676e-02, 2.85601052580403802e-01, 4.83129148738224799e-03,
+				-2.74350673185783482e-02, -3.16919293037672828e-04, 1.31295181914509542e-03,
+				1.15825536926191591e-05, -3.79010152666429525e-05, -2.71035793019274615e-07,
+				7.33952552563662122e-07, 4.41686895092293209e-09, -1.03169742989480305e-08 };
+			doubleAngleIts = 5;
+		}
 	} else if (this->keyDist == fideslib::SPARSE_TERNARY) {
 		coeffchebyshev = lbcrypto::FHECKKSRNS::g_coefficientsSparse;
 		doubleAngleIts = lbcrypto::FHECKKSRNS::R_SPARSE;
@@ -1091,6 +1108,28 @@ void CryptoContextImpl<DCRTPoly>::EvalBootstrapSetup(const std::vector<uint32_t>
 	} else {
 		OPENFHE_THROW("Unsupported key distribution");
 	}
+
+	// V9: FIDESLIB_CHEB_TRUNC=<degree> — MUST mirror the truncation GetRawParams applies to
+	// the runtime coefficient vector, because `modall` below derives the EvalMod level
+	// reservation from THIS copy: a runtime-only truncation shifts every CtS/StC mask level
+	// out from under the ciphertext (measured: illegal access in the CtS LT dot).
+	if (const char* e = std::getenv("FIDESLIB_CHEB_TRUNC"); e && *e) {
+		const size_t n = (size_t)std::atoi(e) + 1;  // degree N -> N+1 coefficients
+		if (n > 0 && n < coeffchebyshev.size())
+			coeffchebyshev.resize(n);
+	}
+	// V9 refit route — mirror of GetRawParams (see the comment there): external series
+	// and/or double-angle count; only the SIZE and count matter here (level plan).
+	if (const char* e = std::getenv("FIDESLIB_CHEB_COEFFS_FILE"); e && *e) {
+		std::ifstream fin(e);
+		if (!fin)
+			OPENFHE_THROW(std::string("FIDESLIB_CHEB_COEFFS_FILE unreadable: ") + e);
+		coeffchebyshev.clear();
+		for (double v; fin >> v;)
+			coeffchebyshev.push_back(v);
+	}
+	if (const char* e = std::getenv("FIDESLIB_DA_ITS"); e && *e)
+		doubleAngleIts = std::atoi(e);
 
 	// FIDESLIB_ARCSINE = reserve + enable everywhere (isolation probes);
 	// FIDESLIB_ARCSINE_RESERVE = reserve ONLY, correction stays off until a
