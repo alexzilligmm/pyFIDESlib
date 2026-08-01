@@ -27,6 +27,7 @@ namespace FIDESlib::CKKS {
  *  phase with a device sync and so measures EXECUTION — the walk is issue-bound, so it is the
  *  issue split that decides what to cut. Single-threaded, like the rest of the RR path. */
 double* rr_ks_host_ms = nullptr;
+extern double* rr_resc_host_ms;
 
 // defined (and instantiated) in Rescale.cu
 template <typename T>
@@ -169,13 +170,25 @@ void LimbPartition::refreshLimbPtrs() {
     // sync is needed. It used to be a stack vector, which forced a cudaStreamSynchronize here
     // — twice per RR rescale, draining the pipeline each time.
     if (pin_stage == nullptr) {
-        cudaMallocHost(&pin_stage, 2 * MAXP * sizeof(void*));
-        cudaEventCreateWithFlags(&pin_evt, cudaEventDisableTiming);
+        // TO-TRY §2.10b'.2: a RING, not one slot. With one slot the event below is recorded
+        // after the whole rescale's kernels, so the "wait for the 512-byte copy" became a wait
+        // for the GPU to drain a level — a per-level pipeline drain in an issue-bound path.
+        // FIDESLIB_RR_PIN_RING=1 restores the old single-slot behaviour exactly (the ablation).
+        static const int ring = [] {
+            const char* e = std::getenv("FIDESLIB_RR_PIN_RING");
+            const int v = e ? std::atoi(e) : 4;
+            return v < 1 ? 1 : (v > PIN_RING_MAX ? PIN_RING_MAX : v);
+        }();
+        pin_ring = ring;
+        cudaMallocHost(&pin_stage, (size_t)pin_ring * 2 * MAXP * sizeof(void*));
+        for (int k = 0; k < pin_ring; ++k)
+            cudaEventCreateWithFlags(&pin_evt[k], cudaEventDisableTiming);
     } else {
-        cudaEventSynchronize(pin_evt);  // the previous upload must have drained before reuse
+        // Only this SLOT's previous upload has to have drained, not the whole stream.
+        cudaEventSynchronize(pin_evt[pin_slot]);
     }
-    void** cpu_ptr    = pin_stage;
-    void** cpu_auxptr = pin_stage + MAXP;
+    void** cpu_ptr    = pin_stage + (size_t)pin_slot * 2 * MAXP;
+    void** cpu_auxptr = cpu_ptr + MAXP;
     for (size_t k = 0; k < n; ++k) {
         assert(limb[k].index() == U32 && "RR chains are all-U32 (< 2^30) by design");
         auto& l       = std::get<U32>(limb[k]);
@@ -185,7 +198,8 @@ void LimbPartition::refreshLimbPtrs() {
     assert((int)n <= limbptr.size && (int)n <= MAXP);
     cudaMemcpyAsync(limbptr.data, cpu_ptr, n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
     cudaMemcpyAsync(auxptr.data, cpu_auxptr, n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    cudaEventRecord(pin_evt, s.ptr());
+    cudaEventRecord(pin_evt[pin_slot], s.ptr());
+    pin_slot = (pin_slot + 1) % pin_ring;
     CudaCheckErrorModNoSync;
 }
 
@@ -671,12 +685,15 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
     RRScratch scratch(cc);
     std::array<double, 5> host_tot{};
     std::array<double, 5> ks_tot{};
+    std::array<double, 5> rs_tot{};
     const bool host_probe = std::getenv("RR_WALK_HOST_PROBE") != nullptr;
     for (int it = -1; it < iters; ++it) {  // it == -1 warms
         double ctor_ms = 0;
         std::array<double, 5> host_ms{};
         std::array<double, 5> ks_ms{};
+        std::array<double, 5> rs_ms{};
         rr_ks_host_ms = host_probe ? ks_ms.data() : nullptr;
+        rr_resc_host_ms = host_probe ? rs_ms.data() : nullptr;
         // RNSPoly has neither copy- nor move-ASSIGNMENT (reference members), so the running
         // ciphertext lives in an optional and each level move-CONSTRUCTS into it.
         std::optional<RNSPoly> c;
@@ -727,10 +744,12 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
             for (int i = 0; i < 5; ++i) {
                 host_tot[i] += host_ms[i];
                 ks_tot[i] += ks_ms[i];
+                rs_tot[i] += rs_ms[i];
             }
         }
     }
     rr_ks_host_ms = nullptr;
+    rr_resc_host_ms = nullptr;
     if (std::getenv("RR_WALK_HOST_PROBE")) {
         const char* nm[5] = {"binomial mult", "keyswitch", "add", "rescale", "hand-off"};
         double sum = 0;
@@ -744,6 +763,10 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
         for (int i = 0; i < 5; ++i)
             fprintf(stderr, "[rr_walk_host]     %-12s %7.3f ms  -> %6.1f us/level  (%4.1f%% of walk issue)\n", kn[i],
                     ks_tot[i] / iters, 1000.0 * ks_tot[i] / iters / top_level, 100.0 * ks_tot[i] / iters / sum);
+        const char* rn[5] = {"rs:multScalar", "rs:merge", "rs:refresh1", "rs:droploop", "rs:refresh2"};
+        for (int i = 0; i < 5; ++i)
+            fprintf(stderr, "[rr_walk_host]     %-12s %7.3f ms  -> %6.1f us/level  (%4.1f%% of walk issue)\n", rn[i],
+                    rs_tot[i] / iters, 1000.0 * rs_tot[i] / iters / top_level, 100.0 * rs_tot[i] / iters / sum);
     }
     if (std::getenv("RR_WALK_CTOR_PROBE")) {
         std::sort(ctor_samples.begin(), ctor_samples.end());

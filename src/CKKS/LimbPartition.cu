@@ -32,6 +32,10 @@ constexpr int PREFIX_SIZE = 23;
 
 namespace FIDESlib::CKKS {
 
+/** TO-TRY §2.10b'.2 probe sink for rrRescale's host issue cost:
+ *  [scalar+multScalar, merge, refresh#1, drop-loop, rebase+refresh#2]. */
+double* rr_resc_host_ms = nullptr;
+
 LimbPartition::LimbPartition(LimbPartition&& l) noexcept
     : cc(l.cc),
       uid(l.uid),
@@ -74,6 +78,27 @@ LimbPartition::LimbPartition(LimbPartition&& l) noexcept
     key_pack_bits = l.key_pack_bits;
     bufferKSKPACK = l.bufferKSKPACK;
     bufferKSKPACKbytes = l.bufferKSKPACKbytes;
+    // TO-TRY §2.10b'.3: these were NOT transferred, so every move left the source to free them
+    // (cudaFreeHost + cudaFree + cudaEventDestroy — all SYNCHRONIZING) while the destination
+    // re-allocated them (cudaMallocHost + cudaMalloc + cudaEventCreate — also synchronizing).
+    // Six synchronizing calls per RR level, for nothing: the walk hands a poly off every level.
+    static const bool move_scratch = [] {  // =0 reproduces the pre-fix behaviour (the ablation)
+        const char* e = std::getenv("FIDESLIB_MOVE_SCRATCH");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    if (move_scratch) {
+        pin_stage = l.pin_stage;
+        pin_slot = l.pin_slot;
+        pin_ring = l.pin_ring;
+        for (int k = 0; k < PIN_RING_MAX; ++k) {
+            pin_evt[k] = l.pin_evt[k];
+            l.pin_evt[k] = nullptr;
+        }
+        l.pin_stage = nullptr;
+        l.pin_ring = 0;
+        rr_drop_ptr_ = l.rr_drop_ptr_;
+        l.rr_drop_ptr_ = nullptr;
+    }
     bufferSPECIALbytes = l.bufferSPECIALbytes;
     bufferSPECIALcudaMalloc = l.bufferSPECIALcudaMalloc;
     bufferLIMBbytes = l.bufferLIMBbytes;
@@ -201,8 +226,9 @@ LimbPartition::~LimbPartition() {
     }
     freeSpecialBuffer();  // FAILURE §7: correct size AND route, not GPUfree(..., 0, ...)
     //cudaFreeAsync(bufferSPECIAL, s.ptr());
-    if (pin_evt)
-        cudaEventDestroy(pin_evt);
+    for (int k = 0; k < pin_ring; ++k)
+        if (pin_evt[k])
+            cudaEventDestroy(pin_evt[k]);
     if (pin_stage)
         cudaFreeHost(pin_stage);
     if (rr_drop_ptr_)
@@ -1210,6 +1236,14 @@ void** LimbPartition::rr_dropptr() {
  * fusion's rounding form q_inv*x + QQIMQDQ*lift into q_inv*(x - lift). */
 void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<int>& add, const int new_level) {
     cudaSetDevice(device);
+    // TO-TRY §2.10b'.2 probe: HOST ISSUE cost inside the rescale, which the walk-level probe
+    // shows at ~95 us/level against only ~48 us/level of GPU work.
+    auto rmark = std::chrono::steady_clock::now();
+    auto rph = [&](int i) {
+        const auto n = std::chrono::steady_clock::now();
+        if (rr_resc_host_ms) rr_resc_host_ms[i] += std::chrono::duration<double, std::milli>(n - rmark).count();
+        rmark = n;
+    };
     assert(cc.isRR() && "rrRescale is only defined on an RR chain");
     assert(cc.GPUid.size() == 1 && "RR is single-GPU");
     assert((int)limb.size() == cc.windowSize(new_level + 1));
@@ -1227,6 +1261,7 @@ void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<in
             elems[pid] = acc;
         }
         multScalar(elems);
+        rph(0);  // scalar build + multScalar (cudaMallocAsync + pageable H2D per call)
 
         // --- 2. zero-extension onto the incoming primes, merged in primeid order. Limb has
         //        reference members (no assignment), so the vector is REBUILT by move. ---
@@ -1244,9 +1279,11 @@ void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<in
                 merged.emplace_back(std::move(nl));
             }
         }
+        rph(1);  // zero-extension merge (2 fresh Limbs + the vector rebuild)
         limb  = std::move(merged);
         pbase = PRIMEID(limb.front());
         refreshLimbPtrs();  // the union window's tables, ONCE
+        rph(2);  // refreshLimbPtrs #1
     }
 
     // --- 3. divide the dropped primes out, in the CPU reference's order ---
@@ -1353,11 +1390,13 @@ void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<in
     for (int k = 0; k < n; ++k)
         if (!dead[k])
             kept.emplace_back(std::move(limb[k]));
+    rph(3);  // the drop loop (INTT + RESCALEK launches)
     limb = std::move(kept);
     assert((int)limb.size() == cc.windowSize(new_level));
     pbase = cc.windowLo(new_level);
     assert(limb.empty() || PRIMEID(limb.front()) == pbase);
     refreshLimbPtrs();
+    rph(4);  // rebase + refreshLimbPtrs #2
     CudaCheckErrorModNoSync;
 }
 

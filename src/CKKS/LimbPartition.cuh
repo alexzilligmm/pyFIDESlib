@@ -184,13 +184,23 @@ class LimbPartition {
     void adoptLimbPtrsFrom(const LimbPartition& src, int n);
     /** PINNED staging for refreshLimbPtrs, allocated lazily and kept for the partition's
      *  lifetime. Exists so the pointer-table upload does not need a stream sync to keep its
-     *  source alive — a stack vector forced one, twice per RR rescale. */
+     *  source alive — a stack vector forced one, twice per RR rescale.
+     *
+     *  It is a RING (TO-TRY §2.10b'.2). With one slot, the `cudaEventSynchronize` that protects
+     *  the buffer from being overwritten mid-copy waits on an event recorded AFTER the previous
+     *  rescale's kernels — so it does not wait for a 512-byte memcpy, it waits for the GPU to
+     *  drain a whole level. That is a per-level pipeline drain, on the host, in the one path
+     *  that is already issue-bound. With N slots the wait lands on the upload from N/2 rescales
+     *  ago, which is long done. `FIDESLIB_RR_PIN_RING=1` restores the single-slot behaviour
+     *  exactly, which is the ablation. */
+    static constexpr int PIN_RING_MAX = 8;
     void** pin_stage = nullptr;
-    /** Completion of the last pin_stage upload. The buffer is REUSED across calls and a
-     *  pinned cudaMemcpyAsync is genuinely asynchronous, so the host must not overwrite it
-     *  until the previous copy has drained — waiting on this event is free once it has (the
-     *  common case) and correct when it has not. A plain reuse would be a silent data race. */
-    cudaEvent_t pin_evt = nullptr;
+    /** Completion of each ring slot's upload. A pinned cudaMemcpyAsync is genuinely
+     *  asynchronous, so the host must not overwrite a slot until ITS copy has drained; a plain
+     *  reuse would be a silent data race. */
+    cudaEvent_t pin_evt[PIN_RING_MAX] = {};
+    int pin_slot = 0;
+    int pin_ring = 0;  //!< slots actually created (0 until the lazy init)
     /** RR (TO-TRY §2.10a): device table of ONE group's dropped-limb pointers, in drop order —
      *  what NTT_RESCALEK stage 1 indexes. RESCALEK_MAX slots, allocated on first use (so only
      *  RR chains ever pay for it) and kept for the partition's lifetime; the gather that fills
