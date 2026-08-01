@@ -1,0 +1,972 @@
+From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
+From: dev <dev@behemoth>
+Date: Sat, 1 Aug 2026 12:16:39 +0200
+Subject: [PATCH 1/3] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+ (rational-rescaling prime sizes)
+
+MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
+mu = 2^(2k+3)/m must fit one word; the Shoup ModMulFastConst path further
+requires m < 2^30. Both now carry runtime-gated exact 64-bit fallbacks
+(m >= 2^28 for the mu paths via ModMu/ModMul*/ModMulFast*, m >= 2^30 for
+the Shoup pair), so any m < 2^31 is correct while chains of <= 28-bit
+primes keep the fast paths bit-identically.
+---
+ src/core/include/math/hal/basicint.h        |  7 +++-
+ src/core/include/math/hal/intnat/ubintnat.h | 40 +++++++++++++++++++++
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/include/math/hal/basicint.h b/src/core/include/math/hal/basicint.h
+index 0332e354..8a1b6621 100644
+--- a/src/core/include/math/hal/basicint.h
++++ b/src/core/include/math/hal/basicint.h
+@@ -58,7 +58,12 @@
+         using int128_t        = int64_t;
+     #endif
+ #elif NATIVEINT == 32
+-    #define MAX_MODULUS_SIZE 28
++    // 31 (was 28): the rational-rescaling 25-30 prime system needs moduli that
++    // straddle 2^30 (all < 2^31). 28 was the widest size whose Barrett constant
++    // mu = 2^(2k+3)/m still fits a 32-bit word; ubintnat.h now carries exact
++    // 64-bit fallbacks (runtime-gated on m >= 2^28 / 2^30) for the mu-Barrett
++    // and Shoup paths, so any m < 2^31 is arithmetically correct.
++    #define MAX_MODULUS_SIZE 31
+     using BasicInteger    = uint32_t;
+     using DoubleNativeInt = uint64_t;
+     using uint128_t       = uint64_t;
+diff --git a/src/core/include/math/hal/intnat/ubintnat.h b/src/core/include/math/hal/intnat/ubintnat.h
+index 31a55412..2d5f403b 100644
+--- a/src/core/include/math/hal/intnat/ubintnat.h
++++ b/src/core/include/math/hal/intnat/ubintnat.h
+@@ -1125,6 +1125,11 @@ public:
+     template <typename T = NativeInt>
+     NativeIntegerT ModMul(const NativeIntegerT& b, const NativeIntegerT& modulus, const NativeIntegerT& mu,
+                           typename std::enable_if_t<!std::is_same_v<T, DNativeInt>, bool> = true) const {
++        if constexpr (sizeof(NativeInt) == 4) {  // wide modulus: mu is void, reduce exactly
++            if (modulus.m_value >> 28)
++                return {static_cast<DNativeInt>(m_value % modulus.m_value) * (b.m_value % modulus.m_value) %
++                        modulus.m_value};
++        }
+ #ifdef NATIVEINT_BARRET_MOD
+         auto av{*this};
+         auto& mv{modulus.m_value};
+@@ -1192,6 +1197,13 @@ public:
+     template <typename T = NativeInt>
+     NativeIntegerT& ModMulEq(const NativeIntegerT& b, const NativeIntegerT& modulus, const NativeIntegerT& mu,
+                              typename std::enable_if_t<!std::is_same_v<T, DNativeInt>, bool> = true) {
++        if constexpr (sizeof(NativeInt) == 4) {  // wide modulus: mu is void, reduce exactly
++            if (modulus.m_value >> 28) {
++                m_value = static_cast<NativeInt>(static_cast<DNativeInt>(m_value % modulus.m_value) *
++                                                 (b.m_value % modulus.m_value) % modulus.m_value);
++                return *this;
++            }
++        }
+ #ifdef NATIVEINT_BARRET_MOD
+         auto av{*this};
+         auto bv{b};
+@@ -1347,6 +1359,10 @@ public:
+     template <typename T = NativeInt>
+     NativeIntegerT ModMulFast(const NativeIntegerT& b, const NativeIntegerT& modulus, const NativeIntegerT& mu,
+                               typename std::enable_if_t<!std::is_same_v<T, DNativeInt>, bool> = true) const {
++        if constexpr (sizeof(NativeInt) == 4) {  // wide modulus: mu is void, reduce exactly
++            if (modulus.m_value >> 28)
++                return {static_cast<DNativeInt>(m_value) * b.m_value % modulus.m_value};
++        }
+         int64_t n = modulus.GetMSB() - 2;
+         auto& mv{modulus.m_value};
+         typeD tmp;
+@@ -1388,6 +1404,12 @@ public:
+     template <typename T = NativeInt>
+     NativeIntegerT& ModMulFastEq(const NativeIntegerT& b, const NativeIntegerT& modulus, const NativeIntegerT& mu,
+                                  typename std::enable_if_t<!std::is_same_v<T, DNativeInt>, bool> = true) {
++        if constexpr (sizeof(NativeInt) == 4) {  // wide modulus: mu is void, reduce exactly
++            if (modulus.m_value >> 28) {
++                m_value = static_cast<NativeInt>(static_cast<DNativeInt>(m_value) * b.m_value % modulus.m_value);
++                return *this;
++            }
++        }
+         typeD tmp;
+         MultD(m_value, b.m_value, tmp);
+         auto rv{GetD(tmp)};
+@@ -1463,6 +1485,10 @@ public:
+    */
+     NativeIntegerT ModMulFastConst(const NativeIntegerT& b, const NativeIntegerT& modulus,
+                                    const NativeIntegerT& bInv) const {
++        if constexpr (sizeof(NativeInt) == 4) {  // Shoup needs m < 2^30 on 32-bit words
++            if (modulus.m_value >> 30)
++                return {static_cast<DNativeInt>(m_value) * b.m_value % modulus.m_value};
++        }
+         NativeInt q = MultDHi(m_value, bInv.m_value) + 1;
+         auto yprime = static_cast<SignedNativeInt>(m_value * b.m_value - q * modulus.m_value);
+         return {yprime >= 0 ? yprime : yprime + modulus.m_value};
+@@ -1479,6 +1505,12 @@ public:
+    */
+     NativeIntegerT& ModMulFastConstEq(const NativeIntegerT& b, const NativeIntegerT& modulus,
+                                       const NativeIntegerT& bInv) {
++        if constexpr (sizeof(NativeInt) == 4) {  // Shoup needs m < 2^30 on 32-bit words
++            if (modulus.m_value >> 30) {
++                m_value = static_cast<NativeInt>(static_cast<DNativeInt>(m_value) * b.m_value % modulus.m_value);
++                return *this;
++            }
++        }
+         NativeInt q = MultDHi(m_value, bInv.m_value) + 1;
+         auto yprime = static_cast<SignedNativeInt>(m_value * b.m_value - q * modulus.m_value);
+         m_value     = static_cast<NativeInt>(yprime >= 0 ? yprime : yprime + modulus.m_value);
+@@ -2044,6 +2076,14 @@ private:
+     template <typename T = NativeInt>
+     static void ModMu(typeD& prod, NativeIntegerT& a, const T& mv, const T& mu, int64_t n,
+                       typename std::enable_if_t<!std::is_same_v<T, DNativeInt>, bool> = true) {
++        // 32-bit backend, wide modulus (>28 bits): mu = 2^(2k+3)/m no longer fits a
++        // word, so the Dhem-Barrett identity is void — reduce exactly instead.
++        if constexpr (sizeof(NativeInt) == 4) {
++            if (mv >> 28) {
++                a.m_value %= mv;
++                return;
++            }
++        }
+         prod = {0, a.m_value};
+         MultD(RShiftD(prod, n), mu, prod);
+         a.m_value -= static_cast<NativeInt>((GetD(prod) >> (n + 7)) * mv);
+-- 
+2.43.0
+
+
+From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
+From: dev <dev@behemoth>
+Date: Sat, 1 Aug 2026 13:14:07 +0200
+Subject: [PATCH 2/3] Rational-rescaling chain (Cheddar 25-30): explicit prime
+ schedule, windowed levels, drop-k+add-back rescale
+
+- CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
+  identities in inverted-terminal layout order + per-level contiguous
+  windows; ParamsGen fills moduliQ from the chain (FLEXIBLEAUTO only) and
+  asserts the 128-bit logPQ budget (1746) at N=2^16.
+- PrecomputeCRTTables: RR scaling-factor table indexed by rescale count
+  (not limbs dropped), exact per-level F = prod(drop)/prod(add), region
+  boundary reset (mixedlimb convention).
+- RRChain (ckksrns-rr.{h,cpp}): per-level params via GetParamPartition,
+  RR rescale = scalar mult by prod(added) (zero residues on the incoming
+  primes make the add-back a zero-extension) + sequential centered-lift
+  exact division by the dropped primes; window-restricted encrypt/decrypt/
+  encode helpers for driving the chain.
+---
+ src/pke/include/scheme/ckksrns/ckksrns-rr.h   |  77 ++++++
+ .../gen-cryptocontext-ckksrns-internal.h      |   3 +
+ .../include/scheme/gen-cryptocontext-params.h |  29 +++
+ .../include/schemerns/rns-cryptoparameters.h  |  30 +++
+ .../ckksrns/ckksrns-cryptoparameters.cpp      |  36 ++-
+ .../ckksrns/ckksrns-parametergeneration.cpp   |  64 ++++-
+ src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp     | 231 ++++++++++++++++++
+ 7 files changed, 468 insertions(+), 2 deletions(-)
+ create mode 100644 src/pke/include/scheme/ckksrns/ckksrns-rr.h
+ create mode 100644 src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+
+diff --git a/src/pke/include/scheme/ckksrns/ckksrns-rr.h b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+new file mode 100644
+index 00000000..d57710fa
+--- /dev/null
++++ b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+@@ -0,0 +1,77 @@
++//==================================================================================
++// Rational-rescaling (Cheddar 25-30 prime system) chain support.
++//
++// The RR chain gives every level an explicit prime SET (a contiguous window of
++// the inverted-terminal layout carried in CCParams::rrPrimeChain), and rescale
++// becomes a modulus switch by prod(dropped)/prod(added): multiply by the scalar
++// prod(added) — whose residues on the incoming primes are exactly zero, so the
++// "add-back base extension" is a zero-extension — then divide out the dropped
++// primes one at a time with the standard centered-lift exact division. No
++// approximate multi-limb CRT switch is ever needed.
++//
++// Ciphertexts on an RR chain store the RESCALE COUNT from the top in m_level
++// (RR levels drop a variable number of limbs and can add limbs back, so limb
++// count does not identify a level). They must be driven through this class, not
++// through ModReduce/LevelReduce.
++//==================================================================================
++#ifndef LBCRYPTO_CRYPTO_CKKSRNS_RR_H
++#define LBCRYPTO_CRYPTO_CKKSRNS_RR_H
++
++#include "cryptocontext.h"
++
++#include <memory>
++#include <vector>
++
++namespace lbcrypto {
++
++struct RRLevel {
++    uint32_t lo, hi;                           // inclusive window into the layout
++    std::shared_ptr<DCRTPoly::Params> params;  // element params of the window
++};
++
++class RRChain {
++public:
++    explicit RRChain(const CryptoContext<DCRTPoly>& cc);
++
++    uint32_t NumLevels() const {
++        return m_levels.size();
++    }
++    const RRLevel& Level(uint32_t r) const {
++        return m_levels.at(r);
++    }
++    uint32_t RRLevelOf(ConstCiphertext<DCRTPoly>& ct) const {
++        return NumLevels() - 1 - ct->GetLevel();
++    }
++    // factor of the rescale rHi -> rHi-1 (= prod(dropped)/prod(added))
++    double RescaleFactor(uint32_t rHi) const {
++        return m_F.at(rHi - 1);
++    }
++
++    // restrict a full-chain element (sk/pk rows) to level r's window
++    DCRTPoly Restrict(const DCRTPoly& full, uint32_t r) const;
++
++    // RR rescale from the ciphertext's level to the one below
++    void RescaleInPlace(Ciphertext<DCRTPoly>& ct) const;
++    DCRTPoly RescaleElement(const DCRTPoly& e, uint32_t rHi) const;
++
++    // encode at level r with an explicit scale (deg-1 by default)
++    Plaintext MakePlaintext(const std::vector<std::complex<double>>& value, uint32_t r, double scale,
++                            size_t noiseScaleDeg = 1, uint32_t slots = 0) const;
++    Ciphertext<DCRTPoly> Encrypt(const PublicKey<DCRTPoly>& pk, const Plaintext& pt, uint32_t r) const;
++    Plaintext Decrypt(const PrivateKey<DCRTPoly>& sk, ConstCiphertext<DCRTPoly>& ct) const;
++
++    // ct x pt product (no relinearization involved); scale/deg bookkeeping included
++    void EvalMultPlainInPlace(Ciphertext<DCRTPoly>& ct, const Plaintext& pt) const;
++    void EvalAddInPlace(Ciphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const;
++
++private:
++    CryptoContext<DCRTPoly> m_cc;
++    std::vector<uint64_t> m_chain;
++    uint32_t m_S = 0;
++    std::vector<RRLevel> m_levels;
++    std::vector<double> m_F;  // m_F[r-1] = rescale factor r -> r-1
++};
++
++}  // namespace lbcrypto
++
++#endif
+diff --git a/src/pke/include/scheme/ckksrns/gen-cryptocontext-ckksrns-internal.h b/src/pke/include/scheme/ckksrns/gen-cryptocontext-ckksrns-internal.h
+index a7e187ee..49a3168f 100644
+--- a/src/pke/include/scheme/ckksrns/gen-cryptocontext-ckksrns-internal.h
++++ b/src/pke/include/scheme/ckksrns/gen-cryptocontext-ckksrns-internal.h
+@@ -127,6 +127,9 @@ typename ContextGeneratorType::ContextType genCryptoContextCKKSRNSInternal(
+     params->SetMultiplicativeDepth(parameters.GetMultiplicativeDepth());
+     params->SetNoiseEstimate(parameters.GetNoiseEstimate());
+     params->SetScalingModSizePerLevel(parameters.GetScalingModSizePerLevel());
++    params->SetRRPrimeChain(parameters.GetRRPrimeChain());
++    params->SetRRWindows(parameters.GetRRWindows());
++    params->SetRRNumSmalls(parameters.GetRRNumSmalls());
+ 
+     uint32_t numLargeDigits =
+         ComputeNumLargeDigits(parameters.GetNumLargeDigits(), parameters.GetMultiplicativeDepth());
+diff --git a/src/pke/include/scheme/gen-cryptocontext-params.h b/src/pke/include/scheme/gen-cryptocontext-params.h
+index 9e723314..6e8c21e6 100644
+--- a/src/pke/include/scheme/gen-cryptocontext-params.h
++++ b/src/pke/include/scheme/gen-cryptocontext-params.h
+@@ -134,6 +134,17 @@ class Params {
+     // segment on larger primes above a small-prime data segment). FLEXIBLEAUTO(EXT) only.
+     std::vector<uint32_t> scalingModSizePerLevel;
+ 
++    // Rational-rescaling (Cheddar 25-30) chain: explicit prime IDENTITIES for the
++    // whole Q chain, in inverted-terminal layout order
++    //   [ small_{S-1} .. small_0 | q0 | main_1 .. main_M ]
++    // (index rrNumSmalls holds q0). rrWindows holds the per-level active window as
++    // flattened inclusive (lo, hi) pairs, level 0 (bottom) first; every level's
++    // active prime set is the contiguous layout slice [lo, hi]. Empty = disabled.
++    // Requires FLEXIBLEAUTO; multiplicativeDepth must equal rrPrimeChain.size()-1.
++    std::vector<uint64_t> rrPrimeChain;
++    std::vector<uint32_t> rrWindows;
++    uint32_t rrNumSmalls = 0;
++
+     // see KeySwitchTechnique - number of digits in HYBRID key switching
+     uint32_t numLargeDigits;
+ 
+@@ -338,6 +349,15 @@ public:
+     const std::vector<uint32_t>& GetScalingModSizePerLevel() const {
+         return scalingModSizePerLevel;
+     }
++    const std::vector<uint64_t>& GetRRPrimeChain() const {
++        return rrPrimeChain;
++    }
++    const std::vector<uint32_t>& GetRRWindows() const {
++        return rrWindows;
++    }
++    uint32_t GetRRNumSmalls() const {
++        return rrNumSmalls;
++    }
+     SecurityLevel GetSecurityLevel() const {
+         return securityLevel;
+     }
+@@ -440,6 +460,15 @@ public:
+     virtual void SetScalingModSizePerLevel(std::vector<uint32_t> scalingModSizePerLevel0) {
+         scalingModSizePerLevel = std::move(scalingModSizePerLevel0);
+     }
++    virtual void SetRRPrimeChain(std::vector<uint64_t> rrPrimeChain0) {
++        rrPrimeChain = std::move(rrPrimeChain0);
++    }
++    virtual void SetRRWindows(std::vector<uint32_t> rrWindows0) {
++        rrWindows = std::move(rrWindows0);
++    }
++    virtual void SetRRNumSmalls(uint32_t rrNumSmalls0) {
++        rrNumSmalls = rrNumSmalls0;
++    }
+     virtual void SetSecurityLevel(SecurityLevel securityLevel0) {
+         securityLevel = securityLevel0;
+     }
+diff --git a/src/pke/include/schemerns/rns-cryptoparameters.h b/src/pke/include/schemerns/rns-cryptoparameters.h
+index 4b300095..b7f27148 100644
+--- a/src/pke/include/schemerns/rns-cryptoparameters.h
++++ b/src/pke/include/schemerns/rns-cryptoparameters.h
+@@ -1405,11 +1405,41 @@ public:
+         m_scalingModSizePerLevel = std::move(sizes);
+     }
+ 
++    // Rational-rescaling chain (see CCParams::rrPrimeChain). Non-empty chain
++    // means the RR machinery is active: explicit prime identities in
++    // inverted-terminal layout order + per-level contiguous windows.
++    const std::vector<uint64_t>& GetRRPrimeChain() const {
++        return m_rrPrimeChain;
++    }
++    const std::vector<uint32_t>& GetRRWindows() const {
++        return m_rrWindows;
++    }
++    uint32_t GetRRNumSmalls() const {
++        return m_rrNumSmalls;
++    }
++    bool IsRRChain() const {
++        return !m_rrPrimeChain.empty();
++    }
++    void SetRRPrimeChain(std::vector<uint64_t> chain) {
++        m_rrPrimeChain = std::move(chain);
++    }
++    void SetRRWindows(std::vector<uint32_t> windows) {
++        m_rrWindows = std::move(windows);
++    }
++    void SetRRNumSmalls(uint32_t n) {
++        m_rrNumSmalls = n;
++    }
++
+ protected:
+     // Optional per-level bit sizes for the rescale primes q_1..q_n (bottom-up).
+     // Empty = uniform chain. See CCParams::scalingModSizePerLevel.
+     std::vector<uint32_t> m_scalingModSizePerLevel;
+ 
++    // Rational-rescaling chain state (see CCParams::rrPrimeChain).
++    std::vector<uint64_t> m_rrPrimeChain;
++    std::vector<uint32_t> m_rrWindows;
++    uint32_t m_rrNumSmalls = 0;
++
+     /////////////////////////////////////
+     // PrecomputeCRTTables
+     /////////////////////////////////////
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-cryptoparameters.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-cryptoparameters.cpp
+index b5cd0a27..64cda992 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-cryptoparameters.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-cryptoparameters.cpp
+@@ -90,7 +90,41 @@ void CryptoParametersCKKSRNS::PrecomputeCRTTables(KeySwitchTechnique ksTech, Sca
+         m_scalTechnique == COMPOSITESCALINGAUTO || m_scalTechnique == COMPOSITESCALINGMANUAL) {
+         m_scalingFactorsReal.resize(sizeQ);
+ 
+-        if ((sizeQ == 1) && (extraBits == 0) && (m_scalTechnique != COMPOSITESCALINGAUTO) &&
++        if (IsRRChain()) {
++            // Rational-rescaling chain: the table is indexed by RESCALE COUNT from
++            // the top (that is what RR ciphertexts carry in m_level), not by limbs
++            // dropped — RR levels drop a variable number of limbs and may add some
++            // back, so limb count does not identify a level. sf follows the exact
++            // per-level rescale factors F = prod(dropped)/prod(added); at a region
++            // boundary (bts -> payload) the recursion is reset to the next F, the
++            // jump being absorbed by the boundary ct-pt op (mixedlimb convention).
++            const auto& win = m_rrWindows;
++            size_t nLvl     = win.size() / 2;
++            std::vector<double> F(nLvl - 1);
++            for (size_t k = 0; k + 1 < nLvl; ++k) {
++                size_t hiL = nLvl - 1 - k, loL = hiL - 1;  // rr levels: from (top - k) down
++                uint32_t hLo = win[2 * hiL], hHi = win[2 * hiL + 1];
++                uint32_t lLo = win[2 * loL], lHi = win[2 * loL + 1];
++                double f = 1.0;
++                for (uint32_t i = std::min(hLo, lLo); i < std::max(hLo, lLo); ++i)
++                    f = (hLo < lLo) ? f * static_cast<double>(m_rrPrimeChain[i]) :
++                                      f / static_cast<double>(m_rrPrimeChain[i]);
++                for (uint32_t i = std::min(hHi, lHi) + 1; i <= std::max(hHi, lHi); ++i)
++                    f = (hHi > lHi) ? f * static_cast<double>(m_rrPrimeChain[i]) :
++                                      f / static_cast<double>(m_rrPrimeChain[i]);
++                F[k] = f;
++            }
++            m_scalingFactorsReal[0] = F[0];
++            for (size_t k = 1; k < nLvl; ++k) {
++                double cand = m_scalingFactorsReal[k - 1] * m_scalingFactorsReal[k - 1] / F[k - 1];
++                if (k < nLvl - 1 && std::fabs(std::log2(cand) - std::log2(F[k])) > 1.5)
++                    cand = F[k];  // region boundary reset
++                m_scalingFactorsReal[k] = cand;
++            }
++            for (size_t k = nLvl; k < sizeQ; ++k)
++                m_scalingFactorsReal[k] = 1;  // holes, composite-style
++        }
++        else if ((sizeQ == 1) && (extraBits == 0) && (m_scalTechnique != COMPOSITESCALINGAUTO) &&
+             (m_scalTechnique != COMPOSITESCALINGMANUAL)) {
+             // mult depth = 0 and FLEXIBLEAUTO
+             // when multiplicative depth = 0, we use the scaling mod size instead of modulus size
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-parametergeneration.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-parametergeneration.cpp
+index 33355ee4..73c03477 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-parametergeneration.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-parametergeneration.cpp
+@@ -124,6 +124,43 @@ bool ParameterGenerationCKKSRNS::ParamsGenCKKSRNSInternal(std::shared_ptr<Crypto
+         }
+     }
+ 
++    // Rational-rescaling chain: explicit prime identities + per-level windows.
++    const std::vector<uint64_t>& rrChain = cryptoParamsCKKSRNS->GetRRPrimeChain();
++    if (!rrChain.empty()) {
++        if (scalTech != FLEXIBLEAUTO)
++            OPENFHE_THROW("rrPrimeChain requires FLEXIBLEAUTO.");
++        if (!sizesPerLevel.empty())
++            OPENFHE_THROW("rrPrimeChain and scalingModSizePerLevel are mutually exclusive.");
++        if (rrChain.size() != static_cast<size_t>(numPrimes))
++            OPENFHE_THROW("rrPrimeChain must have multiplicativeDepth+1 (" + std::to_string(numPrimes) +
++                          ") entries, got " + std::to_string(rrChain.size()) + ".");
++        const auto& windows = cryptoParamsCKKSRNS->GetRRWindows();
++        if (windows.size() < 4 || windows.size() % 2 != 0)
++            OPENFHE_THROW("rrWindows must hold >= 2 flattened (lo, hi) pairs.");
++        uint32_t S = cryptoParamsCKKSRNS->GetRRNumSmalls();
++        if (S >= rrChain.size())
++            OPENFHE_THROW("rrNumSmalls out of range.");
++        uint32_t nLvl = windows.size() / 2;
++        if (windows[2 * (nLvl - 1)] != 0 || windows[2 * (nLvl - 1) + 1] != rrChain.size() - 1)
++            OPENFHE_THROW("rrWindows: the top level must span the whole chain.");
++        for (uint32_t r = 0; r < nLvl; ++r) {
++            uint32_t lo = windows[2 * r], hi = windows[2 * r + 1];
++            if (lo > S || hi < S || hi >= rrChain.size())
++                OPENFHE_THROW("rrWindows: every window must contain q0 and stay in range.");
++            if (r > 0 &&
++                (windows[2 * r] > windows[2 * (r - 1)] + 4 || windows[2 * r + 1] + 4 < windows[2 * (r - 1) + 1]))
++                OPENFHE_THROW("rrWindows: adjacent windows must differ by edge moves only.");
++        }
++        if (cyclOrder == 0)
++            OPENFHE_THROW("rrPrimeChain requires an explicit ring dimension.");
++        for (auto m : rrChain) {
++            if (m >= (uint64_t(1) << MAX_MODULUS_SIZE))
++                OPENFHE_THROW("rrPrimeChain modulus exceeds MAX_MODULUS_SIZE.");
++            if (m % cyclOrder != 1)
++                OPENFHE_THROW("rrPrimeChain modulus is not 1 mod 2N.");
++        }
++    }
++
+     // TODO: Allow the user to specify this?
+     uint32_t extraModSize = (scalTech == FLEXIBLEAUTOEXT) ? DCRT_MODULUS::DEFAULT_EXTRA_MOD_SIZE : 0;
+ 
+@@ -194,7 +231,32 @@ bool ParameterGenerationCKKSRNS::ParamsGenCKKSRNSInternal(std::shared_ptr<Crypto
+     std::vector<NativeInteger> moduliQ(vecSize);
+     std::vector<NativeInteger> rootsQ(vecSize);
+ 
+-    if ((scalTech == COMPOSITESCALINGAUTO || scalTech == COMPOSITESCALINGMANUAL) && (compositeDegree > 1)) {
++    if (!rrChain.empty()) {
++        // Explicit prime identities, layout order as given. Security: assert the
++        // 128-bit classic logPQ budget at N = 2^16 (Theodosian/RR contract).
++        double logQ = 0.0;
++        for (uint32_t i = 0; i < numPrimes; ++i) {
++            moduliQ[i] = NativeInteger(rrChain[i]);
++            rootsQ[i]  = RootOfUnity(cyclOrder, moduliQ[i]);
++            logQ += std::log2(static_cast<double>(rrChain[i]));
++        }
++        if (cyclOrder / 2 == 65536) {
++            // sizeP = ceil(max digit bits / auxBits), the HYBRID P estimate below
++            uint32_t alpha = (numPrimes + numPartQ - 1) / numPartQ;
++            double maxDigit = 0.0;
++            for (uint32_t d = 0; d < numPartQ; ++d) {
++                double bits = 0.0;
++                for (uint32_t i = d * alpha; i < std::min((d + 1) * alpha, numPrimes); ++i)
++                    bits += std::log2(static_cast<double>(rrChain[i]));
++                maxDigit = std::max(maxDigit, bits);
++            }
++            double logPQ = logQ + std::ceil(maxDigit / auxBits) * auxBits;
++            if (logPQ > 1746.0)
++                OPENFHE_THROW("rrPrimeChain: logPQ " + std::to_string(logPQ) +
++                              " exceeds the 128-bit budget 1746 at N=2^16.");
++        }
++    }
++    else if ((scalTech == COMPOSITESCALINGAUTO || scalTech == COMPOSITESCALINGMANUAL) && (compositeDegree > 1)) {
+         CompositePrimeModuliGen(moduliQ, rootsQ, compositeDegree, numPrimes, firstModSize, dcrtBits, cyclOrder,
+                                 registerWordSize);
+     }
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+new file mode 100644
+index 00000000..6771543d
+--- /dev/null
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+@@ -0,0 +1,231 @@
++//==================================================================================
++// Rational-rescaling chain support — see ckksrns-rr.h for the model.
++//==================================================================================
++#include "scheme/ckksrns/ckksrns-rr.h"
++
++#include "encoding/ckkspackedencoding.h"
++#include "encoding/plaintextfactory.h"
++#include "scheme/ckksrns/ckksrns-cryptoparameters.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace lbcrypto {
++
++RRChain::RRChain(const CryptoContext<DCRTPoly>& cc) : m_cc(cc) {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(cc->GetCryptoParameters());
++    if (cryptoParams == nullptr || !cryptoParams->IsRRChain())
++        OPENFHE_THROW("RRChain: the context does not carry an RR prime chain.");
++    m_chain            = cryptoParams->GetRRPrimeChain();
++    m_S                = cryptoParams->GetRRNumSmalls();
++    const auto& win    = cryptoParams->GetRRWindows();
++    const auto gparams = cryptoParams->GetElementParams();
++    if (gparams->GetParams().size() != m_chain.size())
++        OPENFHE_THROW("RRChain: element params/chain size mismatch.");
++    for (size_t i = 0; i < m_chain.size(); ++i) {
++        if (gparams->GetParams()[i]->GetModulus().ConvertToInt() != m_chain[i])
++            OPENFHE_THROW("RRChain: element params do not match the RR chain layout order.");
++    }
++    size_t nLvl = win.size() / 2;
++    m_levels.resize(nLvl);
++    for (size_t r = 0; r < nLvl; ++r) {
++        uint32_t lo = win[2 * r], hi = win[2 * r + 1];
++        m_levels[r].lo = lo;
++        m_levels[r].hi = hi;
++        m_levels[r].params =
++            std::make_shared<DCRTPoly::Params>(gparams->GetCyclotomicOrder(), gparams->GetParamPartition(lo, hi));
++    }
++    m_F.resize(nLvl - 1);
++    for (size_t r = 1; r < nLvl; ++r) {
++        const auto& H = m_levels[r];
++        const auto& L = m_levels[r - 1];
++        double f      = 1.0;
++        for (uint32_t i = std::min(H.lo, L.lo); i < std::max(H.lo, L.lo); ++i)
++            f = (H.lo < L.lo) ? f * static_cast<double>(m_chain[i]) : f / static_cast<double>(m_chain[i]);
++        for (uint32_t i = std::min(H.hi, L.hi) + 1; i <= std::max(H.hi, L.hi); ++i)
++            f = (H.hi > L.hi) ? f * static_cast<double>(m_chain[i]) : f / static_cast<double>(m_chain[i]);
++        m_F[r - 1] = f;
++    }
++}
++
++DCRTPoly RRChain::Restrict(const DCRTPoly& full, uint32_t r) const {
++    const auto& lvl = Level(r);
++    DCRTPoly out(lvl.params, full.GetFormat(), true);
++    for (uint32_t i = lvl.lo; i <= lvl.hi; ++i)
++        out.SetElementAtIndex(i - lvl.lo, full.GetElementAtIndex(i));
++    return out;
++}
++
++DCRTPoly RRChain::RescaleElement(const DCRTPoly& e, uint32_t rHi) const {
++    if (rHi == 0)
++        OPENFHE_THROW("RRChain: cannot rescale below level 0.");
++    const auto& cur    = Level(rHi);
++    const auto& nxt    = Level(rHi - 1);
++    const auto gparams = m_cc->GetCryptoParameters()->GetElementParams();
++
++    // working set: global-ascending union window [uLo, uHi]
++    uint32_t uLo = std::min(cur.lo, nxt.lo);
++    uint32_t uHi = std::max(cur.hi, nxt.hi);
++
++    std::vector<uint32_t> added, dropped;
++    for (uint32_t i = nxt.lo; i < cur.lo; ++i)
++        added.push_back(i);
++    for (uint32_t i = cur.hi + 1; i <= nxt.hi; ++i)
++        added.push_back(i);
++    for (uint32_t i = cur.lo; i < nxt.lo; ++i)
++        dropped.push_back(i);
++    for (uint32_t i = nxt.hi + 1; i <= cur.hi; ++i)
++        dropped.push_back(i);
++
++    // t = e * prod(added) on the union basis; residues on the added primes are 0.
++    std::vector<uint32_t> gidx;
++    std::vector<DCRTPoly::PolyType> towers;
++    for (uint32_t g = uLo; g <= uHi; ++g) {
++        gidx.push_back(g);
++        if (g >= cur.lo && g <= cur.hi) {
++            auto tw = e.GetElementAtIndex(g - cur.lo);
++            NativeInteger q = tw.GetModulus();
++            NativeInteger prodA(1);
++            for (uint32_t a : added)
++                prodA.ModMulEq(NativeInteger(m_chain[a]).Mod(q), q);
++            tw = tw.Times(prodA);
++            towers.push_back(std::move(tw));
++        }
++        else {
++            towers.emplace_back(gparams->GetParams()[g], e.GetFormat(), true);  // zero tower
++        }
++    }
++
++    // divide out the dropped primes one at a time (centered lift, exact division)
++    for (uint32_t d : dropped) {
++        size_t pos = std::find(gidx.begin(), gidx.end(), d) - gidx.begin();
++        auto lastPoly(towers[pos]);
++        lastPoly.SetFormat(Format::COEFFICIENT);
++        NativeInteger dq(m_chain[d]);
++        towers.erase(towers.begin() + pos);
++        gidx.erase(gidx.begin() + pos);
++        for (size_t i = 0; i < towers.size(); ++i) {
++            NativeInteger qi = towers[i].GetModulus();
++            auto tmp         = lastPoly;
++            tmp.SwitchModulus(qi, towers[i].GetRootOfUnity(), 0, 0);
++            if (towers[i].GetFormat() == Format::EVALUATION)
++                tmp.SwitchFormat();
++            towers[i] -= tmp;
++            towers[i] = towers[i].Times(dq.ModInverse(qi));
++        }
++    }
++
++    DCRTPoly out(nxt.params, e.GetFormat(), true);
++    for (size_t i = 0; i < towers.size(); ++i)
++        out.SetElementAtIndex(i, towers[i]);
++    return out;
++}
++
++void RRChain::RescaleInPlace(Ciphertext<DCRTPoly>& ct) const {
++    uint32_t r = NumLevels() - 1 - ct->GetLevel();
++    auto& cv   = ct->GetElements();
++    for (auto& c : cv)
++        c = RescaleElement(c, r);
++    ct->SetLevel(ct->GetLevel() + 1);
++    ct->SetNoiseScaleDeg(ct->GetNoiseScaleDeg() - 1);
++    ct->SetScalingFactor(ct->GetScalingFactor() / RescaleFactor(r));
++}
++
++Plaintext RRChain::MakePlaintext(const std::vector<std::complex<double>>& value, uint32_t r, double scale,
++                                 size_t noiseScaleDeg, uint32_t slots) const {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(m_cc->GetCryptoParameters());
++    if (slots == 0)
++        slots = m_cc->GetEncodingParams()->GetBatchSize();
++    uint32_t level = NumLevels() - 1 - r;
++    auto p = Plaintext(std::make_shared<CKKSPackedEncoding>(Level(r).params, m_cc->GetEncodingParams(), value,
++                                                            noiseScaleDeg, level, scale, slots,
++                                                            m_cc->GetCKKSDataType()));
++    p->Encode();
++    p->GetElement<DCRTPoly>().SetFormat(Format::EVALUATION);
++    p->SetScalingFactor(scale);
++    return p;
++}
++
++Ciphertext<DCRTPoly> RRChain::Encrypt(const PublicKey<DCRTPoly>& pk, const Plaintext& pt, uint32_t r) const {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(pk->GetCryptoParameters());
++    const auto& pkv         = pk->GetPublicElements();
++    const auto ns           = cryptoParams->GetNoiseScale();
++    const auto& dgg         = cryptoParams->GetDiscreteGaussianGenerator();
++    typename DCRTPoly::TugType tug;
++
++    const auto& params = Level(r).params;
++    DCRTPoly v = cryptoParams->GetSecretKeyDist() == GAUSSIAN ? DCRTPoly(dgg, params, Format::EVALUATION) :
++                                                                DCRTPoly(tug, params, Format::EVALUATION);
++    DCRTPoly e0(dgg, params, Format::EVALUATION);
++    DCRTPoly e1(dgg, params, Format::EVALUATION);
++
++    DCRTPoly p0 = Restrict(pkv[0], r);
++    DCRTPoly p1 = Restrict(pkv[1], r);
++
++    DCRTPoly m = pt->GetElement<DCRTPoly>();
++    m.SetFormat(Format::EVALUATION);
++
++    DCRTPoly c0 = p0 * v + ns * e0 + m;
++    DCRTPoly c1 = p1 * v + ns * e1;
++
++    Ciphertext<DCRTPoly> ct = std::make_shared<CiphertextImpl<DCRTPoly>>(m_cc);
++    ct->SetElements({std::move(c0), std::move(c1)});
++    ct->SetEncodingType(CKKS_PACKED_ENCODING);
++    ct->SetLevel(NumLevels() - 1 - r);
++    ct->SetNoiseScaleDeg(pt->GetNoiseScaleDeg());
++    ct->SetScalingFactor(pt->GetScalingFactor());
++    ct->SetSlots(pt->GetSlots());
++    ct->SetKeyTag(pk->GetKeyTag());
++    return ct;
++}
++
++Plaintext RRChain::Decrypt(const PrivateKey<DCRTPoly>& sk, ConstCiphertext<DCRTPoly>& ct) const {
++    uint32_t r      = NumLevels() - 1 - ct->GetLevel();
++    const auto& cv  = ct->GetElements();
++    DCRTPoly s      = Restrict(sk->GetPrivateElement(), r);
++    DCRTPoly b      = cv[0];
++    DCRTPoly powerS = s;
++    for (size_t i = 1; i < cv.size(); ++i) {
++        b += cv[i] * powerS;
++        if (i + 1 < cv.size())
++            powerS *= s;
++    }
++    b.SetFormat(Format::COEFFICIENT);
++
++    const auto ep = m_cc->GetEncodingParams();
++    auto vp = std::make_shared<typename Poly::Params>(Level(r).params->GetCyclotomicOrder(), ep->GetPlaintextModulus(),
++                                                      1);
++    Plaintext decrypted =
++        PlaintextFactory::MakePlaintext(CKKS_PACKED_ENCODING, vp, ep, INVALID_SCHEME, m_cc->GetCKKSDataType());
++    decrypted->GetElement<Poly>() = (b.GetParams()->GetParams().size() > 1) ?
++                                        b.CRTInterpolate() :
++                                        Poly(b.GetElementAtIndex(0), Format::COEFFICIENT);
++
++    auto decryptedCKKS = std::dynamic_pointer_cast<CKKSPackedEncoding>(decrypted);
++    decryptedCKKS->SetNoiseScaleDeg(ct->GetNoiseScaleDeg());
++    decryptedCKKS->SetLevel(ct->GetLevel());
++    decryptedCKKS->SetScalingFactor(ct->GetScalingFactor());
++    decryptedCKKS->SetSlots(ct->GetSlots());
++    const auto cryptoParamsCKKS = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(m_cc->GetCryptoParameters());
++    decryptedCKKS->Decode(ct->GetNoiseScaleDeg(), ct->GetScalingFactor(), cryptoParamsCKKS->GetScalingTechnique(),
++                          cryptoParamsCKKS->GetExecutionMode());
++    return decrypted;
++}
++
++void RRChain::EvalMultPlainInPlace(Ciphertext<DCRTPoly>& ct, const Plaintext& pt) const {
++    DCRTPoly m = pt->GetElement<DCRTPoly>();
++    m.SetFormat(Format::EVALUATION);
++    for (auto& c : ct->GetElements())
++        c *= m;
++    ct->SetNoiseScaleDeg(ct->GetNoiseScaleDeg() + pt->GetNoiseScaleDeg());
++    ct->SetScalingFactor(ct->GetScalingFactor() * pt->GetScalingFactor());
++}
++
++void RRChain::EvalAddInPlace(Ciphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const {
++    const auto& cv2 = ct2->GetElements();
++    auto& cv1       = ct1->GetElements();
++    for (size_t i = 0; i < cv1.size(); ++i)
++        cv1[i] += cv2[i];
++}
++
++}  // namespace lbcrypto
+-- 
+2.43.0
+
+
+From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
+From: dev <dev@behemoth>
+Date: Sat, 1 Aug 2026 13:20:30 +0200
+Subject: [PATCH 3/3] RR keyswitch: single evk at P*Qmax truncated per level
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Digits = window ∩ global partition (contiguous by construction of the
+inverted-terminal layout); evk rows are read positionally by global chain
+index (Q part) + fixed sizeQ offset (P part). Reconstruction is purely
+positional — b_j carries P*sOld only on partition-j rows, so at any level
+the read rows realize P*sOld*What_{j,l}*[What_{j,l}^{-1}] for the ACTIVE
+product, and raw digits need no per-level decomposition scalars. Per-level
+tables are only the within-digit conversion tables (BigInteger, lazy per
+level) + window-relaid P tables for ApproxModDown. EvalMultRelin drives
+tensor + relin for the gate.
+---
+ src/pke/include/scheme/ckksrns/ckksrns-rr.h |  27 ++++
+ src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp   | 165 ++++++++++++++++++++
+ 2 files changed, 192 insertions(+)
+
+diff --git a/src/pke/include/scheme/ckksrns/ckksrns-rr.h b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+index d57710fa..396c046a 100644
+--- a/src/pke/include/scheme/ckksrns/ckksrns-rr.h
++++ b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+@@ -64,12 +64,39 @@ public:
+     void EvalMultPlainInPlace(Ciphertext<DCRTPoly>& ct, const Plaintext& pt) const;
+     void EvalAddInPlace(Ciphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const;
+ 
++    // HYBRID keyswitch against the single evk at P*Qmax, truncated to the
++    // level's window: digits = window ∩ global partition (contiguous by
++    // construction), evk rows read positionally by global index. Returns the
++    // (b, a) contribution already ModDown'ed back to the window basis.
++    std::pair<DCRTPoly, DCRTPoly> KeySwitchCore(const DCRTPoly& c, const EvalKey<DCRTPoly>& evk, uint32_t r) const;
++
++    // ct x ct product with relinearization (both at the same rr level, deg 1)
++    Ciphertext<DCRTPoly> EvalMultRelin(ConstCiphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const;
++
+ private:
++    struct RRDigitKS {
++        uint32_t gLo, gHi;                          // global index range of the digit
++        std::shared_ptr<DCRTPoly::Params> paramsD;  // digit base
++        std::shared_ptr<DCRTPoly::Params> paramsCompl;  // (window \ digit) ++ P
++        std::vector<NativeInteger> DHatInvModd, DHatInvModdPrecon;
++        std::vector<std::vector<NativeInteger>> DHatModt;
++        std::vector<DoubleNativeInt> muT;  // unused on the 32-bit path, zeros
++    };
++    struct RRLevelKS {
++        std::shared_ptr<DCRTPoly::Params> paramsWP;  // window ++ P
++        std::vector<RRDigitKS> digits;
++        std::vector<NativeInteger> PInvModq, PInvModqPrecon;
++        std::vector<std::vector<NativeInteger>> PHatModq;
++        std::vector<DoubleNativeInt> muQ;
++    };
++    const RRLevelKS& LevelKS(uint32_t r) const;
++
+     CryptoContext<DCRTPoly> m_cc;
+     std::vector<uint64_t> m_chain;
+     uint32_t m_S = 0;
+     std::vector<RRLevel> m_levels;
+     std::vector<double> m_F;  // m_F[r-1] = rescale factor r -> r-1
++    mutable std::vector<std::unique_ptr<RRLevelKS>> m_ks;  // lazy per-level cache
+ };
+ 
+ }  // namespace lbcrypto
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+index 6771543d..88faec26 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+@@ -228,4 +228,169 @@ void RRChain::EvalAddInPlace(Ciphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly
+         cv1[i] += cv2[i];
+ }
+ 
++const RRChain::RRLevelKS& RRChain::LevelKS(uint32_t r) const {
++    if (m_ks.empty())
++        m_ks.resize(NumLevels());
++    if (m_ks[r])
++        return *m_ks[r];
++
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters());
++    const auto& lvl         = Level(r);
++    const auto paramsP      = cryptoParams->GetParamsP();
++    const auto gparams      = cryptoParams->GetElementParams();
++    uint32_t sizeW          = lvl.hi - lvl.lo + 1;
++    uint32_t sizeP          = paramsP->GetParams().size();
++    uint32_t alpha          = cryptoParams->GetNumPerPartQ();
++
++    auto ks = std::make_unique<RRLevelKS>();
++
++    {  // window ++ P params
++        std::vector<std::shared_ptr<ILNativeParams>> qp = gparams->GetParamPartition(lvl.lo, lvl.hi);
++        for (uint32_t j = 0; j < sizeP; ++j)
++            qp.push_back(paramsP->GetParams()[j]);
++        ks->paramsWP = std::make_shared<DCRTPoly::Params>(gparams->GetCyclotomicOrder(), qp);
++    }
++
++    // window-relaid P tables (globals are indexed by absolute chain position)
++    ks->PInvModq.resize(sizeW);
++    ks->PInvModqPrecon.resize(sizeW);
++    ks->muQ.assign(sizeW, 0);
++    ks->PHatModq.resize(sizeP);
++    for (uint32_t jP = 0; jP < sizeP; ++jP)
++        ks->PHatModq[jP].resize(sizeW);
++    for (uint32_t i = 0; i < sizeW; ++i) {
++        uint32_t g          = lvl.lo + i;
++        ks->PInvModq[i]       = cryptoParams->GetPInvModq()[g];
++        ks->PInvModqPrecon[i] = cryptoParams->GetPInvModqPrecon()[g];
++        for (uint32_t jP = 0; jP < sizeP; ++jP)
++            ks->PHatModq[jP][i] = cryptoParams->GetPHatModq()[jP][g];
++    }
++
++    // digits: window ∩ global partition, contiguous
++    for (uint32_t part = lvl.lo / alpha; part <= lvl.hi / alpha; ++part) {
++        RRDigitKS dg;
++        dg.gLo = std::max(lvl.lo, part * alpha);
++        dg.gHi = std::min(lvl.hi, (part + 1) * alpha - 1);
++        dg.paramsD =
++            std::make_shared<DCRTPoly::Params>(gparams->GetCyclotomicOrder(), gparams->GetParamPartition(dg.gLo, dg.gHi));
++        {  // (window \ digit) ++ P — the ApproxSwitchCRTBasis target
++            std::vector<std::shared_ptr<ILNativeParams>> cp;
++            for (uint32_t g = lvl.lo; g <= lvl.hi; ++g)
++                if (g < dg.gLo || g > dg.gHi)
++                    cp.push_back(gparams->GetParams()[g]);
++            for (uint32_t j = 0; j < sizeP; ++j)
++                cp.push_back(paramsP->GetParams()[j]);
++            dg.paramsCompl = std::make_shared<DCRTPoly::Params>(gparams->GetCyclotomicOrder(), cp);
++        }
++        uint32_t sizeD = dg.gHi - dg.gLo + 1;
++        dg.DHatInvModd.resize(sizeD);
++        dg.DHatInvModdPrecon.resize(sizeD);
++        dg.DHatModt.resize(sizeD);
++        dg.muT.assign(dg.paramsCompl->GetParams().size(), 0);
++        BigInteger D(1);
++        for (uint32_t i = 0; i < sizeD; ++i)
++            D = D * BigInteger(m_chain[dg.gLo + i]);
++        for (uint32_t i = 0; i < sizeD; ++i) {
++            NativeInteger di(m_chain[dg.gLo + i]);
++            BigInteger DHat        = D / BigInteger(di);
++            dg.DHatInvModd[i]      = DHat.Mod(BigInteger(di)).ConvertToInt<BasicInteger>();
++            dg.DHatInvModd[i]      = dg.DHatInvModd[i].ModInverse(di);
++            dg.DHatInvModdPrecon[i] = dg.DHatInvModd[i].PrepModMulConst(di);
++            dg.DHatModt[i].resize(dg.paramsCompl->GetParams().size());
++            for (size_t jT = 0; jT < dg.paramsCompl->GetParams().size(); ++jT) {
++                const auto& t      = dg.paramsCompl->GetParams()[jT]->GetModulus();
++                dg.DHatModt[i][jT] = DHat.Mod(BigInteger(t)).ConvertToInt<BasicInteger>();
++            }
++        }
++        ks->digits.push_back(std::move(dg));
++    }
++
++    m_ks[r] = std::move(ks);
++    return *m_ks[r];
++}
++
++std::pair<DCRTPoly, DCRTPoly> RRChain::KeySwitchCore(const DCRTPoly& c, const EvalKey<DCRTPoly>& evk,
++                                                     uint32_t r) const {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters());
++    const auto& lvl         = Level(r);
++    const auto& ks          = LevelKS(r);
++    uint32_t sizeW          = lvl.hi - lvl.lo + 1;
++    uint32_t sizeQglobal    = cryptoParams->GetElementParams()->GetParams().size();
++    uint32_t sizeP          = cryptoParams->GetParamsP()->GetParams().size();
++    uint32_t sizeWP         = sizeW + sizeP;
++
++    const auto& av = evk->GetAVector();
++    const auto& bv = evk->GetBVector();
++
++    DCRTPoly cTilda0(ks.paramsWP, Format::EVALUATION, true);
++    DCRTPoly cTilda1(ks.paramsWP, Format::EVALUATION, true);
++
++    for (size_t dj = 0; dj < ks.digits.size(); ++dj) {
++        const auto& dg = ks.digits[dj];
++        uint32_t part  = dg.gLo / cryptoParams->GetNumPerPartQ();
++        uint32_t sizeD = dg.gHi - dg.gLo + 1;
++
++        // digit slice (window-local) and its base conversion onto (window\digit) ++ P
++        DCRTPoly cPart(dg.paramsD, Format::EVALUATION, true);
++        for (uint32_t i = 0; i < sizeD; ++i)
++            cPart.SetElementAtIndex(i, c.GetElementAtIndex(dg.gLo - lvl.lo + i));
++        auto cPartCoef = cPart.Clone();
++        cPartCoef.SetFormat(Format::COEFFICIENT);
++        auto compl_ =
++            cPartCoef.ApproxSwitchCRTBasis(dg.paramsD, dg.paramsCompl, dg.DHatInvModd, dg.DHatInvModdPrecon,
++                                           dg.DHatModt, dg.muT);
++        compl_.SetFormat(Format::EVALUATION);
++
++        // scatter into [window | P] order and dot with the evk rows (global index)
++        uint32_t startLocal = dg.gLo - lvl.lo;
++        uint32_t endLocal   = startLocal + sizeD;
++        for (uint32_t i = 0; i < sizeWP; ++i) {
++            const DCRTPoly::PolyType* digitTower;
++            if (i < startLocal)
++                digitTower = &compl_.GetElementAtIndex(i);
++            else if (i < endLocal)
++                digitTower = &cPart.GetElementAtIndex(i - startLocal);
++            else
++                digitTower = &compl_.GetElementAtIndex(i - sizeD);
++            uint32_t row = (i < sizeW) ? (lvl.lo + i) : (sizeQglobal + (i - sizeW));
++            cTilda0.SetElementAtIndex(i, cTilda0.GetElementAtIndex(i) + *digitTower * bv[part].GetElementAtIndex(row));
++            cTilda1.SetElementAtIndex(i, cTilda1.GetElementAtIndex(i) + *digitTower * av[part].GetElementAtIndex(row));
++        }
++    }
++
++    std::vector<NativeInteger> noVec;
++    DCRTPoly ct0 = cTilda0.ApproxModDown(lvl.params, cryptoParams->GetParamsP(), ks.PInvModq, ks.PInvModqPrecon,
++                                         cryptoParams->GetPHatInvModp(), cryptoParams->GetPHatInvModpPrecon(),
++                                         ks.PHatModq, ks.muQ, noVec, noVec, NativeInteger(0), noVec);
++    DCRTPoly ct1 = cTilda1.ApproxModDown(lvl.params, cryptoParams->GetParamsP(), ks.PInvModq, ks.PInvModqPrecon,
++                                         cryptoParams->GetPHatInvModp(), cryptoParams->GetPHatInvModpPrecon(),
++                                         ks.PHatModq, ks.muQ, noVec, noVec, NativeInteger(0), noVec);
++    return {std::move(ct0), std::move(ct1)};
++}
++
++Ciphertext<DCRTPoly> RRChain::EvalMultRelin(ConstCiphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const {
++    if (ct1->GetLevel() != ct2->GetLevel())
++        OPENFHE_THROW("RRChain::EvalMultRelin: operands must sit at the same rr level.");
++    uint32_t r      = NumLevels() - 1 - ct1->GetLevel();
++    const auto& cv1 = ct1->GetElements();
++    const auto& cv2 = ct2->GetElements();
++    if (cv1.size() != 2 || cv2.size() != 2)
++        OPENFHE_THROW("RRChain::EvalMultRelin: operands must be degree-1 (2 elements).");
++
++    DCRTPoly c0 = cv1[0] * cv2[0];
++    DCRTPoly c1 = cv1[0] * cv2[1] + cv1[1] * cv2[0];
++    DCRTPoly c2 = cv1[1] * cv2[1];
++
++    const auto evks = m_cc->GetEvalMultKeyVector(ct1->GetKeyTag());
++    auto ab         = KeySwitchCore(c2, evks[0], r);
++    c0 += ab.first;
++    c1 += ab.second;
++
++    Ciphertext<DCRTPoly> out = ct1->Clone();
++    out->SetElements({std::move(c0), std::move(c1)});
++    out->SetNoiseScaleDeg(ct1->GetNoiseScaleDeg() + ct2->GetNoiseScaleDeg());
++    out->SetScalingFactor(ct1->GetScalingFactor() * ct2->GetScalingFactor());
++    return out;
++}
++
+ }  // namespace lbcrypto
+-- 
+2.43.0
+
