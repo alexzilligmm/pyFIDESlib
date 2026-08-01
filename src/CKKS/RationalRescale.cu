@@ -22,6 +22,12 @@
 
 namespace FIDESlib::CKKS {
 
+/** TO-TRY §2.10b' probe sink: when non-null, RRKeySwitchCore accumulates its HOST ISSUE cost
+ *  into [prep, specials, modup, dot, moddown]. Distinct from its `phase_ms`, which fences each
+ *  phase with a device sync and so measures EXECUTION — the walk is issue-bound, so it is the
+ *  issue split that decides what to cut. Single-threaded, like the rest of the RR path. */
+double* rr_ks_host_ms = nullptr;
+
 // defined (and instantiated) in Rescale.cu
 template <typename T>
 __global__ void SwitchModulus(const T* src, const int __grid_constant__ o_primeid, T* res,
@@ -294,11 +300,43 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     RNSPoly& wsPoly = cc.getRRKeySwitchWorkspace();
     wsPoly.setLevel(level);
     LimbPartition& ws = wsPoly.GPU.at(0);
+    // TO-TRY §2.10b': HOST ISSUE cost per sub-phase. Distinct from `phase_ms` above, which
+    // fences each phase with a device sync and therefore measures EXECUTION. The walk is
+    // issue-bound, so it is this breakdown that decides where to cut.
+    auto hmark = std::chrono::steady_clock::now();
+    auto hph = [&](int i) {
+        const auto n = std::chrono::steady_clock::now();
+        if (rr_ks_host_ms) rr_ks_host_ms[i] += std::chrono::duration<double, std::milli>(n - hmark).count();
+        hmark = n;
+    };
     ws.adoptLimbPtrsFrom(src, cc.windowSize(level));
 
     RNSPoly& aux = cc.getKeySwitchAux2();
+    hph(0);  // prep: workspace adopt
+    /* TO-TRY §2.10b': KEEP the outputs' special limbs alive across levels.
+     *
+     * MEASURED: allocating them was 94.3 us/level — 25.7 % of the walk's whole HOST ISSUE cost,
+     * and the walk is issue-bound (quartering the ring moves it ~13 %). Each call was taking
+     * ~12.6 MB per output through the pooled allocator (K specials x N x 2 x 8 B at dnum 4,
+     * logN 16) and moddown handed it straight back, every level, forever.
+     *
+     * Safe because nothing here depends on their CONTENTS surviving or being fresh:
+     * generateSpecialLimb is already idempotent (it no-ops unless SPECIALlimb is empty), it is
+     * called with zero_out=false so the code ALREADY relies on the rows being fully written,
+     * and the KSK dot writes every special row exactly once before moddown reads it. And
+     * `free` does not control the modUp flag — RNSPoly::moddown ends with SetModUp(false)
+     * either way — so only the storage persists.
+     *
+     * It pays because §2.10f made these outputs POOLED: a pooled d0/d1 is the same object at
+     * the same level next time round, so "do not free" becomes "allocated once per level".
+     * Ablation: FIDESLIB_RR_KEEP_SPECIALS=0. */
+    static const bool keep_specials = [] {
+        const char* e = std::getenv("FIDESLIB_RR_KEEP_SPECIALS");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
     out0.generateSpecialLimbs(false, false);
     out1.generateSpecialLimbs(false, false);
+    hph(1);  // special-limb allocation for the two outputs
     if (fused_ks) {
         static const bool once = [] {  // run marker: an A/B whose arms are the same arm is a lie
             std::cerr << "[rr_ks] active: FUSED modup+dot (FIDESLIB_RR_FUSED_KS=0 for the reference)\n";
@@ -310,14 +348,15 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         tmark = tick(1, tmark);      // ... so phase[0] is ~0 and phase[1] carries modup+dot
         out0.SetModUp(true);
         out1.SetModUp(true);
-        out0.moddown(true, true, 0);
-        out1.moddown(true, true, 1);
+        out0.moddown(true, !keep_specials, 0);
+        out1.moddown(true, !keep_specials, 1);
         tick(2, tmark);
         return;
     }
 
     // --- unfused reference: modup, then the standalone dot ---
     ws.modup(aux.GPU.at(0));
+    hph(2);  // modup
 
     tmark = tick(0, tmark);
 
@@ -387,10 +426,12 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     tmark = tick(1, tmark);
 
     // --- moddown back to the window basis ---
+    hph(3);  // dot, including the digit-table build + upload
     out0.SetModUp(true);
     out1.SetModUp(true);
-    out0.moddown(true, true, 0);
-    out1.moddown(true, true, 1);
+    out0.moddown(true, !keep_specials, 0);
+    out1.moddown(true, !keep_specials, 1);
+    hph(4);  // moddown, including the special-limb FREE
     tick(2, tmark);
 }
 
@@ -628,8 +669,14 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
     // its timer) does not. Reported as a median alongside the walk.
     std::vector<double> ctor_samples;
     RRScratch scratch(cc);
+    std::array<double, 5> host_tot{};
+    std::array<double, 5> ks_tot{};
+    const bool host_probe = std::getenv("RR_WALK_HOST_PROBE") != nullptr;
     for (int it = -1; it < iters; ++it) {  // it == -1 warms
         double ctor_ms = 0;
+        std::array<double, 5> host_ms{};
+        std::array<double, 5> ks_ms{};
+        rr_ks_host_ms = host_probe ? ks_ms.data() : nullptr;
         // RNSPoly has neither copy- nor move-ASSIGNMENT (reference members), so the running
         // ciphertext lives in an optional and each level move-CONSTRUCTS into it.
         std::optional<RNSPoly> c;
@@ -650,19 +697,53 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
             RNSPoly& d1 = scratch.get(r, 1);
             RNSPoly& c2 = scratch.get(r, 2);
             ctor_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count();
+            // TO-TRY §2.10b': HOST time per phase. The walk is host-bound — quartering the ring
+            // (RR_SWEEP_LOGN) moves it only ~13 % — so what matters is which phase's ISSUE cost
+            // dominates, not which kernel's execution does. Every phase here is async, so these
+            // are pure issue costs; the device work lands in the trailing sync.
+            auto ph = [&](int i, const std::chrono::steady_clock::time_point& t) {
+                const auto n = std::chrono::steady_clock::now();
+                host_ms[i] += std::chrono::duration<double, std::milli>(n - t).count();
+                return n;
+            };
+            auto pm = std::chrono::steady_clock::now();
             sq.multElement(*c, *c);
             c2.multElement(*c, *c);
+            pm = ph(0, pm);  // binomial multiply
             c2.SetModUp(false);
             RRKeySwitchCore(c2, cc.GetEvalKey(keyid), d0, d1);
+            pm = ph(1, pm);  // keyswitch
             sq.add(d0);
+            pm = ph(2, pm);  // add
             sq.rrRescale();        // sq is now at level r-1 and IS the next ciphertext
+            pm = ph(3, pm);  // rescale
             c.emplace(std::move(sq));
+            ph(4, pm);       // hand-off
         }
         cudaDeviceSynchronize();
         if (it >= 0) {
             samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             ctor_samples.push_back(ctor_ms);
+            for (int i = 0; i < 5; ++i) {
+                host_tot[i] += host_ms[i];
+                ks_tot[i] += ks_ms[i];
+            }
         }
+    }
+    rr_ks_host_ms = nullptr;
+    if (std::getenv("RR_WALK_HOST_PROBE")) {
+        const char* nm[5] = {"binomial mult", "keyswitch", "add", "rescale", "hand-off"};
+        double sum = 0;
+        for (int i = 0; i < 5; ++i)
+            sum += host_tot[i] / iters;
+        fprintf(stderr, "[rr_walk_host] ISSUE cost per walk (host, mean over %d runs), total %6.3f ms:\n", iters, sum);
+        for (int i = 0; i < 5; ++i)
+            fprintf(stderr, "[rr_walk_host]   %-14s %7.3f ms  -> %6.1f us/level  (%4.1f%%)\n", nm[i],
+                    host_tot[i] / iters, 1000.0 * host_tot[i] / iters / top_level, 100.0 * host_tot[i] / iters / sum);
+        const char* kn[5] = {"ks:prep", "ks:specials", "ks:modup", "ks:dot", "ks:moddown"};
+        for (int i = 0; i < 5; ++i)
+            fprintf(stderr, "[rr_walk_host]     %-12s %7.3f ms  -> %6.1f us/level  (%4.1f%% of walk issue)\n", kn[i],
+                    ks_tot[i] / iters, 1000.0 * ks_tot[i] / iters / top_level, 100.0 * ks_tot[i] / iters / sum);
     }
     if (std::getenv("RR_WALK_CTOR_PROBE")) {
         std::sort(ctor_samples.begin(), ctor_samples.end());
