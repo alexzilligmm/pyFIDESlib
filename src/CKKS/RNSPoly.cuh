@@ -52,6 +52,12 @@ class RNSPoly {
     int automorph_index_precomp(int idx) const;
 
     void rescale();
+    /** RATIONAL RESCALING (RR_PLAN (c).2), defined in RationalRescale.cu: one RR level
+     *  transition, level -> level-1. On an RR chain this is the ONLY operation that may move
+     *  a polynomial's level, because a level is a WINDOW of the prime layout whose two edges
+     *  both move and whose residues change — there is no free prefix drop (dropToLevel) and
+     *  no free widening (grow). Input and output are both EVAL format. */
+    void rrRescale();
 
     void sync();
 

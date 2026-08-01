@@ -80,12 +80,12 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
         if (!exta && !extb) {
             if (limbsize > 0)
                 add_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                            PARTITION(parta[0]->id, 0), n, its);
+                                                            parta[0]->PB(0), n, its);
         }
         if (exta && extb) {
             if (limbsize > 0)
                 add_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                            PARTITION(parta[0]->id, 0), n, its);
+                                                            parta[0]->PB(0), n, its);
             if (slimbsize > 0)
                 add_reuse_b___<<<sgrid, block, 0, s.ptr()>>>(data_ptrs_d + offset2, data_ptrs_d + offset3,
                                                              SPECIAL(parta[0]->id, 0), n, its);
@@ -93,12 +93,12 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
         if (exta && !extb) {
             if (limbsize > 0)
                 add_reuse_scale_p_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                                    PARTITION(parta[0]->id, 0), n, its);
+                                                                    parta[0]->PB(0), n, its);
         }
         if (!exta && extb) {
             if (limbsize > 0)
                 add_scale_p_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                                    PARTITION(parta[0]->id, 0), n, its);
+                                                                    parta[0]->PB(0), n, its);
             if (slimbsize > 0)
                 copy_reuse_b___<<<sgrid, block, 0, s.ptr()>>>(data_ptrs_d + offset2, data_ptrs_d + offset3,
                                                               SPECIAL(parta[0]->id, 0), n, its);
@@ -108,12 +108,12 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
         if (!exta && !extb) {
             if (limbsize > 0)
                 sub_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                            PARTITION(parta[0]->id, 0), n, its);
+                                                            parta[0]->PB(0), n, its);
         }
         if (exta && extb) {
             if (limbsize > 0)
                 sub_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                            PARTITION(parta[0]->id, 0), n, its);
+                                                            parta[0]->PB(0), n, its);
             if (slimbsize > 0)
                 sub_reuse_b___<<<sgrid, block, 0, s.ptr()>>>(data_ptrs_d + offset2, data_ptrs_d + offset3,
                                                              SPECIAL(parta[0]->id, 0), n, its);
@@ -121,12 +121,12 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
         if (exta && !extb) {
             if (limbsize > 0)
                 sub_reuse_scale_p_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                                    PARTITION(parta[0]->id, 0), n, its);
+                                                                    parta[0]->PB(0), n, its);
         }
         if (!exta && extb) {
             if (limbsize > 0)
                 sub_scale_p_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + offset1,
-                                                                    PARTITION(parta[0]->id, 0), n, its);
+                                                                    parta[0]->PB(0), n, its);
             if (slimbsize > 0)
                 copy_reuse_negative_b___<<<sgrid, block, 0, s.ptr()>>>(data_ptrs_d + offset2, data_ptrs_d + offset3,
                                                                        SPECIAL(parta[0]->id, 0), n, its);
@@ -180,7 +180,7 @@ void LimbPartition::multPtBatchManyToOne(std::vector<LimbPartition*>& parta, con
     s.wait(partb[0]->s);
     if (limbsize > 0)
         mult_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + its * split * partb.size(),
-                                                     PARTITION(parta[0]->id, 0), n, its);
+                                                     parta[0]->PB(0), n, its);
     partb[0]->s.wait(s);
     cudaFreeAsync(data_ptrs_d, s.ptr());
 }
@@ -232,7 +232,7 @@ void LimbPartition::addScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
 
     if (limbsize > 0)
         add_scalar_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + its * split * vector.size(),
-                                                           PARTITION(parta[0]->id, 0), n, its);
+                                                           parta[0]->PB(0), n, its);
     cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
@@ -288,7 +288,7 @@ void LimbPartition::multScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
     if (limbsize > 0)
         mult_scalar_reuse_b___<<<grid, block, 0, s.ptr()>>>(
             data_ptrs_d, data_ptrs_d + its * split * vector.size(),
-            data_ptrs_d + its * split * vector.size() + split * vector.size() * MAXP, PARTITION(parta[0]->id, 0), n,
+            data_ptrs_d + its * split * vector.size() + split * vector.size() * MAXP, parta[0]->PB(0), n,
             its);
     cudaFreeAsync(data_ptrs_d, s.ptr());
 }
@@ -451,7 +451,7 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const 
         if (limbsize > 0) {
             dotProductLtBatchedPt___<<<grid, block, shmem_bytes, s.ptr()>>>(
                 data_ptrs_d + offset_out_c0, data_ptrs_d + offset_out_c1, data_ptrs_d + offset_in_c0,
-                data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, stride, gStep, PARTITION(out[0]->id, 0), num_LT);
+                data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, stride, gStep, out[0]->PB(0), num_LT);
         }
         if (ext && slimbsize > 0) {
             dotProductLtBatchedPt___<<<sgrid, block, shmem_bytes, s.ptr()>>>(
@@ -464,7 +464,7 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const 
             if (limbsize > 0) {
                 dotProductLtBatchedPt2___<<<grid, block, shmem_bytes, s.ptr()>>>(
                     data_ptrs_d + offset_out_c0, data_ptrs_d + offset_out_c1, data_ptrs_d + offset_in_c0,
-                    data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, bStep, gStep, PARTITION(out[0]->id, 0),
+                    data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, bStep, gStep, out[0]->PB(0),
                     num_LT);
             }
             if (ext && slimbsize > 0) {
@@ -477,7 +477,7 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const 
             if (limbsize > 0) {
                 dotProductLtBatchedPt3___<<<grid, block, shmem_bytes, s.ptr()>>>(
                     data_ptrs_d + offset_out_c0, data_ptrs_d + offset_out_c1, data_ptrs_d + offset_in_c0,
-                    data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, bStep, gStep, PARTITION(out[0]->id, 0),
+                    data_ptrs_d + offset_in_c1, data_ptrs_d + offset_pt, bStep, gStep, out[0]->PB(0),
                     num_LT);
             }
             if (ext && slimbsize > 0) {

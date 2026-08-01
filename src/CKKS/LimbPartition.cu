@@ -68,6 +68,7 @@ LimbPartition::LimbPartition(LimbPartition&& l) noexcept
       bufferGATHER(l.bufferGATHER),
       bufferDECOMPandDIGIT_handle(l.bufferDECOMPandDIGIT_handle),
       bufferGATHER_handle(l.bufferGATHER_handle) {
+    pbase = l.pbase;  // RR window base is part of the storage identity (RR_PLAN (c).2)
     key_q_band = l.key_q_band;
     key_pack_bits = l.key_pack_bits;
     bufferKSKPACK = l.bufferKSKPACK;
@@ -229,10 +230,13 @@ Global::Globals* LimbPartition::getGlobals() {
 
 void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbImpl>& limbs, VectorGPU<void*>& ptrs,
                              int pos, VectorGPU<void*>* auxptrs, uint64_t* buffer, size_t offset, uint64_t* buffer_aux,
-                             size_t offset_aux, bool noptr) {
+                             size_t offset_aux, bool noptr, int record_base) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     constexpr bool USE_PARTITION_STREAM = true;
-    assert(pos < (int)records.size());
+    // record_base: SLOT s is built from records[record_base + s] — the RR window offset
+    // (RR_PLAN (c).2). Zero everywhere except the windowed limb array, so the record a slot
+    // is built from, and hence the primeid it carries, is unchanged on classic chains.
+    assert(record_base >= 0 && record_base + pos < (int)records.size());
     cudaSetDevice(device);
 
     const int limbs_size = limbs.size();
@@ -240,42 +244,42 @@ void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbI
     std::vector<void*> cpu_ptr(size, nullptr);
     std::vector<void*> cpu_auxptr(size, nullptr);
     for (int i = limbs_size; i <= pos; ++i) {
-        const LimbRecord& r = records.at(i);
+        const LimbRecord& r = records.at(record_base + i);
         if (r.type == U32) {
             if (buffer && buffer_aux) {
                 limbs.emplace_back(Limb<uint32_t>(cc, (uint32_t*)buffer, 2 * offset, id,
-                                                  USE_PARTITION_STREAM ? s : records.at(i).stream, r.id,
+                                                  USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id,
                                                   (uint32_t*)buffer_aux, 2 * offset_aux));
                 offset += cc.N;
                 offset_aux += cc.N;
             } else if (buffer) {
                 limbs.emplace_back(Limb<uint32_t>(cc, (uint32_t*)buffer, 2 * offset, id,
-                                                  USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, nullptr, 0));
+                                                  USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, nullptr, 0));
                 offset += cc.N;
             } else
                 limbs.emplace_back(
-                    Limb<uint32_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, !auxptrs));
+                    Limb<uint32_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, !auxptrs));
             cpu_ptr[i - limbs_size] = {&(std::get<U32>(limbs.back()).v.data)[0]};
             cpu_auxptr[i - limbs_size] = {&(std::get<U32>(limbs.back()).aux.data)[0]};
         }
         if (r.type == U64) {
             if (buffer && buffer_aux) {
                 limbs.emplace_back(Limb<uint64_t>(cc, buffer, offset, id,
-                                                  USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, buffer_aux,
+                                                  USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, buffer_aux,
                                                   offset_aux));
                 offset += cc.N;
                 offset_aux += cc.N;
             } else if (buffer) {
                 limbs.emplace_back(Limb<uint64_t>(cc, buffer, offset, id,
-                                                  USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, nullptr, 0));
+                                                  USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, nullptr, 0));
                 offset += cc.N;
             } else {
                 if (auxptrs) {
                     limbs.emplace_back(
-                        Limb<uint64_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, false));
+                        Limb<uint64_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, false));
                 } else {
                     limbs.emplace_back(
-                        Limb<uint64_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(i).stream, r.id, true));
+                        Limb<uint64_t>(cc, id, USE_PARTITION_STREAM ? s : records.at(record_base + i).stream, r.id, true));
                 }
             }
 
@@ -284,7 +288,7 @@ void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbI
             //cudaFreeHost(aux);
         }
         CudaCheckErrorModNoSync;
-        s.wait(USE_PARTITION_STREAM ? s : records.at(i).stream);
+        s.wait(USE_PARTITION_STREAM ? s : records.at(record_base + i).stream);
         CudaCheckErrorModNoSync;
     }
     if (size > 0) {
@@ -312,8 +316,16 @@ void LimbPartition::generateLimb() {
 void LimbPartition::generateLimbToLevel(int new_level) {
     cudaSetDevice(device);
     int new_size = getLimbSize(new_level);
+    if (cc.isRR()) {
+        // On an RR chain the window base is part of the identity of the storage: slot k must
+        // be built from meta[pbase + k]. Widening an EXISTING window is not a thing an RR
+        // level transition ever does (both edges move, and the residues change) — only a
+        // fresh allocation is legal here, which RNSPoly::grow enforces.
+        assert(limb.empty() && "RR: growing a live window must go through RNSPoly::rrRescale");
+        pbase = cc.windowLo(new_level);
+    }
     if (new_size > limb.size()) {
-        generate(meta, limb, limbptr, new_size - 1, &auxptr);
+        generate(meta, limb, limbptr, new_size - 1, &auxptr, nullptr, 0, nullptr, 0, false, pbase);
     }
 }
 
@@ -655,7 +667,7 @@ void LimbPartition::NTT(int batch, bool sync, NTT_fusion_fields fields) {
                     STREAM(limb[i]).wait(s);
                 }
             }
-            ApplyNTT<algo, mode>(batch, fields, limb, limbptr, auxptr, cc, PARTITION(id, 0), limbsize);
+            ApplyNTT<algo, mode>(batch, fields, limb, limbptr, auxptr, cc, PB(0), limbsize);
             if (sync) {
                 for (int i = 0; i < limbsize; i += batch) {
                     s.wait(STREAM(limb[i]));
@@ -719,7 +731,7 @@ void LimbPartition::INTT(int batch, bool sync, INTT_fusion_fields fields) {
                     STREAM(limb[i]).wait(s);
                 }
             }
-            ApplyINTT<algo, mode>(batch, fields, limb, limbptr, auxptr, cc, PARTITION(id, 0), limbsize);
+            ApplyINTT<algo, mode>(batch, fields, limb, limbptr, auxptr, cc, PB(0), limbsize);
             if (sync) {
                 for (int i = 0; i < limbsize; i += batch) {
                     s.wait(STREAM(limb[i]));
@@ -799,13 +811,13 @@ void LimbPartition::add(const LimbPartition& p, const bool ext) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         const int add_bpt = fideslibAddBytes();
-        const size_t add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        const size_t add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)(pbase + i), (size_t)num_limbs, cc.N) : 0;
         if (add_bpl && (add_bpl % (size_t)(add_bpt * 128)) == 0)
             launchAddBytes(dim3{(uint32_t)(add_bpl / (add_bpt * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
-                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), add_bpt);
+                           limbptr.data + i, p.limbptr.data + i, PB(i), add_bpt);
         else
             add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
+                limbptr.data + i, p.limbptr.data + i, PB(i));
     }
     if (ext) {
         int start = cc.splitSpecialMeta.at(id).at(0).id - (cc.L + 1);
@@ -846,7 +858,7 @@ void LimbPartition::scaleByP() {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         scaleByP_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i,
-                                                                                            PARTITION(id, i));
+                                                                                            PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -861,13 +873,13 @@ void LimbPartition::sub(const LimbPartition& p) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         const int sub_bpt = fideslibAddBytes();
-        const size_t sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        const size_t sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)(pbase + i), (size_t)num_limbs, cc.N) : 0;
         if (sub_bpl && (sub_bpl % (size_t)(sub_bpt * 128)) == 0)
             launchSubBytes(dim3{(uint32_t)(sub_bpl / (sub_bpt * 128)), num_limbs}, dim3{128}, STREAM(limb[i]).ptr(),
-                           limbptr.data + i, p.limbptr.data + i, PARTITION(id, i), sub_bpt);
+                           limbptr.data + i, p.limbptr.data + i, PB(i), sub_bpt);
         else
         sub_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
+            limbptr.data + i, p.limbptr.data + i, PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -886,7 +898,7 @@ void LimbPartition::multElement(const LimbPartition& p) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         Mult_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
+            limbptr.data + i, limbptr.data + i, p.limbptr.data + i, PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -907,7 +919,7 @@ void LimbPartition::multElement(const LimbPartition& partition1, const LimbParti
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         Mult_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
             (void**)limbptr.data + i, (void**)partition1.limbptr.data + i, (void**)partition2.limbptr.data + i,
-            PARTITION(id, i));
+            PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -918,6 +930,7 @@ void LimbPartition::multElement(const LimbPartition& partition1, const LimbParti
 
 void LimbPartition::rescale() {
     const int limbsize = getLimbSize(*level);
+    assert(!cc.isRR() && "RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
     assert(cc.GPUid.size() > 1 || limbsize > 1);
     if (limbsize == 0)
         return;
@@ -945,11 +958,11 @@ void LimbPartition::rescale() {
 
                 INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
                                                 bytesFirst, cc.top_limb_stream.at(id).ptr()>>>(
-                    getGlobals(), limbptr.data + start + i, PARTITION(id, start + i), cc.top_limbptr.at(id).data);
+                    getGlobals(), limbptr.data + start + i, PB(start + i), cc.top_limbptr.at(id).data);
 
                 INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
                                                bytesSecond, STREAM(limb.at(start + i)).ptr()>>>(
-                    getGlobals(), cc.top_limbptr.at(id).data, PARTITION(id, start + i), limbptr.data + start + i);
+                    getGlobals(), cc.top_limbptr.at(id).data, PB(start + i), limbptr.data + start + i);
             }
             s.wait(cc.top_limb_stream.at(id));
         }
@@ -972,12 +985,12 @@ void LimbPartition::rescale() {
             {
                 NTT_<false, algo, NTT_RESCALE>
                     <<<dim3{cc.N / (blockDimFirst.x * M * 2), static_cast<unsigned int>(limbsize - 1)}, blockDimFirst, bytesFirst, s.ptr()>>>(
-                        getGlobals(), limbptr.data + limbsize - 1, PARTITION(id, 0), auxLimbs.limbptr.data,
+                        getGlobals(), limbptr.data + limbsize - 1, PB(0), auxLimbs.limbptr.data,
                         nullptr /*limbptr.data*/, PRIMEID(top));
 
                 NTT_<true, algo, NTT_RESCALE>
                     <<<dim3{cc.N / (blockDimSecond.x * M * 2), static_cast<unsigned int>(limbsize - 1)}, blockDimSecond, bytesSecond, s.ptr()>>>(
-                        getGlobals(), auxLimbs.limbptr.data, PARTITION(id, 0), limbptr.data, nullptr, PRIMEID(top));
+                        getGlobals(), auxLimbs.limbptr.data, PB(0), limbptr.data, nullptr, PRIMEID(top));
             }
         }
         auxLimbs.s.wait(s);
@@ -1007,6 +1020,7 @@ void LimbPartition::rescale() {
 // top primeids (multi-GPU interleaving), or aux-less (constant) limbs.
 bool LimbPartition::rescale2() {
     const int limbsize = getLimbSize(*level);
+    assert(!cc.isRR() && "RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
     if (limbsize < 3)
         return false;
     LimbImpl& top = limb.at(limbsize - 1);
@@ -1030,17 +1044,17 @@ bool LimbPartition::rescale2() {
         int bytesSecond = (32 / M) * blockDimSecond.x * (2 * M + 1 + (algo == 2 || algo == 3 ? 1 : 0));
 
         if (blockDimFirst.x == blockDimSecond.x &&
-            launchFusedNTTPair(true, getGlobals(), limbptr.data + limbsize - 2, PARTITION(id, limbsize - 2), 2,
+            launchFusedNTTPair(true, getGlobals(), limbptr.data + limbsize - 2, PB(limbsize - 2), 2,
                                dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst,
                                auxptr.data + limbsize - 2, limbptr.data + limbsize - 2, s.ptr())) {
             // E1: fused pair
         } else {
             INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), 2}, blockDimFirst, bytesFirst,
                                             s.ptr()>>>(getGlobals(), limbptr.data + limbsize - 2,
-                                                       PARTITION(id, limbsize - 2), auxptr.data + limbsize - 2);
+                                                       PB(limbsize - 2), auxptr.data + limbsize - 2);
             INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), 2}, blockDimSecond, bytesSecond,
                                            s.ptr()>>>(getGlobals(), auxptr.data + limbsize - 2,
-                                                      PARTITION(id, limbsize - 2), limbptr.data + limbsize - 2);
+                                                      PB(limbsize - 2), limbptr.data + limbsize - 2);
         }
     }
 
@@ -1053,10 +1067,10 @@ bool LimbPartition::rescale2() {
         const int size = limbsize - 2;
 
         NTT_<false, algo, NTT_RESCALE2><<<dim3{cc.N / (blockDimFirst.x * M * 2), (uint32_t)size}, blockDimFirst,
-                                          bytesFirst, s.ptr()>>>(getGlobals(), limbptr.data + size, PARTITION(id, 0),
+                                          bytesFirst, s.ptr()>>>(getGlobals(), limbptr.data + size, PB(0),
                                                                  auxptr.data, nullptr, PRIMEID(top));
         NTT_<true, algo, NTT_RESCALE2><<<dim3{cc.N / (blockDimSecond.x * M * 2), (uint32_t)size}, blockDimSecond,
-                                         bytesSecond, s.ptr()>>>(getGlobals(), auxptr.data, PARTITION(id, 0),
+                                         bytesSecond, s.ptr()>>>(getGlobals(), auxptr.data, PB(0),
                                                                  limbptr.data, nullptr, PRIMEID(top));
     }
     return true;
@@ -1141,18 +1155,18 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
             uint32_t num_limbs = std::min((uint32_t)cc.batch, (uint32_t)(limbsize - i));
 
             if (blockDimFirst.x == blockDimSecond.x &&
-                launchFusedNTTPair(true, getGlobals(), limbptr.data + i, PARTITION(id, i), (int)num_limbs,
+                launchFusedNTTPair(true, getGlobals(), limbptr.data + i, PB(i), (int)num_limbs,
                                    dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst, auxptr.data + i,
                                    DECOMPALLptr.data + i, STREAM(limb.at(i)).ptr())) {
                 // E1: fused pair
             } else {
                 INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
                                                 bytesFirst, STREAM(limb.at(i)).ptr()>>>(
-                    getGlobals(), limbptr.data + i, PARTITION(id, i), auxptr.data + i);
+                    getGlobals(), limbptr.data + i, PB(i), auxptr.data + i);
 
                 INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
                                                bytesSecond, STREAM(limb.at(i)).ptr()>>>(
-                    getGlobals(), auxptr.data + i, PARTITION(id, i), DECOMPALLptr.data + i);
+                    getGlobals(), auxptr.data + i, PB(i), DECOMPALLptr.data + i);
             }
         }
         for (int i = 0; i < limbsize; i += cc.batch) {
@@ -1398,7 +1412,7 @@ void LimbPartition::copyLimb(const LimbPartition& partition) {
     //std::cout << "GPU: " << id << " copy " << limbsize << "limbs" << std::endl;
     if (limbsize > 0)
         launch_copy_limbs((uint32_t)cc.N, (uint32_t)limbsize, s.ptr(), partition.limbptr.data, limbptr.data,
-                          uniform_limb_bytes(meta, 0, (size_t)limbsize, cc.N));
+                          uniform_limb_bytes(meta, (size_t)pbase, (size_t)limbsize, cc.N));
     /*
     for (size_t i = 0; i < partition.limb.size(); ++i) {
         STREAM(limb.at(i)).wait(s);
@@ -1528,7 +1542,7 @@ void LimbPartition::mult1AddMult23Add4(const LimbPartition& partition1, const Li
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         mult1AddMult23Add4_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            PARTITION(id, i), limbptr.data + i, partition1.limbptr.data + i, partition2.limbptr.data + i,
+            PB(i), limbptr.data + i, partition1.limbptr.data + i, partition2.limbptr.data + i,
             partition3.limbptr.data + i, partition4.limbptr.data + i);
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
@@ -1562,7 +1576,7 @@ void LimbPartition::multNoModdownEnd(LimbPartition& c0, const LimbPartition& bc0
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         multnomoddownend_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            PARTITION(id, i), limbptr.data + i, c0.limbptr.data + i, bc0.limbptr.data + i, bc1.limbptr.data + i,
+            PB(i), limbptr.data + i, c0.limbptr.data + i, bc0.limbptr.data + i, bc1.limbptr.data + i,
             in.limbptr.data + i, aux.limbptr.data + i);
     }
     this->copySpecialLimb(in);
@@ -1592,7 +1606,7 @@ void LimbPartition::mult1Add2(const LimbPartition& partition1, const LimbPartiti
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         mult1Add2_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            PARTITION(id, i), limbptr.data + i, partition1.limbptr.data + i, partition2.limbptr.data + i);
+            PB(i), limbptr.data + i, partition1.limbptr.data + i, partition2.limbptr.data + i);
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -1616,6 +1630,10 @@ void LimbPartition::generateLimbSingleMalloc() {
 
     limb.clear();
 
+    // The single-malloc path allocates the FULL chain as one prefix (limbsize == meta.size()),
+    // which has no window meaning: it is the keyswitch/modup workspace shape. RR keyswitch is
+    // milestone (c).3 — until then an RR context must not reach it.
+    assert(!cc.isRR() && "RR: single-malloc (full-chain) allocation is milestone (c).3");
     //generate(meta, limb, limbptr, (int)limbsize - 1, &auxptr, bufferLIMB, 0, bufferLIMB, cc.N * (limbsize));
     generate(meta, limb, limbptr, (int)limbsize - 1, &auxptr, nullptr, 0, nullptr, cc.N * (limbsize));
 }
@@ -1640,7 +1658,9 @@ void LimbPartition::generateLimbConstant() {
 
     //limb.clear();
     //generate(meta, limb, limbptr, (int)limbsize - 1, &auxptr, bufferLIMB, 0, nullptr, 0);
-    generate(meta, limb, limbptr, (int)limbsize - 1, nullptr /*&auxptr*/, nullptr, 0, nullptr, 0);
+    if (cc.isRR())
+        pbase = cc.windowLo(*level);
+    generate(meta, limb, limbptr, (int)limbsize - 1, nullptr /*&auxptr*/, nullptr, 0, nullptr, 0, false, pbase);
 }
 
 void LimbPartition::loadDecompDigit(const std::vector<std::vector<std::vector<uint64_t>>>& data,
@@ -2120,12 +2140,22 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
 }
 
 int LimbPartition::getLimbSize(int level) {
+    // RR chains: a level owns the WINDOW [windowLo, windowHi] rather than the prefix [0,
+    // level], and the level index is the rescale count, so the prefix scan below would count
+    // the wrong limbs (and, past the first rescale, a count that is not even monotone in the
+    // level). Single-GPU only, hence the direct window size.
+    if (cc.isRR())
+        return cc.windowSize(level);
     int size = 0;
     while (size < meta.size() && meta[size].id <= level) {
         //assert(limb.size() > size);
         ++size;
     }
     return size;
+}
+
+int LimbPartition::PB(const int slot) const {
+    return PARTITION(id, pbase + slot);
 }
 
 void LimbPartition::rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, const LimbPartition& ksk_a,
@@ -2554,7 +2584,7 @@ void LimbPartition::moddown(LimbPartition& auxLimbs, bool ntt, bool free_special
             int shared_bytes = sizeof(uint64_t) * (SPECIALlimb.size()) * blockSize.x;
 
             ModDown2<algo><<<gridSize, blockSize, shared_bytes, s.ptr()>>>(
-                auxLimbs.limbptr.data, limbsize, SPECIALlimbptr.data, PARTITION(id, 0), getGlobals());
+                auxLimbs.limbptr.data, limbsize, SPECIALlimbptr.data, PB(0), getGlobals());
         }
         if (md_dump) {
             cudaDeviceSynchronize();
@@ -2620,7 +2650,7 @@ void LimbPartition::automorph(const int index, const int br, LimbPartition* src,
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         automorph_multi_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
             src ? src->limbptr.data + i : limbptr.data + i, src ? limbptr.data + i : auxptr.data + i, index, br,
-            PARTITION(id, i));
+            PB(i));
     }
     if (ext) {
         int start = cc.splitSpecialMeta.at(id).at(0).id - (cc.L + 1);
@@ -2706,7 +2736,7 @@ void LimbPartition::modupInto(LimbPartition& partition, LimbPartition& aux_parti
             uint32_t num_limbs = std::min((uint32_t)cc.batch, (uint32_t)(size - i));
 
             if (blockDimFirst.x == blockDimSecond.x &&
-                launchFusedNTTPair(true, getGlobals(), limbptr.data + start + i, PARTITION(id, start + i),
+                launchFusedNTTPair(true, getGlobals(), limbptr.data + start + i, PB(start + i),
                                    (int)num_limbs, dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst,
                                    auxptr.data + start + i, partition.DECOMPlimbptr[d].data + i,
                                    STREAM(limb.at(start + i)).ptr())) {
@@ -2714,11 +2744,11 @@ void LimbPartition::modupInto(LimbPartition& partition, LimbPartition& aux_parti
             } else {
                 INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
                                                 bytesFirst, STREAM(limb.at(start + i)).ptr()>>>(
-                    getGlobals(), limbptr.data + start + i, PARTITION(id, start + i), auxptr.data + start + i);
+                    getGlobals(), limbptr.data + start + i, PB(start + i), auxptr.data + start + i);
 
                 INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
                                                bytesSecond, STREAM(limb.at(start + i)).ptr()>>>(
-                    getGlobals(), auxptr.data + start + i, PARTITION(id, start + i),
+                    getGlobals(), auxptr.data + start + i, PB(start + i),
                     partition.DECOMPlimbptr[d].data + i);
             }
         }
@@ -2792,13 +2822,13 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         const int smul_bpt = fideslibAddBytes();
-        const size_t smul_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        const size_t smul_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)(pbase + i), (size_t)num_limbs, cc.N) : 0;
         if (smul_bpl && smul_bpt >= 16 && (smul_bpl % (size_t)(smul_bpt * 128)) == 0)
             launchScalarMultBytes(dim3{(uint32_t)(smul_bpl / (smul_bpt * 128)), num_limbs}, dim3{128},
-                                  STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), nullptr, smul_bpt);
+                                  STREAM(limb[i]).ptr(), limbptr.data + i, elems, PB(i), nullptr, smul_bpt);
         else
             Scalar_mult_<ALGO_BARRETT><<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                limbptr.data + i, elems, PARTITION(id, i), nullptr);
+                limbptr.data + i, elems, PB(i), nullptr);
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -2816,12 +2846,12 @@ void LimbPartition::addScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
-        int primeid_init = PARTITION(id, i);
+        int primeid_init = PB(i);
         const int scalar_add_bpt = fideslibAddBytes();
-        const size_t scalar_add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        const size_t scalar_add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)(pbase + i), (size_t)num_limbs, cc.N) : 0;
         if (scalar_add_bpl && (scalar_add_bpl % (size_t)(scalar_add_bpt * 128)) == 0)
             launchScalarAddSubBytes(dim3{(uint32_t)(scalar_add_bpl / (scalar_add_bpt * 128)), num_limbs}, dim3{128},
-                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), scalar_add_bpt, false);
+                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PB(i), scalar_add_bpt, false);
         else
         scalar_add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i, elems,
                                                                                               primeid_init);
@@ -2843,13 +2873,13 @@ void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         const int scalar_sub_bpt = fideslibAddBytes();
-        const size_t scalar_sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        const size_t scalar_sub_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)(pbase + i), (size_t)num_limbs, cc.N) : 0;
         if (scalar_sub_bpl && (scalar_sub_bpl % (size_t)(scalar_sub_bpt * 128)) == 0)
             launchScalarAddSubBytes(dim3{(uint32_t)(scalar_sub_bpl / (scalar_sub_bpt * 128)), num_limbs}, dim3{128},
-                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PARTITION(id, i), scalar_sub_bpt, true);
+                                    STREAM(limb[i]).ptr(), limbptr.data + i, elems, PB(i), scalar_sub_bpt, true);
         else
         scalar_sub_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(limbptr.data + i, elems,
-                                                                                              PARTITION(id, i));
+                                                                                              PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -2870,13 +2900,13 @@ void LimbPartition::add(const LimbPartition& a, const LimbPartition& b, const bo
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         if (!ext_a && ext_b) {
             addScaleB_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PARTITION(id, i));
+                limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PB(i));
         } else if (!ext_b && ext_a) {
             addScaleB_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                limbptr.data + i, b.limbptr.data + i, a.limbptr.data + i, PARTITION(id, i));
+                limbptr.data + i, b.limbptr.data + i, a.limbptr.data + i, PB(i));
         } else {
             add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PARTITION(id, i));
+                limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PB(i));
         }
     }
 
@@ -2926,7 +2956,7 @@ void LimbPartition::squareElement(const LimbPartition& p) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)size - i, cc.batch);
         square_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, p.limbptr.data + i, PARTITION(id, i));
+            limbptr.data + i, p.limbptr.data + i, PB(i));
     }
     for (int i = 0; i < size; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -2945,7 +2975,7 @@ void LimbPartition::binomialSquareFold(LimbPartition& c0_res, const LimbPartitio
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         binomial_square_fold_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
             c0_res.limbptr.data + i, c2_key_switched_0.limbptr.data + i, limbptr.data + i,
-            c2_key_switched_1.limbptr.data + i, PARTITION(id, i));
+            c2_key_switched_1.limbptr.data + i, PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -2971,7 +3001,7 @@ void LimbPartition::addMult(const LimbPartition& a, const LimbPartition& b) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
         addMult_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PARTITION(id, i));
+            limbptr.data + i, a.limbptr.data + i, b.limbptr.data + i, PB(i));
     }
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
@@ -3043,13 +3073,13 @@ void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*>
 
     {
         const int elws_bpt = fideslibAddBytes();
-        const size_t elws_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, 0, (size_t)limbsize, cc.N) : 0;
+        const size_t elws_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)pbase, (size_t)limbsize, cc.N) : 0;
         if (!limb.empty() && elws_bpl && elws_bpt >= 16 && (elws_bpl % (size_t)(elws_bpt * 128)) == 0)
             launchEvalLinearWSumBytes(dim3{(uint32_t)(elws_bpl / (elws_bpt * 128)), (uint32_t)limbsize}, dim3{128},
-                                      s.ptr(), n, limbptr.data, d_psptr, elems, PARTITION(id, 0), elws_bpt);
+                                      s.ptr(), n, limbptr.data, d_psptr, elems, PB(0), elws_bpt);
         else if (!limb.empty())
             eval_linear_w_sum_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
-                n, limbptr.data, d_psptr, elems, PARTITION(id, 0));
+                n, limbptr.data, d_psptr, elems, PB(0));
     }
     cudaFreeAsync(elems, s.ptr());
     cudaFreeAsync(d_psptr, s.ptr());
@@ -3122,7 +3152,7 @@ void LimbPartition::dotProductPt(LimbPartition& c1, const std::vector<const Limb
         STREAM(limb[i]).wait(s);
         int size = std::min((int)limbsize - (int)i, cc.batch);
         dotProductPt_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            limbptr.data, c1.limbptr.data, data.data, i, PARTITION(id, i), n);
+            limbptr.data, c1.limbptr.data, data.data, i, PB(i), n);
     }
 
     if (ext) {
@@ -3217,10 +3247,10 @@ void LimbPartition::binomialDotProduct(LimbPartition& c1, LimbPartition& c2,
         STREAM(limb[i]).wait(s);
         int size = std::min((int)limbsize - (int)i, cc.batch);
         // dotProductPt_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-        //     limbptr.data, c1.limbptr.data, data.data, i, PARTITION(id, i), n);
+        //     limbptr.data, c1.limbptr.data, data.data, i, PB(i), n);
 
         binomialDotProdBatched___<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-            PARTITION(id, i), data.data + 0, data.data + n, data.data + 2 * n, data.data + 3 * n,
+            PB(i), data.data + 0, data.data + n, data.data + 2 * n, data.data + 3 * n,
             data.data + n * 4 * (1 + ext), data.data + n * 4 * (1 + ext) + 1, data.data + n * 4 * (1 + ext) + 2, n, 1);
     }
 
@@ -3272,25 +3302,25 @@ void LimbPartition::binomialMult(LimbPartition& c1, LimbPartition& c2, const Lim
         STREAM(limb[i]).wait(s);
         int size = std::min((int)limbsize - (int)i, cc.batch);
         // dotProductPt_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-        //     limbptr.data, c1.limbptr.data, data.data, i, PARTITION(id, i), n);
+        //     limbptr.data, c1.limbptr.data, data.data, i, PB(i), n);
 
         if (!square) {
             if (!extend_ins) {
                 binomialMult_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                    PARTITION(id, i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i,
+                    PB(i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i,
                     d0.limbptr.data + i, d1.limbptr.data + i);
             } else {
                 binomialMultExtend_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                    PARTITION(id, i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i,
+                    PB(i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i,
                     d0.limbptr.data + i, d1.limbptr.data + i);
             }
         } else {
             if (!extend_ins) {
                 binomialSquare_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                    PARTITION(id, i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i);
+                    PB(i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i);
             } else {
                 binomialSquareExtend_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)size}, 128, 0, STREAM(limb[i]).ptr()>>>(
-                    PARTITION(id, i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i);
+                    PB(i), this->limbptr.data + i, c1.limbptr.data + i, c2.limbptr.data + i);
             }
         }
     }

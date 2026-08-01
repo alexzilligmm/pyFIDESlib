@@ -252,6 +252,10 @@ FIDESlib::CKKS::RawParams FIDESlib::CKKS::GetRawParams(lbcrypto::CryptoContext<l
     const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(cc->GetCryptoParameters());
     result.scalingTechnique = cryptoParams->GetScalingTechnique();
     result.compositeDegree = cryptoParams->GetCompositeDegree();
+    if (cryptoParams->IsRRChain()) {
+        result.rrWindows = cryptoParams->GetRRWindows();
+        result.rrNumSmalls = (int)cryptoParams->GetRRNumSmalls();
+    }
     //result.qbit = cc->params->m_params->m_params->;
     //auto aux = cc->GetCryptoParameters()->GetParamsPK()->GetParamPartition();
 

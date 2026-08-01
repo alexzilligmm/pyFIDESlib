@@ -98,6 +98,21 @@ class LimbPartition {
 
     ~LimbPartition();
 
+    /** RATIONAL RESCALING window base (RR_PLAN milestone (c).2): the GLOBAL primeid held by
+     *  limb SLOT 0. Zero on classic prefix chains, where slot k has always held primeid k —
+     *  so every `PB(k)` launch base below is literally the old `PARTITION(id, k)` and the
+     *  generated code is unchanged. On an RR chain slot k holds primeid pbase + k, with
+     *  pbase == cc.windowLo(*level); it moves on every rescale because BOTH window edges do.
+     *
+     *  Kept as explicit state rather than derived from *level: a rescale rebuilds the limb
+     *  vector and the level field is momentarily inconsistent with the storage, and the
+     *  keyswitch workspaces (whose level pointer is shared) must not silently re-base. */
+    int pbase = 0;
+    /** Launch base into C_.primeid_partition for limb SLOT `slot` of THIS partition:
+     *  `C_.primeid_flattened[PB(slot) + blockIdx.y]` is the global primeid of slot
+     *  `slot + blockIdx.y`. The one place the window offset enters the kernels. */
+    int PB(int slot) const;
+
     Global::Globals* getGlobals();
     void binomialDotProduct(LimbPartition& c1, LimbPartition& c2, const std::vector<const LimbPartition*>& c0s,
                             const std::vector<const LimbPartition*>& c1s, const std::vector<const LimbPartition*>& d0s,
@@ -110,7 +125,7 @@ class LimbPartition {
 
     void generate(std::vector<LimbRecord>& records, std::vector<LimbImpl>& limbs, VectorGPU<void*>& ptrs, int pos,
                   VectorGPU<void*>* auxptrs, uint64_t* buffer = nullptr, size_t offset = 0,
-                  uint64_t* buffer_aux = nullptr, size_t offset_aux = 0, bool noptr = false);
+                  uint64_t* buffer_aux = nullptr, size_t offset_aux = 0, bool noptr = false, int record_base = 0);
 
     void generateLimb();
 
@@ -131,6 +146,16 @@ class LimbPartition {
     void moddown(LimbPartition& auxLimbs, bool ntt, bool free_special_limbs);
 
     void rescale();
+    /** RATIONAL RESCALING (RR_PLAN (c).2), defined in RationalRescale.cu: move this
+     *  partition's storage from level's window to (level-1)'s by the RR modulus switch —
+     *  scale by prod(add) (whose residues on the incoming primes are exactly 0, so the
+     *  add-back is a zero-extension), then divide out `drop` one prime at a time in the
+     *  CPU reference's order. Rebuilds `limb` (both edges move) and therefore re-uploads the
+     *  limbptr/auxptr device tables, and re-bases pbase onto the new window. */
+    void rrRescale(const std::vector<int>& drop, const std::vector<int>& add, int new_level);
+    /** Re-upload limbptr/auxptr from the current `limb` vector. Needed whenever the limb
+     *  array is rebuilt rather than appended to (the RR rescale is the only such path). */
+    void refreshLimbPtrs();
     /** n32 speed: fused composite DOUBLE prime drop (bit-identical to two rescale() calls,
      * ~half the kernel work). Returns false if the shape doesn't fit — caller must then fall
      * back to the sequential per-prime loop. See the definition for the eligibility rules. */

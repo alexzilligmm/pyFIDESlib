@@ -24,6 +24,13 @@ class Parameters {
     // operator< — contexts differing only in compositeDegree are different contexts;
     // omitting it would silently serve a cached d=1 context from map_param_context.
     int compositeDegree = 1;
+    // RATIONAL RESCALING: flattened per-level (lo, hi) windows into the prime layout, level 0
+    // first (see RawParams::rrWindows). Empty = classic prefix chain. MUST participate in
+    // operator< for the same reason compositeDegree does — two contexts over the SAME prime
+    // list but different window schedules are different contexts, and map_param_context would
+    // otherwise serve the wrong one.
+    std::vector<uint32_t> rrWindows;
+    int rrNumSmalls = 0;
     std::vector<PrimeRecord> primes;
     std::vector<PrimeRecord> Sprimes;
     std::vector<double> ModReduceFactor;
@@ -57,6 +64,26 @@ class Parameters {
             return true;
         } else if (compositeDegree > b.compositeDegree) {
             return false;
+        }
+
+        if (rrNumSmalls < b.rrNumSmalls) {
+            return true;
+        } else if (rrNumSmalls > b.rrNumSmalls) {
+            return false;
+        }
+
+        if (rrWindows.size() < b.rrWindows.size()) {
+            return true;
+        } else if (rrWindows.size() > b.rrWindows.size()) {
+            return false;
+        }
+
+        for (size_t i = 0; i < rrWindows.size(); i++) {
+            if (rrWindows[i] < b.rrWindows[i]) {
+                return true;
+            } else if (rrWindows[i] > b.rrWindows[i]) {
+                return false;
+            }
         }
 
         if (K < b.K) {

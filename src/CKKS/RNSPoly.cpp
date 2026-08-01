@@ -26,6 +26,22 @@ void RNSPoly::grow(int new_level, bool single_malloc, bool constant) {
         return;
     level = new_level;
 
+    // RATIONAL RESCALING (RR_PLAN (c).2): a level owns a WINDOW of the prime layout, not a
+    // prefix, so there is no "extend the top" — the storage is allocated once, for the level
+    // the poly is created at, and only rrRescale may move it afterwards (both edges move and
+    // the residues change). The single-malloc shape (the full chain as one prefix) is the
+    // keyswitch workspace and belongs to milestone (c).3.
+    if (cc.isRR()) {
+        assert(cc.GPUid.size() == 1 && "RR is single-GPU until milestone (c).3");
+        for (auto& g : GPU) {
+            if (constant)
+                g.generateLimbConstant();
+            else
+                g.generateLimbToLevel(new_level);
+        }
+        return;
+    }
+
     // single_malloc = false;
     //if (level == -1) {
     //std::cout << "from 0" << std::endl;
@@ -123,6 +139,14 @@ void RNSPoly::loadDecompDigit(const std::vector<std::vector<std::vector<uint64_t
 }
 
 void RNSPoly::store(std::vector<std::vector<uint64_t>>& data) {
+    if (cc.isRR()) {
+        // slot k of the window holds global primeid windowLo(level) + k
+        data.resize(cc.windowSize(level));
+        cudaSetDevice(GPU[0].device);
+        for (size_t i = 0; i < data.size(); ++i)
+            SWITCH(GPU[0].limb[i], store_convert(data[i]));
+        return;
+    }
     data.resize(level + 1);
     for (size_t i = 0; i < data.size(); ++i) {
         //auto& rec = cc.meta[cc.limbGPUid[i].x][cc.limbGPUid[i].y];
@@ -896,6 +920,11 @@ void RNSPoly::copyShallow(const RNSPoly& poly) {
 }
 
 void RNSPoly::dropToLevel(int level) {
+    // RR: dropping a level is not free — a window's LOW edge moves too, and the residues
+    // change. The only legal transition is rrRescale.
+    if (cc.isRR() && level < this->level)
+        throw std::runtime_error("RR: dropToLevel(" + std::to_string(level) + ") from level " +
+                                 std::to_string(this->level) + " — RR levels only move via rrRescale");
 
     if (0 && GPU.at(0).bufferLIMB == nullptr) {
         for (auto& g : GPU) {
@@ -919,6 +948,22 @@ void RNSPoly::addMult(const RNSPoly& poly, const RNSPoly& poly1) {
 }
 
 void RNSPoly::load(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli) {
+    if (cc.isRR()) {
+        // The classic classifier below derives the level from the data (moduli[i] must equal
+        // prime[i]) — on an RR chain the window's moduli are prime[lo + i] and the level is
+        // NOT recoverable from the limb count, so the poly must already be at its level.
+        const int lo = cc.windowLo(level);
+        if ((int)data.size() != cc.windowSize(level))
+            throw std::runtime_error("RR load: data has " + std::to_string(data.size()) + " limbs, level " +
+                                     std::to_string(level) + "'s window has " +
+                                     std::to_string(cc.windowSize(level)));
+        cudaSetDevice(GPU[0].device);
+        for (int i = 0; i < (int)data.size(); ++i) {
+            assert(moduli[i] == cc.prime.at(lo + i).p);
+            SWITCH(GPU[0].limb[i], load_convert(data[i]));
+        }
+        return;
+    }
     int limbsize = 0;
     int Slimbsize = 0;
     for (int i = 0; i < (int)data.size(); ++i) {

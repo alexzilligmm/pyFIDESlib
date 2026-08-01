@@ -8,6 +8,8 @@
 #include <optional>
 
 #include "CKKS/Context.cuh"
+#include "CKKS/LimbPartition.cuh"
+#include "CKKS/RNSPoly.cuh"
 #include "LimbUtils.cuh"
 #include "Math.cuh"
 #include "ModMult.cuh"
@@ -59,7 +61,7 @@ std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
 }
 
 void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vector<int>& drop,
-                   const std::vector<int>& add) {
+                   const std::vector<int>& add, const int gpuId) {
     assert(!limbs.empty());
     Stream& s     = STREAM(limbs[0]);
     const int N   = cc.N;
@@ -92,7 +94,7 @@ void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vec
                 merged.emplace_back(std::move(limbs[li++]));
             }
             else {
-                Limb<uint32_t> nl(cc, 0, s, sortedAdd[ai]);
+                Limb<uint32_t> nl(cc, gpuId, s, sortedAdd[ai]);
                 cudaMemsetAsync(nl.v.data, 0, sizeof(uint32_t) * N, s.ptr());
                 merged.emplace_back(std::move(nl));
                 ++ai;
@@ -122,7 +124,7 @@ void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vec
         for (auto& ti : limbs) {
             auto& t          = std::get<U32>(ti);
             const uint64_t q = cc.prime[t.primeid].p;
-            Limb<uint32_t> scratch(cc, 0, s, t.primeid);
+            Limb<uint32_t> scratch(cc, gpuId, s, t.primeid);
             SwitchModulus<uint32_t><<<N / blk, blk, 0, s.ptr()>>>(dl.v.data, d, scratch.v.data, t.primeid);
             scratch.NTT();
             t.sub(scratch);
@@ -130,6 +132,103 @@ void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vec
             scalar_mult_<uint32_t, ALGO_BARRETT><<<N / blk, blk, 0, s.ptr()>>>(t.v.data, dinv, t.primeid);
         }
     }
+}
+
+//==================================================================================
+// Milestone (c).2 — the same step driven through the WINDOWED poly representation.
+//==================================================================================
+
+void LimbPartition::refreshLimbPtrs() {
+    cudaSetDevice(device);
+    const size_t n = limb.size();
+    if (n == 0)
+        return;
+    std::vector<void*> cpu_ptr(n, nullptr), cpu_auxptr(n, nullptr);
+    for (size_t k = 0; k < n; ++k) {
+        assert(limb[k].index() == U32 && "RR chains are all-U32 (< 2^30) by design");
+        auto& l       = std::get<U32>(limb[k]);
+        cpu_ptr[k]    = &l.v.data[0];
+        cpu_auxptr[k] = &l.aux.data[0];
+    }
+    assert((int)n <= limbptr.size);
+    cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(auxptr.data, cpu_auxptr.data(), n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    // The host staging vectors die at the end of this scope, so the uploads must have
+    // consumed them by then (they are pageable, but do not lean on the driver's staging).
+    cudaStreamSynchronize(s.ptr());
+    CudaCheckErrorModNoSync;
+}
+
+void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<int>& add, const int new_level) {
+    cudaSetDevice(device);
+    assert(cc.isRR() && "rrRescale is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR is single-GPU until milestone (c).3");
+    assert((int)limb.size() == cc.windowSize(new_level + 1));
+    RRRescaleStep(cc, limb, drop, add, id);
+    assert((int)limb.size() == cc.windowSize(new_level));
+    pbase = cc.windowLo(new_level);
+    assert(limb.empty() || PRIMEID(limb.front()) == pbase);
+    // Both window edges moved and the limb vector was REBUILT (not appended to), so every
+    // entry of the device pointer tables is stale — including slot 0's.
+    refreshLimbPtrs();
+}
+
+void RNSPoly::rrRescale() {
+    assert(cc.isRR() && "RNSPoly::rrRescale is only defined on an RR chain");
+    if (level < 1)
+        throw std::runtime_error("RR: cannot rescale below level 0");
+    std::vector<int> drop, add;
+    cc.rrRescaleSets(level, drop, add);
+    const int new_level = level - 1;
+    for (auto& g : GPU)
+        g.rrRescale(drop, add, new_level);
+    level = new_level;
+}
+
+//==================================================================================
+// Host harness for the (c).2 gate. ContextData/RNSPoly both carry `#ifdef NCCL`
+// members, so a consumer TU compiled without the define sees different field
+// offsets and a different sizeof — the gate may not construct or touch either.
+// It hands over plain coefficient-domain host limbs and gets them back.
+//==================================================================================
+
+std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
+                                                         const std::vector<std::vector<uint32_t>>& coeffLimbs,
+                                                         const int level, const uint64_t scalar) {
+    assert(cc.isRR());
+    assert((int)coeffLimbs.size() == cc.windowSize(level));
+    cudaSetDevice(cc.GPUid[0]);
+
+    RNSPoly p(cc, level);
+    const int lo = cc.windowLo(level);
+    std::vector<std::vector<uint64_t>> data(coeffLimbs.size());
+    std::vector<uint64_t> moduli(coeffLimbs.size());
+    for (size_t k = 0; k < coeffLimbs.size(); ++k) {
+        data[k].assign(coeffLimbs[k].begin(), coeffLimbs[k].end());
+        moduli[k] = cc.prime.at(lo + k).p;
+    }
+    p.load(data, moduli);  // COEFFICIENT domain
+    p.NTT(1, false);
+    if (scalar != 1) {
+        // Exercises the batched elementwise path (Scalar_mult_ over the window), which
+        // resolves its primeids through C_.primeid_partition at base PB(0) = pbase — the
+        // whole point of the window base. NOTE the scalar array is indexed by GLOBAL PRIMEID
+        // (`b[primeid]` in the kernel), not by slot, so it stays full-chain-shaped.
+        std::vector<uint64_t> elems(cc.prime.size(), 1);
+        for (int k = 0; k < (int)coeffLimbs.size(); ++k)
+            elems[lo + k] = scalar % cc.prime.at(lo + k).p;
+        p.multScalar(elems);
+    }
+    p.rrRescale();
+    p.INTT(1, false);
+    p.sync();
+
+    std::vector<std::vector<uint64_t>> out64;
+    p.store(out64);
+    std::vector<std::vector<uint32_t>> out(out64.size());
+    for (size_t k = 0; k < out64.size(); ++k)
+        out[k].assign(out64[k].begin(), out64[k].end());
+    return out;
 }
 
 }  // namespace FIDESlib::CKKS

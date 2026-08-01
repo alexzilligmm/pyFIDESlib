@@ -185,6 +185,26 @@ bool ContextData::isValidPrimeId(const int i) const {
     return (i >= 0 && i < L + 1 + K);
 }
 
+void ContextData::rrRescaleSets(const int level, std::vector<int>& drop, std::vector<int>& add) const {
+    drop.clear();
+    add.clear();
+    assert(isRR() && "rrRescaleSets is only meaningful on an RR chain");
+    assert(level >= 1 && level < rrNumLevels());
+    const int hLo = windowLo(level), hHi = windowHi(level);
+    const int lLo = windowLo(level - 1), lHi = windowHi(level - 1);
+    // The CPU reference (RRChain::RescaleElement) walks the LEFT edge first, then the RIGHT
+    // edge, for both sets. The GPU divides the dropped primes out one at a time, so the order
+    // is observable in the intermediate residues — it must match exactly for bit-compat.
+    for (int i = hLo; i < lLo; ++i)
+        drop.push_back(i);
+    for (int i = lHi + 1; i <= hHi; ++i)
+        drop.push_back(i);
+    for (int i = lLo; i < hLo; ++i)
+        add.push_back(i);
+    for (int i = hHi + 1; i <= lHi; ++i)
+        add.push_back(i);
+}
+
 int ContextData::computeLogQ(const int L, std::vector<PrimeRecord>& primes) {
     int res = 0;
     assert(L <= (int)primes.size());

@@ -34,7 +34,7 @@ class ContextData;
  * @param add     global primeids entering the window.
  */
 void RRRescaleStep(ContextData& cc, std::vector<LimbImpl>& limbs, const std::vector<int>& drop,
-                   const std::vector<int>& add);
+                   const std::vector<int>& add, int gpuId = 0);
 
 /**
  * Host-buffer harness around RRRescaleStep for out-of-library consumers (the
@@ -49,6 +49,18 @@ std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
                                                      const std::vector<std::vector<uint32_t>>& coeffLimbs,
                                                      const std::vector<int>& primeids, const std::vector<int>& drop,
                                                      const std::vector<int>& add);
+
+/**
+ * Milestone (c).2 harness: the same rescale step driven through the WINDOWED poly
+ * representation (RNSPoly::grow/load/NTT/multScalar/rrRescale/INTT/store) instead of a bare
+ * limb vector — i.e. through everything pbase touches. Takes the level's window as
+ * coefficient-domain host limbs (ascending global primeid, i.e. slot order), optionally
+ * multiplies by `scalar` in EVAL to exercise the batched elementwise path, rescales once,
+ * and returns level-1's window. Same TU-boundary rule as RRRescaleStepHost.
+ */
+std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
+                                                         const std::vector<std::vector<uint32_t>>& coeffLimbs,
+                                                         int level, uint64_t scalar = 1);
 
 // out-of-line field accessors for gate-side sanity checks
 uint64_t RRPrimeAt(ContextData& cc, int primeid);

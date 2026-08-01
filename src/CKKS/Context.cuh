@@ -177,6 +177,37 @@ class ContextData {
     int getCorrectionFactorOverride() const;
     int correctionFactorOverride = -1;
 
+    /** RATIONAL RESCALING (RR_PLAN milestone (c)) — the WINDOW model.
+     *
+     *  On a classic chain a level l owns the prefix [0, l] of the prime layout, so "level"
+     *  and "top limb index" are the same number and slot k always holds global primeid k.
+     *  On an RR chain a level owns a contiguous WINDOW [lo(r), hi(r)] of the
+     *  inverted-terminal layout (smalls outermost-first, so every rescale is an edge move),
+     *  and the level index r is the RESCALE COUNT from the top — limb count does not
+     *  identify a level, and BOTH edges move on a rescale.
+     *
+     *  Everything downstream asks these four helpers instead of assuming the prefix. With an
+     *  empty window table they return exactly the prefix answers, so classic chains keep
+     *  their old behaviour byte-identically. A poly's slot k holds global primeid
+     *  windowLo(level) + k — that offset is LimbPartition::pbase. */
+    bool isRR() const { return !param.rrWindows.empty(); }
+    int rrNumLevels() const { return (int)param.rrWindows.size() / 2; }
+    int windowLo(int level) const {
+        if (level < 0)
+            return 0;
+        return isRR() ? (int)param.rrWindows.at(2 * level) : 0;
+    }
+    int windowHi(int level) const {
+        if (level < 0)
+            return -1;
+        return isRR() ? (int)param.rrWindows.at(2 * level + 1) : level;
+    }
+    int windowSize(int level) const { return level < 0 ? 0 : windowHi(level) - windowLo(level) + 1; }
+    /** The primes leaving / entering the window on the rescale level -> level-1, in the order
+     *  the CPU reference (RRChain::RescaleElement) processes them: left edge first, then
+     *  right edge. Only meaningful on an RR chain. */
+    void rrRescaleSets(int level, std::vector<int>& drop, std::vector<int>& add) const;
+
     /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
     int compositeDegree() const { return param.compositeDegree; }
     /** Scaling factor read at a LIMB index. On composite chains OpenFHE stores a SENTINEL

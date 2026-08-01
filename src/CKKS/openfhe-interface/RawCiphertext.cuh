@@ -56,6 +56,14 @@ struct RawParams {
     // from OpenFHE's CryptoParametersCKKSRNS::GetCompositeDegree(); consumed wherever one
     // level transition must move d limbs (rescale, ModRaise, level<->limb conversions).
     int compositeDegree = 1;
+    // RATIONAL RESCALING (RR_PLAN milestone (c)): on an RR chain a level is NOT a prefix of
+    // the modulus chain but a contiguous WINDOW [lo, hi] of the inverted-terminal layout, and
+    // the level index is the RESCALE COUNT from the top (limb count does not identify a
+    // level). rrWindows is the flattened (lo, hi) pair list, level 0 first — exactly
+    // CryptoParametersRNS::GetRRWindows(). Empty = classic prefix chain (everything below
+    // then behaves byte-identically to before). rrNumSmalls = layout index of q0.
+    std::vector<uint32_t> rrWindows;
+    int rrNumSmalls = 0;
     lbcrypto::ScalingTechnique scalingTechnique;
     std::vector<uint64_t> moduli;
     std::vector<uint64_t> root_of_unity;

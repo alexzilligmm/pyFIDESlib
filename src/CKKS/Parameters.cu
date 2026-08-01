@@ -30,6 +30,8 @@ Parameters Parameters::adaptTo(RawParams& raw) const {
                    .dnum = raw.dnum,
                    .K = raw.K,
                    .compositeDegree = raw.compositeDegree,
+                   .rrWindows = raw.rrWindows,
+                   .rrNumSmalls = raw.rrNumSmalls,
                    .primes = std::move(new_primes),
                    .Sprimes = std::move(new_SPECIALprimes),
                    .ModReduceFactor = raw.ModReduceFactor,
