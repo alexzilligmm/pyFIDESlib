@@ -177,7 +177,7 @@ class LimbPartition {
     template <ALGO algo, NTT_MODE mode>
     void ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields, std::vector<LimbImpl>& limb,
                   VectorGPU<void*>& limbptr, VectorGPU<void*>& auxptr, ContextData& cc, const int primeid_init,
-                  const int limbsize = -1);
+                  const int limbsize = -1, const int slot_start = 0);
 
     template <ALGO algo = ALGO_SHOUP, NTT_MODE mode = NTT_NONE>
     void NTT(int batch = 1, bool sync = false, NTT_fusion_fields fields = NTT_fusion_fields{});

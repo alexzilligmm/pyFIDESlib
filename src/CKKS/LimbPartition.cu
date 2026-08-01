@@ -598,7 +598,7 @@ void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_comm
 template <ALGO algo, NTT_MODE mode>
 void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields, std::vector<LimbImpl>& limb,
                              VectorGPU<void*>& limbptr, VectorGPU<void*>& auxptr, ContextData& cc,
-                             const int primeid_init, const int limbsize) {
+                             const int primeid_init, const int limbsize, const int slot_start) {
     const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;  // u32 tiles are byte-parity with u64 (kernel M=8): grid must be N/(bd*M*2)
 
     // n32 speed: the dynamic shared size MUST scale with the limb word size. The kernel lays
@@ -618,7 +618,11 @@ void LimbPartition::ApplyNTT(int batch, LimbPartition::NTT_fusion_fields fields,
     const int size = (limbsize != -1 ? limbsize : limb.size()) -
                      (mode == NTT_RESCALE || mode == NTT_MULTPT) - 2 * (mode == NTT_RESCALE2);
 
-    for (int i = 0; i < size; i += batch) {
+    // slot_start (RR_PLAN (c).3): transform the RUN [slot_start, size) instead of the prefix
+    // [0, size). On an RR chain a digit's active destination limbs are the specials followed
+    // by one contiguous run that does NOT start at slot 0, so modup transforms them as two
+    // runs. 0 everywhere else — the classic launches are unchanged.
+    for (int i = slot_start; i < size; i += batch) {
         uint32_t num_limbs = std::min((uint32_t)batch, (uint32_t)(size - i));
 
         // E1 (Phase 3b): plain SHOUP transforms take the fused single-launch path when the
@@ -1122,7 +1126,11 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
     //assert(SPECIALlimb.empty());
     cudaSetDevice(device);
 
-    const int limbsize = *level + 1;
+    // RR: the active limbs are a window, and the DECOMP staging buffer is addressed by GLOBAL
+    // prime position (each DECOMP limb aliases bufferGATHER at its own primeid), so limb SLOT
+    // i stages at position pbase + i.
+    const int limbsize = cc.isRR() ? getLimbSize(*level) : (*level + 1);
+    const int decompAllBase = cc.isRR() ? pbase : 0;
     generateAllDecompAndDigit(false);
     s.wait(aux_partition.getS());
 
@@ -1157,7 +1165,7 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
             if (blockDimFirst.x == blockDimSecond.x &&
                 launchFusedNTTPair(true, getGlobals(), limbptr.data + i, PB(i), (int)num_limbs,
                                    dim3{cc.N / (blockDimFirst.x * M * 2)}, blockDimFirst, bytesFirst, auxptr.data + i,
-                                   DECOMPALLptr.data + i, STREAM(limb.at(i)).ptr())) {
+                                   DECOMPALLptr.data + decompAllBase + i, STREAM(limb.at(i)).ptr())) {
                 // E1: fused pair
             } else {
                 INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (blockDimFirst.x * M * 2), num_limbs}, blockDimFirst,
@@ -1166,12 +1174,62 @@ void LimbPartition::modup(LimbPartition& aux_partition) {
 
                 INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (blockDimSecond.x * M * 2), num_limbs}, blockDimSecond,
                                                bytesSecond, STREAM(limb.at(i)).ptr()>>>(
-                    getGlobals(), auxptr.data + i, PB(i), DECOMPALLptr.data + i);
+                    getGlobals(), auxptr.data + i, PB(i), DECOMPALLptr.data + decompAllBase + i);
             }
         }
         for (int i = 0; i < limbsize; i += cc.batch) {
             s.wait(STREAM(limb.at(i)));
         }
+    }
+
+    if (cc.isRR()) {
+        // Digits = window ∩ global partition (both ends truncated), tables keyed by the RR
+        // LEVEL rather than the digit size — two levels can give a digit the same size but a
+        // different prime SET, so size does not identify the D-hat tables any more.
+        const auto geoms = cc.rrDigits(*level);
+        const int nSpecial = cc.rrNumSpecialInDigit();
+        for (const auto& g : geoms) {
+            const int d = g.digit;
+            Stream& s_d = cc.digitStream.at(d).at(id);
+            s_d.wait(s);
+
+            ModUpWindow w{};
+            w.fromOff  = g.fromOff;
+            w.toOff    = g.toOff;
+            w.nSpecial = nSpecial;
+            w.nFrom    = g.nFrom;
+            w.nTo      = g.nTo;
+            w.scaleIdx = *level;
+            w.matIdx   = *level;
+            w.winLo    = cc.windowLo(*level);
+            w.winHi    = cc.windowHi(*level);
+            {
+                dim3 blockSize{64, 2};
+                dim3 gridSize{(uint32_t)cc.N / blockSize.x};
+                int shared_bytes = sizeof(uint64_t) * g.nFrom * blockSize.x;
+                DecompAndModUpConv<algo><<<gridSize, blockSize, shared_bytes, s_d.ptr()>>>(
+                    DECOMPlimbptr[d].data, *level + 1, DIGITlimbptr[d].data, d, getGlobals(), w);
+            }
+            // The active destinations are TWO runs: the specials at [0, nSpecial) and the Q
+            // limbs at [nSpecial + toOff, nTo + toOff).
+            const int qBeg = nSpecial + g.toOff, qEnd = g.nTo + g.toOff;
+            for (int i = 0; i < nSpecial; i += cc.batch)
+                STREAM(DIGITlimb.at(d).at(i)).wait(s_d);
+            for (int i = qBeg; i < qEnd; i += cc.batch)
+                STREAM(DIGITlimb.at(d).at(i)).wait(s_d);
+            ApplyNTT<algo, NTT_NONE>(cc.batch, NTT_fusion_fields{}, DIGITlimb.at(d), DIGITlimbptr.at(d),
+                                     aux_partition.DIGITlimbptr.at(d), cc, DIGIT(d, 0), nSpecial, 0);
+            ApplyNTT<algo, NTT_NONE>(cc.batch, NTT_fusion_fields{}, DIGITlimb.at(d), DIGITlimbptr.at(d),
+                                     aux_partition.DIGITlimbptr.at(d), cc, DIGIT(d, 0), qEnd, qBeg);
+            for (int i = 0; i < nSpecial; i += cc.batch)
+                s_d.wait(STREAM(DIGITlimb.at(d).at(i)));
+            for (int i = qBeg; i < qEnd; i += cc.batch)
+                s_d.wait(STREAM(DIGITlimb.at(d).at(i)));
+        }
+        for (const auto& g : geoms)
+            s.wait(cc.digitStream[g.digit][id]);
+        aux_partition.getS().wait(s);
+        return;
     }
 
     for (size_t d = 0; d < DECOMPlimb.size(); ++d) {
@@ -2525,7 +2583,10 @@ void LimbPartition::squareModupDotKSK(LimbPartition& c1, LimbPartition& c0, cons
 template <ALGO algo>
 void LimbPartition::moddown(LimbPartition& auxLimbs, bool ntt, bool free_special_limbs) {
     assert(SPECIALlimb.size() == SPECIALmeta.size());
-    const int limbsize = *level + 1;
+    // ModDown needs no new tables on an RR chain: P-hat / PInvModq are indexed by ABSOLUTE
+    // primeid and P itself does not move, so the only window dependence is which limbs are
+    // written — the count here, and the PB(0) launch base below.
+    const int limbsize = cc.isRR() ? getLimbSize(*level) : (*level + 1);
     cudaSetDevice(device);
     constexpr bool PRINT = false;
 

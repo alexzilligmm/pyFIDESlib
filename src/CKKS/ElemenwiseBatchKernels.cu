@@ -541,7 +541,7 @@ __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const i
 template <int KSK_BITS, bool REGEN>
 __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 12)
     fusedDotKSK_2_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
-                   int num_special, int init, KskSeedWords aseed, uint32_t n16) {
+                   int num_special, int init, KskSeedWords aseed, uint32_t n16, int qbase, int dbase) {
     const int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
     const int blky = blockIdx.y + init;
@@ -550,7 +550,12 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
     if (blky < num_special) {
         primeid = C_.primeid_digit_to[0][blky];
     } else {
-        primeid = C_.primeid_partition[id][blky - num_special];
+        // RR (RR_PLAN (c).3): the CIPHERTEXT's limb slot is `blky - num_special`, but its
+        // global prime — and therefore the evk ROW that realizes the key for it — is
+        // qbase + slot. That split is the whole of "evk truncation is positional": the key
+        // is stored once at P*Qmax and every level reads the rows its window names.
+        // qbase == 0 on a classic prefix chain, where slot and primeid coincide.
+        primeid = C_.primeid_partition[id][blky - num_special + qbase];
     }
 
     const int primeid_digit = C_.primeid_digit[primeid];
@@ -583,10 +588,15 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
             pval = (uint32_t)C_.primes[primeid];
             m_p = (0xFFFFFFFFu / pval) * pval;  // exact-uniform rejection threshold (spec v1)
         }
-        for (int i = 0; i < num_d; ++i) {
+        // RR: the ACTIVE digits are the global partitions the window MEETS, which need not
+        // start at 0 — and `i` is at once the index into digits[], the second index of
+        // pos_in_digit, and the value primeid_digit is compared against, so it must stay the
+        // GLOBAL partition index. dbase == 0 on a classic prefix chain.
+        for (int i = dbase; i < dbase + num_d; ++i) {
             const bool decomp = (i == primeid_digit);
             const int pos = C_.pos_in_digit[i][primeid];
-            const int p = decomp ? pos_dec : pos;
+            const int p = decomp ? pos_dec : pos;         // ciphertext / extended-digit slot
+            const int pk = decomp ? (pos_dec + qbase) : pos;  // KEY row (full-chain layout)
             const uint32_t in = ((uint32_t*)digits[i + decomp * 3 * C_.dnum][p])[idx];
             uint32_t kska, kskb;
             if constexpr (REGEN) {
@@ -602,20 +612,20 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
                 }
                 kska = v % pval;
             } else if constexpr (KSK_BITS) {
-                kska = kskUnpack(digits[C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                kska = kskUnpack(digits[C_.dnum + i + decomp * 3 * C_.dnum][pk], idx, KSK_BITS,
                                  (1u << KSK_BITS) - 1u);
             } else {
-                kska = ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                kska = ((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx];
             }
             if constexpr (KSK_BITS) {
-                kskb = kskUnpack(digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p], idx, KSK_BITS,
+                kskb = kskUnpack(digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk], idx, KSK_BITS,
                                  (1u << KSK_BITS) - 1u);
             } else {
-                kskb = ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][p])[idx];
+                kskb = ((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx];
             }
             const uint32_t m1 = modmult<ALGO_BARRETT>(in, kska, primeid);
             const uint32_t m2 = modmult<ALGO_BARRETT>(in, kskb, primeid);
-            if (i == 0) {
+            if (i == dbase) {
                 a1 = m1;
                 a2 = m2;
             } else {
@@ -660,9 +670,10 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
     */
     uint64_t aux1, aux2;
 
-    for (int i = 0; i < num_d; ++i) {
+    for (int i = dbase; i < dbase + num_d; ++i) {
         bool decomp = (i == primeid_digit);
         int pos = C_.pos_in_digit[i][primeid];
+        const int pk = decomp ? (pos_dec + qbase) : pos;  // KEY row; see the u32 arm above
 
         //printf("Digit %d: in: %p\n", i, digits);
         //printf("Digit %d: in: %p, kska: %p, kskb: %p\n", i, digits[i + decomp * 3 * C_.dnum],
@@ -678,17 +689,17 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
         uint64_t add2;
         if (ISU64(primeid)) {
             add1 = modmult<ALGO_BARRETT>(
-                in, ((uint64_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+                in, ((uint64_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx], primeid);
             add2 = modmult<ALGO_BARRETT>(
-                in, ((uint64_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+                in, ((uint64_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx], primeid);
         } else {
             add1 = modmult<ALGO_BARRETT>(
-                in, (uint64_t)((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+                in, (uint64_t)((uint32_t*)digits[C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx], primeid);
             add2 = modmult<ALGO_BARRETT>(
-                in, (uint64_t)((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][decomp ? pos_dec : pos])[idx], primeid);
+                in, (uint64_t)((uint32_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pk])[idx], primeid);
         }
 
-        if (i == 0) {
+        if (i == dbase) {
             aux1 = add1;
             aux2 = add2;
         } else {
@@ -1195,7 +1206,8 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
 // widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16, int regen_shape) {
+                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16, int regen_shape, int qbase,
+                         int dbase) {
     KskSeedWords sw{};
     if (a_seed)
         for (int i = 0; i < 8; ++i)
@@ -1213,6 +1225,11 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
         return (v == 4 || v == 16) ? v : 4;
     }();
     const bool coop4 = regen_shape == 1 && regen_slots == 4;
+    // Only fusedDotKSK_2_ carries the window base so far; the regen kernels are milestone
+    // (c).4 territory. Loud rather than silently wrong.
+    if ((qbase != 0 || dbase != 0) && regen_shape == 1)
+        throw std::runtime_error("launchFusedDotKSK_2: the regen arms are not RR-window aware "
+                                 "(FIDESLIB_KSK_REGEN=0 on an RR chain)");
     if (regen_shape == 1) {
         if (grid.x % 16u != 0u)
             throw std::runtime_error("launchFusedDotKSK_2: regen shape 1 needs grid.x % 16 == 0");
@@ -1232,10 +1249,10 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
                                                             num_special, init, sw, n16);                         \
     else if (regen_shape == 2)                                                                                   \
         fusedDotKSK_2_<BITS, true><<<grid, block, smem, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,    \
-                                                                  num_special, init, sw, n16);                   \
+                                                                  num_special, init, sw, n16, qbase, dbase);                   \
     else                                                                                                         \
         fusedDotKSK_2_<BITS, false><<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id,      \
-                                                                num_special, init, sw, n16);
+                                                                num_special, init, sw, n16, qbase, dbase);
     switch (ksk_pack_bits) {
         case 0:
             FIDESLIB_FUSED_DOT_ARM(0)

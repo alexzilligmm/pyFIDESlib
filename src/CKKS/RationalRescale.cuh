@@ -16,12 +16,15 @@
 #ifndef FIDESLIB_CKKS_RATIONALRESCALE_CUH
 #define FIDESLIB_CKKS_RATIONALRESCALE_CUH
 
+#include <string>
+#include <utility>
 #include <vector>
 #include "CKKS/Limb.cuh"
 
 namespace FIDESlib::CKKS {
 
 class ContextData;
+class RNSPoly;
 
 /**
  * Apply one RR rescale step in place.
@@ -50,6 +53,20 @@ std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
                                                      const std::vector<int>& primeids, const std::vector<int>& drop,
                                                      const std::vector<int>& add);
 
+class KeySwitchingKey;
+
+/**
+ * Milestone (c).3: HYBRID keyswitch of `c` at its RR level against the single evk stored at
+ * P·Qmax, truncated to the level's window. Digits are `window ∩ global partition` and are
+ * contiguous; the evk rows are read POSITIONALLY by global index, which is what makes a
+ * single full-chain key serve every level with no per-level key material.
+ *
+ * `c` is consumed (modup'd in place, its special limbs left behind); `out0`/`out1` must
+ * already sit at the same RR level and receive the (b, a) contributions ModDown'ed back to
+ * the window basis — i.e. exactly RRChain::KeySwitchCore's return value.
+ */
+void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1);
+
 /**
  * Milestone (c).2 harness: the same rescale step driven through the WINDOWED poly
  * representation (RNSPoly::grow/load/NTT/multScalar/rrRescale/INTT/store) instead of a bare
@@ -61,6 +78,15 @@ std::vector<std::vector<uint32_t>> RRRescaleStepHost(ContextData& cc,
 std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
                                                          const std::vector<std::vector<uint32_t>>& coeffLimbs,
                                                          int level, uint64_t scalar = 1);
+
+/**
+ * Milestone (c).3 gate harness. Loads `c` (the degree-2 term) at RR level `level` from
+ * coefficient-domain host limbs, keyswitches it against the context's eval key, and returns
+ * the two output windows as coefficient-domain host limbs — {b-part, a-part}. Same
+ * TU-boundary rule as the other harnesses here.
+ */
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RRKeySwitchHost(
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level, const std::string& keyid);
 
 // out-of-line field accessors for gate-side sanity checks
 uint64_t RRPrimeAt(ContextData& cc, int primeid);

@@ -154,6 +154,66 @@ Global::~Global() {
     }
 }
 
+
+/* Rational-rescaling keyswitch tables (RR_PLAN milestone (c).3).
+ *
+ * OpenFHE's PartQlHatInvModq / PartQlHatModp describe PREFIX levels; on an RR chain those
+ * digits do not exist, so the D-hat tables are recomputed here from the prime chain and the
+ * window schedule. Two keying facts:
+ *  - the tables are indexed by the RR LEVEL, not by the digit SIZE. Once a window's low edge
+ *    moves, two levels can give a digit the same size but a different prime SET, and D — the
+ *    product of the ACTIVE digit primes — differs. The classic "size-1" key would collide.
+ *  - destinations are labelled by GLOBAL primeid throughout (Q primes 0..nQ-1, specials
+ *    nQ..nQ+nP-1), which is exactly what the kernel's primeid_digit_to entries carry.
+ *
+ * This mirrors lbcrypto::RRChain::LevelKS (openfhe-1.4.2-rr.patch). The duplication is
+ * deliberate — the alternative was making LevelKS public and rebuilding OpenFHE — and it is
+ * held honest by tests/dev/test_rr_keyswitch.cu, which compares the whole GPU keyswitch
+ * against RRChain::KeySwitchCore bit-for-bit. */
+static void fillRRKeySwitchTables(Constants& host_constants, Global& host_global, const std::vector<PrimeRecord>& q,
+                                  const std::vector<PrimeRecord>& p, const std::vector<uint32_t>& windows,
+                                  const std::vector<std::vector<LimbRecord>>& decompMeta0) {
+    using lbcrypto::BigInteger;
+    using lbcrypto::NativeInteger;
+    const int nQ = (int)q.size(), nP = (int)p.size();
+    const int nLvl = (int)windows.size() / 2;
+    assert(nLvl <= MAXP && "RR level count must fit the level dimension of the D-hat tables");
+    for (int r = 0; r < nLvl; ++r) {
+        const int lo = (int)windows[2 * r], hi = (int)windows[2 * r + 1];
+        for (size_t d = 0; d < decompMeta0.size(); ++d) {
+            const auto& dm = decompMeta0[d];
+            if (dm.empty())
+                continue;
+            const int dStart = dm.front().id, dEnd = dm.back().id;
+            if (dEnd < lo || dStart > hi)
+                continue;  // this partition does not meet the window
+            const int gLo = std::max(lo, dStart), gHi = std::min(hi, dEnd);
+            BigInteger D(1);
+            for (int g = gLo; g <= gHi; ++g)
+                D = D * BigInteger(q[g].p);
+            for (int g = gLo; g <= gHi; ++g) {
+                const NativeInteger di(q[g].p);
+                const BigInteger DHat = D / BigInteger(q[g].p);
+                const NativeInteger inv =
+                    NativeInteger(DHat.Mod(BigInteger(q[g].p)).ConvertToInt<uint64_t>()).ModInverse(di);
+                hG_.DecompAndModUp_pre_scale[d][r][g] = inv.ConvertToInt<uint64_t>();
+                hG_.DecompAndModUp_pre_scale_shoup[d][r][g] =
+                    shoup_precomp(hG_.DecompAndModUp_pre_scale[d][r][g], g, host_constants);
+                auto put = [&](int t, uint64_t mod) {
+                    const uint64_t v = DHat.Mod(BigInteger(mod)).ConvertToInt<uint64_t>();
+                    hG_.DecompAndModUp_matrix[r][d][g][t] = v;
+                    hG_.DecompAndModUp_matrix_shoup[r][d][g][t] = shoup_precomp(v, t, host_constants);
+                };
+                for (int t = lo; t <= hi; ++t)  // (window \ digit)
+                    if (t < gLo || t > gHi)
+                        put(t, q[t].p);
+                for (int j = 0; j < nP; ++j)  // ++ P
+                    put(nQ + j, p[j].p);
+            }
+        }
+    }
+}
+
 template <typename Scheme>
 std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
     const std::vector<PrimeRecord>& q, const std::vector<std::vector<LimbRecord>>& meta,
@@ -621,7 +681,10 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                 }
             }
 
-            {
+            if (!param.rrWindows.empty())
+                fillRRKeySwitchTables(host_constants, host_global, q, p, param.rrWindows, DECOMPmeta.at(0));
+
+            if (param.rrWindows.empty()) {
                 auto& src = param.raw->PartQlHatInvModq;
                 int init_primeid = 0;
                 for (size_t k = 0; k < src.size(); ++k) {
@@ -635,7 +698,8 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                     }
                     init_primeid += src[k].size();
                 }
-
+            }
+            {
                 constexpr int bytes = sizeof(Global::DecompAndModUp_pre_scale);
                 assert(bytes == 8 * 64 * 64 * 8);
                 for (int i = 0; i < GPUid.size(); ++i) {
@@ -654,7 +718,7 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                 }
             }
 
-            {
+            if (param.rrWindows.empty()) {
 
                 auto& src = param.raw->PartQlHatModp;
 
@@ -696,7 +760,8 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
                         }
                     }
                 }
-
+            }
+            {
                 constexpr int bytes = sizeof(Global::DecompAndModUp_matrix);
                 assert(bytes == 8 * 64 * 64 * 64 * 8);
                 // u32 shadow for the all-U32 fast path — converted once, uploaded per GPU below.

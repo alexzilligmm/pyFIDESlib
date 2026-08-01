@@ -208,6 +208,29 @@ class ContextData {
      *  right edge. Only meaningful on an RR chain. */
     void rrRescaleSets(int level, std::vector<int>& drop, std::vector<int>& add) const;
 
+    /** Geometry of ONE keyswitch digit at an RR level (RR_PLAN milestone (c).3).
+     *
+     *  A digit is `window ∩ global partition`, so unlike the classic prefix chain it is
+     *  truncated at BOTH ends. Two facts make it addressable with a pair of offsets:
+     *   - its active SOURCE primes are a contiguous run of the partition's global list, and
+     *   - its active DESTINATION limbs are the specials followed by ONE contiguous run of the
+     *     partition's global destination list (globals-except-this-partition), because the
+     *     removed block sits inside [lo, hi] — so the run simply starts lower. */
+    struct RRDigitGeom {
+        int digit;    //!< global partition index
+        int gLo, gHi; //!< the digit's ACTIVE global prime range at this level
+        int fromOff;  //!< gLo - (the partition's first global prime): DECOMP slot/prime offset
+        int nFrom;    //!< active source count
+        int toOff;    //!< DIGIT-list slot shift of the active Q destination run
+        int nTo;      //!< nSpecial + active Q destination count
+    };
+    /** The digits a keyswitch at `level` actually consumes, in ascending partition order. */
+    std::vector<RRDigitGeom> rrDigits(int level) const;
+    /** Specials at the head of every DIGIT list (single-GPU: K). */
+    int rrNumSpecialInDigit() const;
+    /** Top level: the whole chain. `L` on a classic chain, the last RR level otherwise. */
+    int topLevel() const { return isRR() ? rrNumLevels() - 1 : L; }
+
     /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
     int compositeDegree() const { return param.compositeDegree; }
     /** Scaling factor read at a LIMB index. On composite chains OpenFHE stores a SENTINEL

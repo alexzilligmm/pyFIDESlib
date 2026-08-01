@@ -205,6 +205,40 @@ void ContextData::rrRescaleSets(const int level, std::vector<int>& drop, std::ve
         add.push_back(i);
 }
 
+int ContextData::rrNumSpecialInDigit() const {
+    // digitMeta[gpu][d] is built as splitSpecialMeta[gpu] ++ (Q-limbs not in partition d)
+    return (int)splitSpecialMeta.at(0).size();
+}
+
+std::vector<ContextData::RRDigitGeom> ContextData::rrDigits(const int level) const {
+    assert(isRR() && "rrDigits is only meaningful on an RR chain");
+    assert(GPUid.size() == 1 && "RR keyswitch is single-GPU");
+    const int lo = windowLo(level), hi = windowHi(level), win = windowSize(level);
+    const int nSpecial = rrNumSpecialInDigit();
+    std::vector<RRDigitGeom> out;
+    for (size_t d = 0; d < decompMeta.at(0).size(); ++d) {
+        const auto& dm = decompMeta.at(0).at(d);
+        if (dm.empty())
+            continue;
+        const int dStart = dm.front().id, dEnd = dm.back().id;  // generateDecompMeta is ascending
+        if (dEnd < lo || dStart > hi)
+            continue;  // this partition does not meet the window
+        RRDigitGeom g;
+        g.digit   = (int)d;
+        g.gLo     = std::max(lo, dStart);
+        g.gHi     = std::min(hi, dEnd);
+        g.fromOff = g.gLo - dStart;
+        g.nFrom   = g.gHi - g.gLo + 1;
+        // First active Q destination: window-lo when the window opens BELOW the partition,
+        // else the prime just past the partition — whose DIGIT-list position is dStart, since
+        // the partition's own `dSize` entries are the ones missing from the list.
+        g.toOff = std::min(lo, dStart);
+        g.nTo   = nSpecial + (win - g.nFrom);
+        out.push_back(g);
+    }
+    return out;
+}
+
 int ContextData::computeLogQ(const int L, std::vector<PrimeRecord>& primes) {
     int res = 0;
     assert(L <= (int)primes.size());
@@ -394,7 +428,7 @@ void ContextData::advanceKsAuxSlot() {
 RNSPoly& ContextData::getKeySwitchAux() {
     auto& p = key_switch_aux[ks_aux_slot];
     if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+        p = std::make_unique<RNSPoly>(*this, topLevel(), false);  // RR: the top level IS the whole chain
 
     p->generateDecompAndDigit(false);
     p->generateSpecialLimbs(false, false);
@@ -404,7 +438,7 @@ RNSPoly& ContextData::getKeySwitchAux() {
 RNSPoly& ContextData::getKeySwitchAux2() {
     auto& p = key_switch_aux2[ks_aux_slot];
     if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+        p = std::make_unique<RNSPoly>(*this, topLevel(), false);  // RR: the top level IS the whole chain
     p->generateDecompAndDigit(false);
     p->generateSpecialLimbs(false, false);
     return *p;
@@ -413,7 +447,7 @@ RNSPoly& ContextData::getKeySwitchAux2() {
 RNSPoly& ContextData::getModdownAux(const int num) {
     auto& p = moddown_aux[ks_aux_slot * 2 + (num & 1)];
     if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+        p = std::make_unique<RNSPoly>(*this, topLevel(), false);  // RR: the top level IS the whole chain
     p->generateSpecialLimbs(false, true);
     return *p;
 }

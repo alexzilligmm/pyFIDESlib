@@ -8,6 +8,8 @@
 #include <optional>
 
 #include "CKKS/Context.cuh"
+#include "CKKS/ElemenwiseBatchKernels.cuh"
+#include "CKKS/KeySwitchingKey.cuh"
 #include "CKKS/LimbPartition.cuh"
 #include "CKKS/RNSPoly.cuh"
 #include "LimbUtils.cuh"
@@ -186,6 +188,96 @@ void RNSPoly::rrRescale() {
 }
 
 //==================================================================================
+// Milestone (c).3 — HYBRID keyswitch at an RR level.
+//
+// Unfused by design, exactly as (c).1's rescale was: modup -> dot -> moddown driven
+// through the existing primitives, so the gate measures the WINDOW bookkeeping and
+// nothing else. Fusing it into the shipping *ModupDotKSK paths is (c).4.
+//==================================================================================
+
+void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1) {
+    ContextData& cc = *key.cc;  // Context is a shared_ptr<ContextData>
+    assert(cc.isRR() && "RRKeySwitchCore is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR keyswitch is single-GPU");
+    const int level = c.getLevel();
+    if (out0.getLevel() != level || out1.getLevel() != level)
+        throw std::runtime_error("RRKeySwitchCore: outputs must sit at the input's RR level");
+
+    LimbPartition& src = c.GPU.at(0);
+    LimbPartition& o0  = out0.GPU.at(0);
+    LimbPartition& o1  = out1.GPU.at(0);
+    const int id       = src.id;
+    cudaSetDevice(src.device);
+
+    // --- modup: extend every digit onto (window \ digit) ++ P ---
+    c.generateDecompAndDigit(false);
+    RNSPoly& aux = cc.getKeySwitchAux2();
+    src.modup(aux.GPU.at(0));
+
+    out0.generateSpecialLimbs(false, false);
+    out1.generateSpecialLimbs(false, false);
+
+    // --- dot against the evk rows the window names ---
+    const auto geoms   = cc.rrDigits(level);
+    const int nSpecial = cc.rrNumSpecialInDigit();
+    const int nLimbs   = cc.windowSize(level);
+    const int dBase    = geoms.front().digit;
+    const int nDigits  = (int)geoms.size();
+    for (const auto& g : geoms)
+        assert(g.digit == dBase + (&g - geoms.data()) && "active RR digits must be consecutive partitions");
+
+    const LimbPartition& ka = key.a.GPU.at(0);
+    const LimbPartition& kb = key.b.GPU.at(0);
+    if (ka.key_pack_bits || kb.key_pack_bits)
+        throw std::runtime_error("RRKeySwitchCore: packed keys are not RR-window aware yet "
+                                 "(FIDESLIB_KSK_PACK=0 on an RR chain)");
+    if (ka.ksk_a_released)
+        throw std::runtime_error("RRKeySwitchCore: the key's `a` rows were released for in-kernel regen, "
+                                 "which is not RR-window aware yet (FIDESLIB_KSK_REGEN=0 on an RR chain)");
+
+    Stream& s = src.getS();
+    s.wait(ka.getS());
+    s.wait(kb.getS());
+    s.wait(o0.getS());
+    s.wait(o1.getS());
+
+    // digits[] is indexed by GLOBAL partition, so inactive partitions simply stay null —
+    // the kernel walks [dBase, dBase + nDigits).
+    std::vector<void**> h_digits(cc.dnum * 6, nullptr);
+    for (const auto& g : geoms) {
+        const int d               = g.digit;
+        h_digits[d]               = src.DIGITlimbptr.at(d).data;
+        h_digits[d + cc.dnum]     = ka.DIGITlimbptr.at(d).data;
+        h_digits[d + 2 * cc.dnum] = kb.DIGITlimbptr.at(d).data;
+        h_digits[d + 3 * cc.dnum] = src.limbptr.data;   // ciphertext limbs: SLOT-indexed
+        h_digits[d + 4 * cc.dnum] = ka.limbptr.data;    // key limbs: full-chain, primeid-indexed
+        h_digits[d + 5 * cc.dnum] = kb.limbptr.data;
+    }
+    void*** dDigits = nullptr;
+    cudaMallocAsync(&dDigits, cc.dnum * 6 * sizeof(void**), s.ptr());
+    cudaMemcpyAsync(dDigits, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
+    // Argument order: the launcher's out1 collects the `a`-key product and out2 the `b`-key
+    // product, whereas RRChain::KeySwitchCore returns (b-part, a-part) — so out1/out0 here.
+    launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)(nSpecial + nLimbs)}, 128, s.ptr(), o1.limbptr.data,
+                        o1.SPECIALlimbptr.data, o0.limbptr.data, o0.SPECIALlimbptr.data, dDigits, nDigits, id,
+                        nSpecial, 0, 0, nullptr, 0, 0, /*qbase=*/src.pbase, /*dbase=*/dBase);
+    cudaFreeAsync(dDigits, s.ptr());
+    cudaStreamSynchronize(s.ptr());  // h_digits is host-staged; unfused path, correctness first
+    CudaCheckErrorModNoSync;
+
+    o0.getS().wait(s);
+    o1.getS().wait(s);
+    ka.getS().wait(s);
+    kb.getS().wait(s);
+
+    // --- moddown back to the window basis ---
+    out0.SetModUp(true);
+    out1.SetModUp(true);
+    out0.moddown(true, true, 0);
+    out1.moddown(true, true, 1);
+}
+
+//==================================================================================
 // Host harness for the (c).2 gate. ContextData/RNSPoly both carry `#ifdef NCCL`
 // members, so a consumer TU compiled without the define sees different field
 // offsets and a different sizeof — the gate may not construct or touch either.
@@ -229,6 +321,48 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
     for (size_t k = 0; k < out64.size(); ++k)
         out[k].assign(out64[k].begin(), out64[k].end());
     return out;
+}
+
+namespace {
+void rrLoadWindow(ContextData& cc, RNSPoly& p, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level) {
+    const int lo = cc.windowLo(level);
+    std::vector<std::vector<uint64_t>> data(coeffLimbs.size());
+    std::vector<uint64_t> moduli(coeffLimbs.size());
+    for (size_t k = 0; k < coeffLimbs.size(); ++k) {
+        data[k].assign(coeffLimbs[k].begin(), coeffLimbs[k].end());
+        moduli[k] = cc.prime.at(lo + k).p;
+    }
+    p.load(data, moduli);
+}
+
+std::vector<std::vector<uint32_t>> rrStoreWindow(RNSPoly& p) {
+    std::vector<std::vector<uint64_t>> out64;
+    p.store(out64);
+    std::vector<std::vector<uint32_t>> out(out64.size());
+    for (size_t k = 0; k < out64.size(); ++k)
+        out[k].assign(out64[k].begin(), out64[k].end());
+    return out;
+}
+}  // namespace
+
+std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RRKeySwitchHost(
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level, const std::string& keyid) {
+    assert(cc.isRR());
+    assert((int)coeffLimbs.size() == cc.windowSize(level));
+    cudaSetDevice(cc.GPUid[0]);
+
+    RNSPoly c(cc, level);
+    rrLoadWindow(cc, c, coeffLimbs, level);
+    c.NTT(1, false);
+
+    RNSPoly out0(cc, level), out1(cc, level);
+    RRKeySwitchCore(c, cc.GetEvalKey(keyid), out0, out1);
+
+    out0.INTT(1, false);
+    out1.INTT(1, false);
+    out0.sync();
+    out1.sync();
+    return {rrStoreWindow(out0), rrStoreWindow(out1)};
 }
 
 }  // namespace FIDESlib::CKKS

@@ -79,7 +79,7 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
                          int ksk_pack_bits, const uint32_t* a_seed = nullptr, uint32_t n16 = 0,
-                         int regen_shape = 0);
+                         int regen_shape = 0, int qbase = 0, int dbase = 0);
 /* seeds: DEVICE pointer to n*8 seed words (one 256-bit seed per rotation key, in the same
  * order as the rotation loop) => the stage-B REGEN kernel is launched instead: each thread
  * owns 16 consecutive coefficients and regenerates each (key, digit) ChaCha block once in
