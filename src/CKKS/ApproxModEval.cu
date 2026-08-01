@@ -516,6 +516,22 @@ const std::vector<double>& coefficients, double a, double b) const {
 			m = 3;
 		}
 	}
+	// V9 follow-up sweep knob (2026-08-02): ComputeDegreesPS minimizes MULT COUNT, but tree
+	// mults are level-weighted (top-of-chain limbs cost most) — the ms-optimal (k, m) for
+	// the new degree-14 tree was never measured. Override BOTH or neither. A shape whose
+	// recursion depth differs from the default's will crash the level plan (see the
+	// FIDESLIB_CHEB_TRUNC incident); crashes in the sweep mark the shape incompatible.
+	if (const char* ek = std::getenv("FIDESLIB_PS_K"); ek && *ek) {
+		if (const char* em = std::getenv("FIDESLIB_PS_M"); em && *em) {
+			k = (uint32_t)std::atoi(ek);
+			m = (uint32_t)std::atoi(em);
+		}
+	}
+	static const bool ps_logged = [&] {
+		std::cout << "[cheb_ps] n=" << n << " k=" << k << " m=" << m << std::endl;
+		return true;
+	}();
+	(void)ps_logged;
 	/*
 	std::vector<uint32_t> degs = ComputeDegreesPS(n);
 	uint32_t k                 = degs[0];
