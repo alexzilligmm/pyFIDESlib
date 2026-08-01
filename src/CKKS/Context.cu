@@ -425,6 +425,14 @@ void ContextData::advanceKsAuxSlot() {
     ks_aux_slot = (ks_aux_slot + 1) % ksAuxPool();
 }
 
+RNSPoly& ContextData::getRRKeySwitchWorkspace() {
+    if (rr_ks_workspace == nullptr) {
+        rr_ks_workspace = std::make_unique<RNSPoly>(*this, topLevel(), false);
+        rr_ks_workspace->generateDecompAndDigit(false);  // the once-per-context cost
+    }
+    return *rr_ks_workspace;
+}
+
 RNSPoly& ContextData::getKeySwitchAux() {
     auto& p = key_switch_aux[ks_aux_slot];
     if (p == nullptr)
@@ -1070,6 +1078,7 @@ std::vector<std::vector<LimbRecord>> ContextData::generateSplitSpecialMeta(std::
 
 ContextData::~ContextData() {
     CudaCheckErrorMod;
+    rr_ks_workspace.reset(nullptr);
     if (rr_digits_dev)
         cudaFree(rr_digits_dev);
     if (rr_digits_host)

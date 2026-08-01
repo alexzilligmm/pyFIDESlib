@@ -124,6 +124,21 @@ class ContextData {
     void*** rr_digits_dev = nullptr;
     void** rr_digits_host = nullptr;
 
+    /** RR keyswitch DIGIT workspace (RR_PLAN (c).4): one context-lifetime poly whose
+     *  DECOMP/DIGIT arrays are allocated once, instead of every ciphertext growing its own.
+     *
+     *  MEASURED why: a full payload run cost ~1.19 ms/level against a steady-state 0.49,
+     *  because RRKeySwitchCore called generateDecompAndDigit on its INPUT and a fresh
+     *  ciphertext per level pays ~dnum*(K+L) limb allocations each time — a cost that scales
+     *  with dnum, and inverted the dnum ordering between the two measurements. The classic
+     *  path never sees this because its ciphertexts are long-lived.
+     *
+     *  Nothing is copied: the workspace ADOPTS the input's limb pointers (adoptLimbPtrsFrom),
+     *  so it only ever supplies storage for the digits. Single-GPU, single-threaded — one
+     *  keyswitch is in flight at a time and its digits are consumed by the dot immediately. */
+    std::unique_ptr<RNSPoly> rr_ks_workspace;
+    RNSPoly& getRRKeySwitchWorkspace();
+
     //      std::array<Stream, 8> blockingStream;
     //      std::vector<std::vector<Stream>> asyncStream;
     RNSPoly& getKeySwitchAux();

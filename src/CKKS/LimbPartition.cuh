@@ -162,6 +162,10 @@ class LimbPartition {
     /** Re-upload limbptr/auxptr from the current `limb` vector. Needed whenever the limb
      *  array is rebuilt rather than appended to (the RR rescale is the only such path). */
     void refreshLimbPtrs();
+    /** Point this partition's limbptr/auxptr at ANOTHER partition's first `n` limbs, and take
+     *  its window base. Used by the RR keyswitch workspace so it supplies digit storage
+     *  without the ciphertext's data ever being copied. Device-to-device, `n` pointers. */
+    void adoptLimbPtrsFrom(const LimbPartition& src, int n);
     /** n32 speed: fused composite DOUBLE prime drop (bit-identical to two rescale() calls,
      * ~half the kernel work). Returns false if the shape doesn't fit — caller must then fall
      * back to the sequential per-prime loop. See the definition for the eligibility rules. */

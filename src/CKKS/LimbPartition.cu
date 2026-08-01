@@ -2474,6 +2474,16 @@ int LimbPartition::getLimbSize(int level) {
     return size;
 }
 
+void LimbPartition::adoptLimbPtrsFrom(const LimbPartition& src, const int n) {
+    cudaSetDevice(device);
+    assert(n <= limbptr.size && n <= src.limbptr.size);
+    s.wait(src.getS());
+    cudaMemcpyAsync(limbptr.data, src.limbptr.data, n * sizeof(void*), cudaMemcpyDeviceToDevice, s.ptr());
+    cudaMemcpyAsync(auxptr.data, src.auxptr.data, n * sizeof(void*), cudaMemcpyDeviceToDevice, s.ptr());
+    pbase = src.pbase;
+    CudaCheckErrorModNoSync;
+}
+
 int LimbPartition::PB(const int slot) const {
     return PARTITION(id, pbase + slot);
 }

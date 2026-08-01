@@ -278,7 +278,15 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         return e != nullptr && std::atoi(e) != 0;
     }();
 
-    c.generateDecompAndDigit(false);
+    // The digits live in a CONTEXT-LIFETIME workspace, not on the ciphertext. It adopts the
+    // input's limb pointers, so nothing is copied — it supplies only the DECOMP/DIGIT storage,
+    // which is what a fresh ciphertext per level was otherwise re-allocating (~dnum*(K+L) limbs,
+    // ~0.7 ms/level at logN 16 and scaling with dnum). See ContextData::rr_ks_workspace.
+    RNSPoly& wsPoly = cc.getRRKeySwitchWorkspace();
+    wsPoly.setLevel(level);
+    LimbPartition& ws = wsPoly.GPU.at(0);
+    ws.adoptLimbPtrsFrom(src, cc.windowSize(level));
+
     RNSPoly& aux = cc.getKeySwitchAux2();
     out0.generateSpecialLimbs(false, false);
     out1.generateSpecialLimbs(false, false);
@@ -288,7 +296,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
             return true;
         }();
         (void)once;
-        src.rrModupDotKSK(o0, o1, key.a.GPU.at(0), key.b.GPU.at(0), aux.GPU.at(0));
+        ws.rrModupDotKSK(o0, o1, key.a.GPU.at(0), key.b.GPU.at(0), aux.GPU.at(0));
         tmark = tick(0, tmark);      // the fused arm has no separate modup phase ...
         tmark = tick(1, tmark);      // ... so phase[0] is ~0 and phase[1] carries modup+dot
         out0.SetModUp(true);
@@ -300,7 +308,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     }
 
     // --- unfused reference: modup, then the standalone dot ---
-    src.modup(aux.GPU.at(0));
+    ws.modup(aux.GPU.at(0));
 
     tmark = tick(0, tmark);
 
@@ -318,6 +326,11 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     assert(ka.key_pack_bits == kb.key_pack_bits);
 
     Stream& s = src.getS();
+    // modup ran on the WORKSPACE's stream, not the ciphertext's — before the workspace existed
+    // these were the same stream and no fence was needed. Without this the dot can start on
+    // half-built digits: it showed up as every window with pbase > 0 diverging while the
+    // full-chain window (pbase 0) still passed.
+    s.wait(ws.getS());
     s.wait(ka.getS());
     s.wait(kb.getS());
     s.wait(o0.getS());
@@ -328,7 +341,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     std::vector<void**> h_digits(cc.dnum * 6, nullptr);
     for (const auto& g : geoms) {
         const int d               = g.digit;
-        h_digits[d]               = src.DIGITlimbptr.at(d).data;
+        h_digits[d]               = ws.DIGITlimbptr.at(d).data;
         h_digits[d + cc.dnum]     = ka.DIGITlimbptr.at(d).data;
         h_digits[d + 2 * cc.dnum] = kb.DIGITlimbptr.at(d).data;
         h_digits[d + 3 * cc.dnum] = src.limbptr.data;   // ciphertext limbs: SLOT-indexed
@@ -361,6 +374,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     o1.getS().wait(s);
     ka.getS().wait(s);
     kb.getS().wait(s);
+    ws.getS().wait(s);
     tmark = tick(1, tmark);
 
     // --- moddown back to the window basis ---
@@ -508,6 +522,78 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
     out0.sync();
     out1.sync();
     return {rrStoreWindow(out0), rrStoreWindow(out1)};
+}
+
+double RREvalMultBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& a0,
+                           const std::vector<std::vector<uint32_t>>& a1, const int level, const std::string& keyid,
+                           const int iters) {
+    assert(cc.isRR());
+    cudaSetDevice(cc.GPUid[0]);
+    RNSPoly A0(cc, level), A1(cc, level), c0(cc, level), c1(cc, level), c2(cc, level), tmp(cc, level);
+    RNSPoly d0(cc, level), d1(cc, level);
+    // ct*ct + relinearize, steady state; see the note at the end of the loop about the rescale.
+    std::vector<double> samples;
+    for (int it = -1; it < iters; ++it) {  // it == -1 warms and allocates
+        rrLoadWindow(cc, A0, a0, level);
+        rrLoadWindow(cc, A1, a1, level);
+        A0.NTT(1, false);
+        A1.NTT(1, false);
+        c2.SetModUp(false);
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        // the payload-level op: three degree-2 products, one relinearization, one rescale
+        c0.multElement(A0, A0);
+        c1.multElement(A0, A1);
+        tmp.multElement(A1, A0);
+        c1.add(tmp);
+        c2.multElement(A1, A1);
+        RRKeySwitchCore(c2, cc.GetEvalKey(keyid), d0, d1);
+        c0.add(d0);
+        c1.add(d1);
+        cudaDeviceSynchronize();
+        if (it >= 0)
+            samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        // The RESCALE is deliberately NOT in this loop. rrRescale moves c0/c1 down a level and
+        // RNSPoly has no assignment operator, so putting them back would mean re-allocating
+        // every iteration — and allocation scales with limbs and dnum, which is exactly the
+        // axis under test. Time the rescale separately (RRPolyRescaleStepHost's only_step_ms)
+        // and report the two columns.
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
+}
+
+double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, const int top_level,
+                         const std::string& keyid, const int iters) {
+    assert(cc.isRR());
+    cudaSetDevice(cc.GPUid[0]);
+    std::vector<double> samples;
+    for (int it = -1; it < iters; ++it) {  // it == -1 warms
+        cudaDeviceSynchronize();
+        const auto t0 = std::chrono::steady_clock::now();
+        // RNSPoly has neither copy- nor move-ASSIGNMENT (reference members), so the running
+        // ciphertext lives in an optional and each level move-CONSTRUCTS into it.
+        std::optional<RNSPoly> c;
+        c.emplace(cc, top_level);
+        rrLoadWindow(cc, *c, a0, top_level);
+        c->NTT(1, false);
+        for (int r = top_level; r >= 1; --r) {
+            // one circuit level: square, relinearize, rescale
+            RNSPoly sq(cc, r), d0(cc, r), d1(cc, r), c2(cc, r);
+            sq.multElement(*c, *c);
+            c2.multElement(*c, *c);
+            c2.SetModUp(false);
+            RRKeySwitchCore(c2, cc.GetEvalKey(keyid), d0, d1);
+            sq.add(d0);
+            sq.rrRescale();        // sq is now at level r-1 and IS the next ciphertext
+            c.emplace(std::move(sq));
+        }
+        cudaDeviceSynchronize();
+        if (it >= 0)
+            samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
 }
 
 void RRKeySwitchBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level,

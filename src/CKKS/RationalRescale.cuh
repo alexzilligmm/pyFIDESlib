@@ -112,6 +112,31 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
 void RRKeySwitchBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level,
                           const std::string& keyid, int iters, double* phase_ms);
 
+/**
+ * Milestone (c).4 pricing harness for a whole PAYLOAD-LEVEL OP: `iters` runs of
+ * ct*ct -> relinearize -> rr-rescale at `level`, with every poly and its decomp/digit storage
+ * allocated ONCE. Returns the MEDIAN wall per op in ms. Same reasoning as
+ * RRKeySwitchBenchHost: a per-call harness charges the op for allocation a real pipeline pays
+ * once, and a mean lets one contention spike on a shared box dominate.
+ */
+double RREvalMultBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& a0,
+                           const std::vector<std::vector<uint32_t>>& a1, int level, const std::string& keyid,
+                           int iters);
+
+/**
+ * Milestone (c).4: time a whole PAYLOAD RUN — a depth-`top_level` circuit, squaring and
+ * rescaling from the top of the payload region down to level 0. Returns the MEDIAN total ms
+ * over `iters` walks.
+ *
+ * This, not a single level, is the comparable unit: op cost shrinks as the window shrinks, so
+ * any single-level figure depends on which level you picked, and the two chains do not have
+ * comparable "levels" to pick. A full run has no such freedom — it is exactly the circuit a
+ * user gets between two bootstraps. Per-level allocation is INCLUDED because every level has
+ * a different window and a real circuit pays it too.
+ */
+double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& a0, int top_level,
+                         const std::string& keyid, int iters);
+
 // out-of-line field accessors for gate-side sanity checks
 uint64_t RRPrimeAt(ContextData& cc, int primeid);
 size_t RRNumPrimes(ContextData& cc);
