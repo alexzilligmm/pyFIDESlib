@@ -2,6 +2,7 @@
 // Created by carlosad on 25/03/24.
 //
 
+#include <cstdlib>
 #include <algorithm>
 #include <cassert>
 #include <list>
@@ -475,9 +476,23 @@ void CUDART_CB streamCallback(void* userData) {
     delete p;
 }
 
+/** FAILURE §7 ablation. `FIDESLIB_GPUFREE_SIZED=0` restores the pre-fix behaviour — every
+ *  caller's byte count discarded, so a large block lands in the 1 KB bucket and is stranded.
+ *  It exists because this is the SHARED allocator: the fix has to be A/B-able on the classic
+ *  bootstrap, not just on the RR path that found it. Default ON (i.e. sized, correct). */
+static bool gpufreeSized() {
+    static const bool sized = [] {
+        const char* e = std::getenv("FIDESLIB_GPUFREE_SIZED");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return sized;
+}
+
 void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
 
     uint64_t MBs = 1024;
+    if (!gpufreeSized())
+        bytes = 0;
 
     if (bytes < 64 * 1024) {
         int next_pow2 = 1024;

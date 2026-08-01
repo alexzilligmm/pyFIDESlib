@@ -73,6 +73,22 @@ class LimbPartition {
     uint64_t* bufferSPECIAL = nullptr;
     uint64_t* bufferLIMB = nullptr;
     uint64_t* bufferGATHER = nullptr;
+
+    /** Byte count and allocation ROUTE for the buffers handed back to GPUfree.
+     *
+     *  GPUfree is NOT size-agnostic: it re-derives the free-list bucket from `bytes`, and for
+     *  `bytes < 64 K` it rounds up to a power of two and forces caching. So `GPUfree(p, id, 0, …)`
+     *  files the block in the **1 KB** bucket of `size_to_memory` — where no allocation of the
+     *  real size will ever look for it. That was stranding a 12.58 MB special buffer on every
+     *  keyswitch (FAILURE §7; MEASURED at 5.2 GB over one RR walk). The rule is simply that
+     *  GPUfree must be given the SAME byte count GPUmalloc was given, which is what
+     *  `bufferKSKPACKbytes` already does — these extend that to the other two buffers.
+     *
+     *  The route matters too: `generateSpecialLimb(for_communication=true)` uses a plain
+     *  `cudaMalloc`, and a `cudaMalloc`ed pointer must NOT go to `cudaFreeAsync`. */
+    size_t bufferSPECIALbytes = 0;
+    bool bufferSPECIALcudaMalloc = false;
+    size_t bufferLIMBbytes = 0;
     void* bufferDECOMPandDIGIT_handle = nullptr;
     void* bufferGATHER_handle = nullptr;
 
@@ -187,6 +203,9 @@ class LimbPartition {
     bool rescale2();
 
     void freeSpecialLimbs();
+    /** Release bufferSPECIAL with the byte count and the allocation route it was created with.
+     *  Split out because the destructor needs the identical logic — see FAILURE §7. */
+    void freeSpecialBuffer();
 
     using OptReference = LimbPartition*;
     using OptConstReference = const LimbPartition*;
