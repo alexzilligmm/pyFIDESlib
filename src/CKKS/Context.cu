@@ -205,6 +205,16 @@ void ContextData::rrRescaleSets(const int level, std::vector<int>& drop, std::ve
         add.push_back(i);
 }
 
+int ContextData::rrLevelOfWindow(const uint64_t firstModulus, const int nLimbs) const {
+    assert(isRR() && "rrLevelOfWindow is only meaningful on an RR chain");
+    for (int r = 0; r < rrNumLevels(); ++r)
+        if (windowSize(r) == nLimbs && prime.at(windowLo(r)).p == firstModulus)
+            return r;
+    throw std::runtime_error("RR: no level has a " + std::to_string(nLimbs) +
+                             "-limb window starting at modulus " + std::to_string(firstModulus) +
+                             " (chain has " + std::to_string(rrNumLevels()) + " levels)");
+}
+
 int ContextData::rrNumSpecialInDigit() const {
     // digitMeta[gpu][d] is built as splitSpecialMeta[gpu] ++ (Q-limbs not in partition d)
     return (int)splitSpecialMeta.at(0).size();

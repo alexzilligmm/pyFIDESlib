@@ -341,6 +341,16 @@ void Ciphertext::load(const RawCipherText& rawct) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	keyID = rawct.keyid;
+	// RATIONAL RESCALING: RNSPoly::load cannot classify an RR window (its moduli are
+	// prime[lo + i], not prime[i], and the limb count does not identify a level), so the poly
+	// must arrive AT its level. Recover it from the window itself — low modulus + size — which
+	// is the same identification RRChain::RRLevelOfElement makes on the CPU side, and grow
+	// there. A fresh RR encrypt is the full top window, so this reads rrNumLevels()-1.
+	if (cc.isRR()) {
+		const int r = cc.rrLevelOfWindow(rawct.moduli.at(0), (int)rawct.sub_0.size());
+		c0.grow(r);
+		c1.grow(r);
+	}
 	c0.load(rawct.sub_0, rawct.moduli);
 	c1.load(rawct.sub_1, rawct.moduli);
 

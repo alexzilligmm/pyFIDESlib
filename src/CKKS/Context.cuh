@@ -274,6 +274,12 @@ class ContextData {
     };
     /** The digits a keyswitch at `level` actually consumes, in ascending partition order. */
     std::vector<RRDigitGeom> rrDigits(int level) const;
+    /** RR level of a window given its FIRST modulus and limb count — the GPU twin of
+     *  RRChain::RRLevelOfElement, and needed for the same reason: an imported ciphertext
+     *  arrives as a bare limb array with no level attached, and under RR the limb count alone
+     *  does not identify one. The low edge names the window and the size disambiguates it, so
+     *  the pair is unique. Throws naming both if no window matches. */
+    int rrLevelOfWindow(uint64_t firstModulus, int nLimbs) const;
     /** Specials at the head of every DIGIT list (single-GPU: K). */
     int rrNumSpecialInDigit() const;
     /** Top level: the whole chain. `L` on a classic chain, the last RR level otherwise. */

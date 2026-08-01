@@ -100,7 +100,17 @@ createContextSwitchingKeys(lbcrypto::CryptoContext<lbcrypto::DCRTPoly>& cca,
     const int srcCompositeDegree = (int)std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(
                                        cca->GetCryptoParameters())
                                        ->GetCompositeDegree();
-    if (srcCompositeDegree > 1) {
+    // RATIONAL RESCALING: the same argument as the composite branch below, only stronger.
+    // An RR chain's bottom level is a THREE-limb window ({tau, tau, q0} on our schedule) and
+    // the whole design keeps ONE key at P*Qmax read positionally per level — a single-tower
+    // helper context cannot represent either. Generating the dense->sparse key against ccb's
+    // params is what throws `Times(): Modulus missmatch` inside KeySwitchGenInternal, because
+    // skNew's element was sampled on cca's 48-limb params while ccb carries one fresh prime.
+    // Take the main-context route, which is already the classic n32 shipping path (composite
+    // degree 2). Classic non-composite chains are unchanged: the condition only adds RR.
+    const bool srcIsRR =
+        std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(cca->GetCryptoParameters())->IsRRChain();
+    if (srcCompositeDegree > 1 || srcIsRR) {
         // COMPOSITESCALING: the M-4 (dense->sparse) key is a STANDARD hybrid key in the MAIN
         // context — the single-tower helper context cannot represent the d-limb composite
         // bottom (same convention as the openfhe-1.4.2-native32-bootstrap.patch CPU fix).
