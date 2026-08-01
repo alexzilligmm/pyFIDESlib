@@ -22,6 +22,34 @@
 #define FIDESLIB_NTT_STREAM_LD(p) (*(p))
 #endif
 
+// ORBIT-MAJOR PROBE (2026-08-02, WRONG RESULTS BY DESIGN — wall-bound only). Prices the
+// 64 B-chunk-granular eval-domain permutation the orbit-major layout would impose at its
+// two boundary crossings: the forward NTT's second-stage OUTPUT stores and the inverse
+// INTT's first-stage INPUT loads (the OFFSET_2T loads inside NTT stage 2 are the private
+// inter-stage intermediate — orbit-major never touches those). perm(c) = c·37 mod 2^12 is
+// a bijection on the 4096 16-u32 chunks of a logN=16 u32 limb, modeling orbit-stride line
+// scatter. COVERAGE CAVEAT: the fusion prologue/epilogue helpers (mult_and_save, rescale,
+// ksk_dot, …) cross the same boundary and are NOT permuted — the probe UNDER-prices the
+// full layout; a verdict of "already ≥0.5 ms" therefore kills orbit-major outright.
+#ifndef FIDESLIB_EVAL_PERM_PROBE
+#define FIDESLIB_EVAL_PERM_PROBE 0
+#endif
+// idx2 = int2 index (8 B): chunk = idx2>>3. idx4 = int4 index (16 B): chunk = idx4>>2.
+__device__ __forceinline__ int evalPerm2(const int idx2) {
+#if FIDESLIB_EVAL_PERM_PROBE
+    return (idx2 & 7) | ((((idx2 >> 3) * 37) & 4095) << 3);
+#else
+    return idx2;
+#endif
+}
+__device__ __forceinline__ int evalPerm4(const int idx4) {
+#if FIDESLIB_EVAL_PERM_PROBE
+    return (idx4 & 3) | ((((idx4 >> 2) * 37) & 4095) << 2);
+#else
+    return idx4;
+#endif
+}
+
 #include <cooperative_groups.h>
 #include <algorithm>
 #include <cassert>
@@ -109,11 +137,11 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
             for (int i = 0; i < M; ++i) {
                 if constexpr (sizeof(T) == 8) {
                     int4 aux;
-                    aux = FIDESLIB_NTT_STREAM_LD((const int4*)dat + OFFSET_2T(i));
+                    aux = FIDESLIB_NTT_STREAM_LD((const int4*)dat + evalPerm4(OFFSET_2T(i)));  // orbit probe
                     ((int4*)(A(i)))[j >> 1] = aux;
                 } else {
                     int2 aux;
-                    aux = FIDESLIB_NTT_STREAM_LD((const int2*)dat + OFFSET_2T(i));
+                    aux = FIDESLIB_NTT_STREAM_LD((const int2*)dat + evalPerm2(OFFSET_2T(i)));  // orbit probe
                     // swizzled: logical j / j+1 live at pos / pos^1 (same quad, lane bit 0),
                     // so the 8-B store stays aligned — only the pair ORDER can flip.
                     const int pos = swz_pos<T>(i, j);
@@ -910,9 +938,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                     }
 
                     if constexpr (sizeof(T) == 8) {
-                        ((int4*)res)[OFFSET_2T(i)] = aux;
+                        ((int4*)res)[evalPerm4(OFFSET_2T(i))] = aux;  // orbit probe
                     } else {
-                        ((int2*)res)[OFFSET_2T(i)] = ((int2*)&aux)[0];
+                        ((int2*)res)[evalPerm2(OFFSET_2T(i))] = ((int2*)&aux)[0];  // orbit probe
                     }
                 }
 
@@ -938,7 +966,7 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 } else {
                     for (int i = 0; i < M; i += 1) {
                         if constexpr (sizeof(T) == 8) {
-                            ((int4*)res)[OFFSET_2T(i)] = ((int4*)A(i))[tid];
+                            ((int4*)res)[evalPerm4(OFFSET_2T(i))] = ((int4*)A(i))[tid];  // orbit probe
                         } else {
                             // swizzled: logical j / j+1 sit at pos / pos^1, so the 8-B load
                             // stays aligned; undo the pair order before writing out.
@@ -949,7 +977,7 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                                 out.x = out.y;
                                 out.y = t_;
                             }
-                            ((int2*)res)[OFFSET_2T(i)] = out;
+                            ((int2*)res)[evalPerm2(OFFSET_2T(i))] = out;  // orbit probe
                         }
                     }
                 }

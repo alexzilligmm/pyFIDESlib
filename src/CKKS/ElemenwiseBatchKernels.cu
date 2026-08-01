@@ -802,6 +802,16 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #else
 #define FIDESLIB_STREAM_LD(p) (*(p))
 #endif
+// V11 candidate (2026-08-02): PERSIST the digit reads in SHARED MEMORY across the hoisted4
+// rotation loop. din is j-INDEPENDENT (that is the hoisting), yet the kernel re-reads it
+// from global for every rotation — at 42 % L2 hit that re-read is the bulk of the kernel's
+// ~340 MB/launch DRAM traffic (the DIN ablation bounds the whole stream at −1.31 ms).
+// Per-thread slice = num_d × 16 B ≤ 112 B → 14 KB/block dynamic smem at num_d=7, which
+// keeps 7 blocks/SM (98 KB ≤ the ~100 KB budget) and needs NO __syncthreads (each thread
+// reads only its own slice). num_d > 8 falls back to the streaming path at the launcher.
+#ifndef FIDESLIB_DIN_SMEM
+#define FIDESLIB_DIN_SMEM 0
+#endif
 // Evict-first STORES on the hoisted4 automorphism outputs (2026-08-02, post-V9 ncu):
 // hoisted4's L2 hit rate is 42% although the digit streams (~80 MB, re-read n× per launch)
 // FIT the 128 MB L2 — the kernel's own write-allocated output stores (~30 MB/rotation)
@@ -1674,6 +1684,17 @@ __global__ void
         c0p = primeid < C_.L ? (const uint32_t*)c0[pos_dec] : (const uint32_t*)sc0[primeid - C_.L];
     const bool c0_shoup = (!c0_modup && primeid < C_.L);
 
+#if FIDESLIB_DIN_SMEM
+    // One global read of this thread's digit slice, reused for every rotation j.
+    extern __shared__ uint4 sdin[];  // [num_d][blockDim.x]
+    for (int i = 0; i < num_d; ++i) {
+        const bool decomp = (i == primeid_digit);
+        const int pos = C_.pos_in_digit[i][primeid];
+        const int p = decomp ? pos_dec : pos;
+        sdin[i * blockDim.x + threadIdx.x] = *(const uint4*)((const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base);
+    }
+#endif
+
     for (int j = 0; j < n; ++j) {
         const int offset = j * 3 * 2 * C_.dnum;
         const uint32_t* key = seeds + j * 8;
@@ -1707,14 +1728,17 @@ __global__ void
             const bool decomp = (i == primeid_digit);
             const int pos = C_.pos_in_digit[i][primeid];
             const int p = decomp ? pos_dec : pos;
-            const uint32_t* dinp = (const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base;
             const void* kskbp = digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][p];
 
             // Issue both input streams before the ChaCha so the regen ALU hides their latency
             // (the kbstage2 lesson, kept by construction here). A software pipeline of the
             // NEXT digit's loads was BUILT and lost +0.51 ms (0/3): +13 regs -> 9 -> 7
             // blocks/SM, and occupancy is the binding resource at this shape.
-            const uint4 dv = *(const uint4*)dinp;
+#if FIDESLIB_DIN_SMEM
+            const uint4 dv = sdin[i * blockDim.x + threadIdx.x];
+#else
+            const uint4 dv = *(const uint4*)((const uint32_t*)din1[i + decomp * 3 * C_.dnum][p] + base);
+#endif
             uint32_t kb[5];
             if constexpr (KSK_BITS == 28) {
                 const uint32_t bit0 = (uint32_t)base * KSK_BITS;  // == 112*gtid; &31 is 0 or 16
@@ -2066,6 +2090,11 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
     dim3 grid4 = grid;
     if (coop4)
         grid4.x *= 4u;
+#if FIDESLIB_DIN_SMEM
+    const size_t din_smem = coop4 ? (size_t)num_d * block.x * sizeof(uint4) : 0;
+#else
+    const size_t din_smem = 0;
+#endif
     if (coop4 && prefetch && ksk_pack_bits == 28) {
         hoistedRotateDotKSKRegen4P_<28><<<grid4, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
                                                                      digits, num_d, id, num_special, init, sc0,
@@ -2074,7 +2103,7 @@ void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream
     }
 #define FIDESLIB_HOISTED_DOT_ARM(BITS)                                                                             \
     if (coop4)                                                                                                     \
-        hoistedRotateDotKSKRegen4_<BITS><<<grid4, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n,        \
+        hoistedRotateDotKSKRegen4_<BITS><<<grid4, block, din_smem, stream>>>(din1, c0, out1, sout1, out2, sout2, n, \
                                                                       indexes, digits, num_d, id, num_special,      \
                                                                       init, sc0, c0_modup, seeds, n16);            \
     else if (seeds)                                                                                                \
