@@ -47,6 +47,18 @@ option(FIDESLIB_COMPILE_BENCHMARKS "Set ON to compile the FIDESlib benchmark sui
 # Option to compile the test suite.
 option(FIDESLIB_COMPILE_TESTS "Set ON to compile the FIDESlib test suite." ON)
 
+# Chains whose primes reach [2^30, 2^32) — rational rescaling wants Cheddar's Pr~30 at
+# ~2^30.1. OFF by default and deliberately compile-time: MEASURED (docs/RR_PLAN.md,
+# KNOWLEDGE §10) that merely making the wide ALGO_BARRETT arm available costs the classic
+# bootstrap +1.55 ms unconditionally and +0.63 ms even runtime-width-gated, because the wide
+# arm's registers land in the NTT butterfly loops whether or not its branch is taken. A chain
+# that stays under 2^30 must not pay that, so the choice is made once, by the build.
+option(FIDESLIB_WIDE_PRIMES "Set ON to support chains with primes >= 2^30 (rational rescaling)." OFF)
+if (FIDESLIB_WIDE_PRIMES)
+  add_compile_definitions(FIDESLIB_WIDE_PRIMES=1)
+  message(STATUS "FIDESlib: WIDE PRIMES enabled (chains up to 2^32; classic chains should build with this OFF)")
+endif ()
+
 # Export compile commands for debugging.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
