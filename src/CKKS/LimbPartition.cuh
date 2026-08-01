@@ -153,6 +153,12 @@ class LimbPartition {
      *  CPU reference's order. Rebuilds `limb` (both edges move) and therefore re-uploads the
      *  limbptr/auxptr device tables, and re-bases pbase onto the new window. */
     void rrRescale(const std::vector<int>& drop, const std::vector<int>& add, int new_level);
+    /** RATIONAL RESCALING, FUSED KEYSWITCH (RR_PLAN (c).4e): modup's per-digit NTT folded into
+     *  the KSK dot (NTT_KSK_DOT / _ACC), so the extended digits never round-trip through DRAM.
+     *  `this` is the degree-2 term (EVAL); out0/out1 receive the (b, a) products with their
+     *  special limbs, ready for moddown. Replaces modup() + launchFusedDotKSK_2 on RR chains. */
+    void rrModupDotKSK(LimbPartition& out0, LimbPartition& out1, const LimbPartition& ksk_a,
+                       const LimbPartition& ksk_b, LimbPartition& aux_partition);
     /** Re-upload limbptr/auxptr from the current `limb` vector. Needed whenever the limb
      *  array is rebuilt rather than appended to (the RR rescale is the only such path). */
     void refreshLimbPtrs();

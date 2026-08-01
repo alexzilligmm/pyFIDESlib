@@ -1191,6 +1191,157 @@ void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<in
     CudaCheckErrorModNoSync;
 }
 
+/* RR fused keyswitch (RR_PLAN (c).4e). Same decomposition as multModupDotKSK on a classic
+ * chain — per (digit, target-run), stage-1 NTT into a scratch aux, stage-2 NTT_KSK_DOT[_ACC]
+ * that multiplies by the key row and accumulates straight into the output — but with the RR
+ * window geometry, and WITHOUT touching multModupDotKSK itself (the classic shipping path).
+ *
+ * Row bookkeeping, which is the whole difficulty:
+ *   - digit d's DIGIT list is [K specials] ++ [every Q prime EXCEPT d's own block, ascending].
+ *     So the list position of global prime g is K + g (below the block) or K + g - dSizeFull
+ *     (above it), where dSizeFull is the digit's FULL global size — the list excludes all of
+ *     d's primes, not just the active ones.
+ *   - the window's active Q destinations therefore split into a LOW run (primes below d's
+ *     block) and a HIGH run (above it), each contiguous in BOTH the digit list and the
+ *     ciphertext slots. That is the same split the classic loop makes per source digit j != d.
+ *   - a window row inside d's OWN block is not in d's list at all: its contribution is the
+ *     un-extended limb times the key's DECOMP row. Those rows are INITIALIZED by that product
+ *     (one per row, since each prime belongs to exactly one digit) and every fused launch
+ *     accumulates. Specials belong to no block, so the first active digit initializes them. */
+void LimbPartition::rrModupDotKSK(LimbPartition& out0, LimbPartition& out1, const LimbPartition& ksk_a,
+                                  const LimbPartition& ksk_b, LimbPartition& aux_partition) {
+    constexpr ALGO algo = ALGO_SHOUP;
+    cudaSetDevice(device);
+    assert(cc.isRR() && cc.GPUid.size() == 1);
+    const int lvl      = *level;
+    const int lo       = cc.windowLo(lvl), hi = cc.windowHi(lvl);
+    const int nSpecial = cc.rrNumSpecialInDigit();
+    const auto geoms   = cc.rrDigits(lvl);
+
+    generateAllDecompAndDigit(false);
+    s.wait(aux_partition.getS());
+    s.wait(ksk_a.getS());
+    s.wait(ksk_b.getS());
+    s.wait(out0.getS());
+    s.wait(out1.getS());
+
+    // ---- stage A: one wide INTT of the window into the DECOMP staging buffer ----
+    {
+        const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;
+        dim3 bdF{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+        dim3 bdS{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
+        const int byF = (32 / M) * bdF.x * (2 * M + 1 + 1);
+        const int byS = (32 / M) * bdS.x * (2 * M + 1 + 1);
+        const int n   = hi - lo + 1;
+        for (int i = 0; i < n; i += cc.batch) {
+            STREAM(limb.at(i)).wait(s);
+            const uint32_t num = std::min((uint32_t)cc.batch, (uint32_t)(n - i));
+            if (bdF.x == bdS.x && launchFusedNTTPair(true, getGlobals(), limbptr.data + i, PB(i), (int)num,
+                                                     dim3{cc.N / (bdF.x * M * 2)}, bdF, byF, auxptr.data + i,
+                                                     DECOMPALLptr.data + pbase + i, STREAM(limb.at(i)).ptr())) {
+            } else {
+                INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF,
+                                                STREAM(limb.at(i)).ptr()>>>(getGlobals(), limbptr.data + i, PB(i),
+                                                                            auxptr.data + i);
+                INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS,
+                                               STREAM(limb.at(i)).ptr()>>>(getGlobals(), auxptr.data + i, PB(i),
+                                                                           DECOMPALLptr.data + pbase + i);
+            }
+        }
+        for (int i = 0; i < n; i += cc.batch)
+            s.wait(STREAM(limb.at(i)));
+    }
+
+    // ---- stage B: the in-digit rows, which also INITIALIZE their outputs ----
+    for (const auto& g : geoms) {
+        const int slot = g.gLo - pbase;
+        Mult_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)g.nFrom}, 128, 0, s.ptr()>>>(
+            out1.limbptr.data + slot, ksk_a.DECOMPlimbptr[g.digit].data + g.fromOff, limbptr.data + slot, PB(slot));
+        Mult_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)g.nFrom}, 128, 0, s.ptr()>>>(
+            out0.limbptr.data + slot, ksk_b.DECOMPlimbptr[g.digit].data + g.fromOff, limbptr.data + slot, PB(slot));
+    }
+
+    // ---- stage C: per digit, base-convert then fuse the NTT with the dot ----
+    const int M = (cc.precom.constants[0].type == 0) ? 8 : 4;
+    dim3 bdF{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};   // NTT stage order (ApplyNTT's), not the INTT's
+    dim3 bdS{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+    const int byF = (32 / M) * bdF.x * (2 * M + 1 + 1);
+    const int byS = (32 / M) * bdS.x * (2 * M + 1 + 1);
+    bool first = true;
+
+    for (const auto& g : geoms) {
+        const int d       = g.digit;
+        const auto& dm    = cc.decompMeta.at(0).at(d);
+        const int dStart  = dm.front().id, dEnd = dm.back().id;
+        const int dSize   = (int)dm.size();  // FULL global size: the list excludes all of them
+
+        ModUpWindow w{};
+        w.fromOff = g.fromOff;
+        w.toOff = g.toOff;
+        w.nSpecial = nSpecial;
+        w.nFrom = g.nFrom;
+        w.nTo = g.nTo;
+        w.scaleIdx = lvl;
+        w.matIdx = lvl;
+        w.winLo = lo;
+        w.winHi = hi;
+        {
+            dim3 blockSize{64, 2};
+            DecompAndModUpConv<algo><<<dim3{(uint32_t)cc.N / blockSize.x}, blockSize,
+                                       (int)(sizeof(uint64_t) * g.nFrom * blockSize.x), s.ptr()>>>(
+                DECOMPlimbptr[d].data, lvl + 1, DIGITlimbptr[d].data, d, getGlobals(), w);
+        }
+
+        // (digit-list offset, ciphertext slot, count, is-special) runs this digit contributes
+        struct Run { int dOff, ctSlot, n; bool special; };
+        std::vector<Run> runs;
+        runs.push_back({0, 0, nSpecial, true});
+        if (lo <= dStart - 1) {
+            const int begG = lo, endG = std::min(hi, dStart - 1);
+            runs.push_back({nSpecial + begG, begG - pbase, endG - begG + 1, false});
+        }
+        if (dEnd + 1 <= hi) {
+            const int begG = std::max(lo, dEnd + 1);
+            runs.push_back({nSpecial + begG - dSize, begG - pbase, hi - begG + 1, false});
+        }
+
+        for (const auto& r : runs) {
+            if (r.n <= 0)
+                continue;
+            void** scratch = r.special ? out1.SPECIALauxptr.data + 0 : out1.auxptr.data + r.ctSlot;
+            void** dst0    = r.special ? out0.SPECIALlimbptr.data + 0 : out0.limbptr.data + r.ctSlot;
+            void** dst1    = r.special ? out1.SPECIALlimbptr.data + 0 : out1.limbptr.data + r.ctSlot;
+            const int pid  = r.special ? SPECIAL(id, 0) : PB(r.ctSlot);
+            // Specials belong to no digit's block, so the FIRST active digit initializes them;
+            // every window row was already initialized by its own digit's DECOMP product above.
+            const bool init = r.special && first;
+            for (int i = 0; i < r.n; i += cc.batch) {
+                const uint32_t num = std::min((uint32_t)cc.batch, (uint32_t)(r.n - i));
+                NTT_<false, algo, NTT_NONE><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF, s.ptr()>>>(
+                    getGlobals(), DIGITlimbptr[d].data + r.dOff + i, pid + i, scratch + i, nullptr, 0, nullptr,
+                    nullptr);
+                if (init) {
+                    NTT_<true, algo, NTT_KSK_DOT><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
+                        getGlobals(), scratch + i, pid + i, dst0 + i, ksk_a.DIGITlimbptr[d].data + r.dOff + i, 0,
+                        dst1 + i, ksk_b.DIGITlimbptr[d].data + r.dOff + i);
+                } else {
+                    NTT_<true, algo, NTT_KSK_DOT_ACC><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
+                        getGlobals(), scratch + i, pid + i, dst0 + i, ksk_a.DIGITlimbptr[d].data + r.dOff + i, 0,
+                        dst1 + i, ksk_b.DIGITlimbptr[d].data + r.dOff + i);
+                }
+            }
+        }
+        first = false;
+    }
+
+    out0.getS().wait(s);
+    out1.getS().wait(s);
+    ksk_a.getS().wait(s);
+    ksk_b.getS().wait(s);
+    aux_partition.getS().wait(s);
+    CudaCheckErrorModNoSync;
+}
+
 void LimbPartition::multPt(const LimbPartition& p) {
     const int limbsize = getLimbSize(*level);
     // assert(SPECIALlimb.size() == 0 && p.SPECIALlimb.size() == 0);

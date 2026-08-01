@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <optional>
 
@@ -254,15 +255,54 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     const int id       = src.id;
     cudaSetDevice(src.device);
 
-    // --- modup: extend every digit onto (window \ digit) ++ P ---
+    /* FIDESLIB_RR_FUSED_KS (in-tree, DEFAULT 0 — MEASURED NEUTRAL, FAILURE §2.26).
+     *
+     * =1 folds modup's per-digit NTT into the KSK dot (NTT_KSK_DOT/_ACC), the shape
+     * multModupDotKSK uses on a classic chain, so the extended digits never round-trip through
+     * DRAM in eval form. Bit-identical to the default at all 9 gate windows.
+     *
+     * It measures NEUTRAL (3-pair alternating A/B, logN 16: -0.017 / -0.001 / -0.004 ms at
+     * L26 / L13 / L5, signs split), and the traffic algebra says why it cannot do better:
+     * fusing SAVES writing + re-reading the eval-domain digits, 2*dnum*(K+W) limb transfers,
+     * but PAYS accumulator read-modify-writes, 4*dnum*(K+W), where the default arm's
+     * fusedDotKSK_2_ accumulates across digits IN REGISTERS and writes each output row ONCE
+     * (2*(K+W)). At dnum=4 that is 8 saved against 14 added — a net traffic INCREASE that only
+     * comes out even because both working sets fit the 128 MB L2.
+     *
+     * So the default arm is not the unoptimized one: register accumulation across digits beats
+     * per-digit DRAM accumulation, and this fusion is a step backwards that L2 happens to hide.
+     * Kept in-tree because it is the shape the classic path uses, and because the balance flips
+     * if dnum drops or the working set stops fitting L2. */
+    static const bool fused_ks = [] {
+        const char* e = std::getenv("FIDESLIB_RR_FUSED_KS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+
     c.generateDecompAndDigit(false);
     RNSPoly& aux = cc.getKeySwitchAux2();
+    out0.generateSpecialLimbs(false, false);
+    out1.generateSpecialLimbs(false, false);
+    if (fused_ks) {
+        static const bool once = [] {  // run marker: an A/B whose arms are the same arm is a lie
+            std::cerr << "[rr_ks] active: FUSED modup+dot (FIDESLIB_RR_FUSED_KS=0 for the reference)\n";
+            return true;
+        }();
+        (void)once;
+        src.rrModupDotKSK(o0, o1, key.a.GPU.at(0), key.b.GPU.at(0), aux.GPU.at(0));
+        tmark = tick(0, tmark);      // the fused arm has no separate modup phase ...
+        tmark = tick(1, tmark);      // ... so phase[0] is ~0 and phase[1] carries modup+dot
+        out0.SetModUp(true);
+        out1.SetModUp(true);
+        out0.moddown(true, true, 0);
+        out1.moddown(true, true, 1);
+        tick(2, tmark);
+        return;
+    }
+
+    // --- unfused reference: modup, then the standalone dot ---
     src.modup(aux.GPU.at(0));
 
     tmark = tick(0, tmark);
-
-    out0.generateSpecialLimbs(false, false);
-    out1.generateSpecialLimbs(false, false);
 
     // --- dot against the evk rows the window names ---
     const auto geoms   = cc.rrDigits(level);
