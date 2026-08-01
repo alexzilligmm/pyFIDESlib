@@ -101,6 +101,24 @@ __forceinline__ __device__ uint64_t Shoup_mult_64(const uint64_t op1, const uint
     return c_lo;
 }
 
+/** 32-bit SIGNED MONTGOMERY modular multiplication (Cheddar Alg. 2, arXiv 2407.13055).
+     * Requires: bmont = b * 2^32 mod prime  (Montgomery-form constant, e.g. a twiddle)
+     *           qinv  = prime^{-1} mod 2^32 (C_.prime_qinv32)
+     *           prime < 2^31, a < prime (any a < 2^31 works: a*bmont < prime*2^31)
+     * Output:  a * b % prime, CANONICAL.
+     * vs Shoup: +1-2 instructions, but only ONE constant table instead of two — the
+     * point is halving the twiddle-table traffic and smem, not the ALU. */
+__forceinline__ __device__ uint32_t Mont_mult_32(const uint32_t a, const uint32_t bmont, const uint32_t qinv,
+                                                 const uint32_t prime) {
+    const uint32_t lo = a * bmont;
+    const uint32_t hi = __umulhi(a, bmont);
+    const int32_t z = (int32_t)(lo * qinv);
+    const int32_t v = __mulhi(z, (int32_t)prime);
+    int32_t y = (int32_t)hi - v;
+    y += (int32_t)prime & (y >> 31);
+    return (uint32_t)y;
+}
+
 /**
      * 32-bit integer Shoup modular multiplication.
      * From paper: Modular SIMD arithmetic in Mathemagix: Algorithm 8
@@ -233,6 +251,11 @@ __device__ uint32_t modmult(const uint32_t a, const uint32_t b, const int primei
         res = Shoup_mult_32(a, b, shoup_b, p);
     } else if constexpr (algo == 4) {
         res = Neal_mult_32(a, b, C_.prime_better_barret_mu[primeid], p, C_.prime_bits[primeid]);
+    } else if constexpr (algo == ALGO_SMR) {
+        // The MONTGOMERY-FORM constant (b_true * 2^32 mod p) rides the SHOUP argument slot —
+        // callers keep their (value, shoup) pair signature and the plain value arg goes dead
+        // (the compiler removes its load). See FIDESLIB_NTT_SMR in NTT.cu / ConstantsGPU.cu.
+        res = Mont_mult_32(a, shoup_b, C_.prime_qinv32[primeid], p);
     } else {
         res = (uint64_t)a * (uint64_t)b % (uint64_t)p;
     }

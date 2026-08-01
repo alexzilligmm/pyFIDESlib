@@ -301,7 +301,14 @@ __device__ __forceinline__ void warp_pair_exchange(T& a0, T& a1, const int tid, 
             d = a - b;
             c = a + b;
         } else if constexpr (algo == 3) {
+#if FIDESLIB_NTT_SMR
+            if constexpr (sizeof(T) == 4)
+                b = modmult<ALGO_SMR>(b, psi, primeid, shoup_psi);  // shoup slot carries the MONT twiddle
+            else
+                b = modmult<algo>(b, psi, primeid, shoup_psi);
+#else
             b = modmult<algo>(b, psi, primeid, shoup_psi);
+#endif
             c = modadd(a, b, primeid);
             d = modsub(a, b, primeid);
         } else if constexpr (algo <= 5) {
@@ -330,7 +337,14 @@ __device__ __forceinline__ void warp_pair_exchange(T& a0, T& a1, const int tid, 
         } else if constexpr (algo == 3) {
             c = modadd(a, b, primeid);
             b = modsub(a, b, primeid);
+#if FIDESLIB_NTT_SMR
+            if constexpr (sizeof(T) == 4)
+                d = modmult<ALGO_SMR>(b, psi, primeid, shoup_psi);  // shoup slot carries the MONT twiddle
+            else
+                d = modmult<algo>(b, psi, primeid, shoup_psi);
+#else
             d = modmult<algo>(b, psi, primeid, shoup_psi);
+#endif
         } else if constexpr (algo <= 5) {
             //      assert(b < primes[primeid]);
             //      assert(a < primes[primeid]);

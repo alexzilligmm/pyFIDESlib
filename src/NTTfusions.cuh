@@ -603,7 +603,7 @@ __device__ __forceinline__ void forward_negacyclic_scale(char* buffer, const int
 
         T aux;
         if constexpr (algo == ALGO_SHOUP) {
-            aux = modmult<algo>(aux_3, psi[pos1], primeid, psi_shoup[pos1]);
+            aux = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(aux_3, psi[pos1], primeid, psi_shoup[pos1]);
         } else {
             aux = modmult<algo>(aux_3, psi[pos1], primeid);
         }
@@ -630,7 +630,7 @@ __device__ __forceinline__ void forward_negacyclic_scale(char* buffer, const int
 
             T aux2;
             if constexpr (algo == ALGO_SHOUP) {
-                aux2 = modmult<algo>(aux, fourth_root, primeid, fourth_root_shoup);
+                aux2 = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(aux, fourth_root, primeid, fourth_root_shoup);
             } else {
                 aux2 = modmult<algo>(aux, fourth_root, primeid);
             }
@@ -683,7 +683,7 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
 
         T aux;
         if constexpr (algo == ALGO_SHOUP) {
-            aux = modmult<algo>(aux_3, psi[pos1], primeid, psi_shoup[pos1]);
+            aux = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(aux_3, psi[pos1], primeid, psi_shoup[pos1]);
         } else {
             aux = modmult<algo>(aux_3, psi[pos1], primeid);
         }
@@ -716,7 +716,7 @@ __device__ __forceinline__ void backward_negacyclic_scale(char* buffer, const in
 
             T aux2;
             if constexpr (algo == ALGO_SHOUP) {
-                aux2 = modmult<algo>(aux, fourth_root, primeid, fourth_root_shoup);
+                aux2 = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(aux, fourth_root, primeid, fourth_root_shoup);
             } else {
                 aux2 = modmult<algo>(aux, fourth_root, primeid);
             }

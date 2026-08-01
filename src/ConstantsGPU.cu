@@ -41,6 +41,15 @@ uint64_t mu64_precomp(const uint64_t q) {
     return (uint64_t)((((__uint128_t)1) << 64) / (__uint128_t)q);
 }
 
+/* SMR: q^{-1} mod 2^32 by Newton iteration (q odd). Five doublings of precision from the
+ * 5-bit seed cover 32 bits. */
+uint32_t qinv32_precomp(const uint64_t q) {
+    uint32_t x = (uint32_t)q;  // correct mod 2^3 for odd q
+    for (int it = 0; it < 5; ++it)
+        x *= 2u - (uint32_t)q * x;
+    return x;
+}
+
 uint64_t mu_new(const uint64_t q, const uint32_t num_bits) {
     __uint128_t res =
         (((__uint128_t)1) << (2 * num_bits + (VERSION == DHEM ? 3 : (VERSION == NEIL ? 1 : 0)))) / ((__uint128_t)q);
@@ -205,6 +214,7 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
 
             hC_.prime_better_barret_mu[i] = mu_new(q[i].p, q[i].bits);
             hC_.prime_mu64[i] = mu64_precomp(q[i].p);
+            hC_.prime_qinv32[i] = qinv32_precomp(q[i].p);
             hC_.prime_bits[i] = q[i].bits;
         }
 
@@ -218,6 +228,7 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
 
             hC_.prime_better_barret_mu[hC_.L + i] = mu_new(hC_.primes[hC_.L + i], p[i].bits);
             hC_.prime_mu64[hC_.L + i] = mu64_precomp(hC_.primes[hC_.L + i]);
+            hC_.prime_qinv32[hC_.L + i] = qinv32_precomp(hC_.primes[hC_.L + i]);
             hC_.prime_bits[hC_.L + i] = p[i].bits;
         }
     }
@@ -345,10 +356,19 @@ std::pair<std::vector<Constants>, std::unique_ptr<Global>> SetupConstants(
 
             for (int j = 0; j < N; ++j) {
                 if (!HISU64(i)) {
+#if FIDESLIB_NTT_SMR
+                    // MONTGOMERY-form twiddles (t·2^32 mod q) ride the shoup buffers — see
+                    // the FIDESLIB_NTT_SMR comment in ConstantsGPU.cuh. u32 primes only.
+                    ((uint32_t*)hG_.psi_shoup[i])[j] =
+                        (uint32_t)(((uint64_t)((uint32_t*)hG_.psi[i])[j] << 32) % hC_.primes[i]);
+                    ((uint32_t*)hG_.inv_psi_shoup[i])[j] =
+                        (uint32_t)(((uint64_t)((uint32_t*)hG_.inv_psi[i])[j] << 32) % hC_.primes[i]);
+#else
                     ((uint32_t*)hG_.psi_shoup[i])[j] =
                         (uint64_t)(((uint32_t*)hG_.psi[i])[j] << 1) * (1ul << 31) / hC_.primes[i];
                     ((uint32_t*)hG_.inv_psi_shoup[i])[j] =
                         (uint64_t)(((uint32_t*)hG_.inv_psi[i])[j] << 1) * (1ul << 31) / hC_.primes[i];
+#endif
                 } else {
                     assert(hC_.primes[i] != 0);
 

@@ -4,6 +4,17 @@
 #ifndef FIDESLIB_CONSTANTSGPU_CUH
 #define FIDESLIB_CONSTANTSGPU_CUH
 
+// SMR (signed Montgomery reduction) for the NTT TWIDDLE path (Cheddar Alg. 2; TO-TRY §2.0).
+// Under this flag the u32 psi_shoup / inv_psi_shoup BUFFERS are filled with MONTGOMERY-form
+// twiddles (t·2^32 mod q) instead of Shoup precomps, and every twiddle-pair modmult site in
+// NTT.cu / NTThelper.cuh / NTTfusions.cuh multiplies via ALGO_SMR (the plain-psi argument
+// goes dead). Scalar Shoup constants (root_shoup, N_shoup, …) are UNTOUCHED — only sites
+// whose shoup argument comes from the psi tables flip, and only for sizeof(T)==4.
+// Phase 2 (not yet built): drop the plain-psi smem staging + shrink the launch smem.
+#ifndef FIDESLIB_NTT_SMR
+#define FIDESLIB_NTT_SMR 0
+#endif
+
 #include <cinttypes>
 #include <vector>
 #include "LimbUtils.cuh"
@@ -38,6 +49,10 @@ struct Constants {
      * needs a reducer valid on the whole u64 range, which is what this constant is for.
      * See modreduce_lazy() in ModMult.cuh. 512 B added to the 64 KB bank. */
     uint64_t prime_mu64[MAXP];
+    /* SMR (signed Montgomery reduction, Cheddar Alg. 2): q^{-1} mod 2^32 per prime, consumed
+     * as a signed 32-bit constant by Mont_mult_32 (ModMult.cuh). Twiddle tables re-encoded in
+     * Montgomery form ride the psi_shoup buffers under FIDESLIB_NTT_SMR. 256 B. */
+    uint32_t prime_qinv32[MAXP];
     uint32_t prime_bits[MAXP];
     uint8_t table[MAXP * MAXP * 8];
 

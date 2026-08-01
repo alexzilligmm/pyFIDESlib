@@ -34,7 +34,7 @@ class PlaintextBatch;
 }  // namespace FIDESlib::CKKS
 
 namespace FIDESlib {
-enum ALGO { ALGO_NATIVE = 0, ALGO_NONE = 1, ALGO_SHOUP = 3, ALGO_BARRETT = 4, ALGO_BARRETT_FP64 = 5 };
+enum ALGO { ALGO_NATIVE = 0, ALGO_NONE = 1, ALGO_SHOUP = 3, ALGO_BARRETT = 4, ALGO_BARRETT_FP64 = 5, ALGO_SMR = 6 };
 constexpr ALGO DEFAULT_ALGO = ALGO_BARRETT;
 enum BOOT_CONFIG { UNIFORM = 0, UNIFORM_2 = 1, SPARSE = 2, ENCAPS = 3, ENCAPS_2 = 4 };
 }  // namespace FIDESlib

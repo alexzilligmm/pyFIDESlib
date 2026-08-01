@@ -178,8 +178,9 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                 const uint32_t hi_exp_br = __brev(exp << clzN) & (blockDim.x - 1);
                 const uint32_t lo_exp = exp & mask_lo_exp;
                 if constexpr (algo == 3) {
-                    eot_tw[k] = modmult<algo>(((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
-                                              psi_shoup[hi_exp_br]);
+                    eot_tw[k] = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(
+                        ((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
+                        psi_shoup[hi_exp_br]);
                 } else {
                     eot_tw[k] = modmult<algo>(psi[hi_exp_br], ((T*)G_->inv_psi_no[primeid])[lo_exp << 1], primeid);
                 }
@@ -227,8 +228,9 @@ __device__ __forceinline__ void INTT__(const Global::Globals* Globals, const T* 
                         // WRONG RESULTS BY DESIGN — traffic ablation, see NTThelper.cuh.
                         psi_aux[k] = psi[1];
                     } else if constexpr (algo == 3) {
-                        psi_aux[k] = modmult<algo>(((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
-                                                   psi_shoup[hi_exp_br]);
+                        psi_aux[k] = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(
+                            ((T*)G_->inv_psi_no[primeid])[lo_exp << 1], psi[hi_exp_br], primeid,
+                            psi_shoup[hi_exp_br]);
                     } else {
                         psi_aux[k] = modmult<algo>(psi[hi_exp_br], ((T*)G_->inv_psi_no[primeid])[lo_exp << 1], primeid);
                     }
@@ -871,8 +873,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                         const uint32_t hi_exp_br = __brev(exp << clzN) & (blockDim.x - 1);
                         const uint32_t lo_exp = exp & mask_lo_exp;
                         if constexpr (algo == 3) {
-                            eot_tw[k] = modmult<algo>(((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br], primeid,
-                                                      psi_barret[hi_exp_br]);
+                            eot_tw[k] = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(
+                                ((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br], primeid,
+                                psi_barret[hi_exp_br]);
                         } else {
                             eot_tw[k] = modmult<algo>(psi[hi_exp_br], ((T*)G_->psi_no[primeid])[lo_exp * 2], primeid);
                         }
@@ -919,8 +922,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                                 // WRONG RESULTS BY DESIGN — traffic ablation, see NTThelper.cuh.
                                 ((T*)&aux)[k] = psi[1];
                             } else if constexpr (algo == 3) {
-                                ((T*)&aux)[k] = modmult<algo>(((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br],
-                                                              primeid, psi_barret[hi_exp_br]);
+                                ((T*)&aux)[k] = modmult<FIDESLIB_NTT_SMR && sizeof(T) == 4 ? ALGO_SMR : algo>(
+                                    ((T*)G_->psi_no[primeid])[lo_exp * 2], psi[hi_exp_br], primeid,
+                                    psi_barret[hi_exp_br]);
                             } else {
                                 ((T*)&aux)[k] =
                                     modmult<algo>(psi[hi_exp_br], ((T*)G_->psi_no[primeid])[lo_exp * 2], primeid);
