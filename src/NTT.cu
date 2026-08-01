@@ -476,6 +476,78 @@ __device__ __forceinline__ T rescale2_combine(const T x2c, const T va, const int
     return modadd(modmult<algo>(C1, va_j, pj), modmult<algo>(K_bj, w, pj), pj);
 }
 
+/* RR (TO-TRY §2.10a, RR_PLAN (c).4d): block-uniform constants for the fused k-way drop.
+ *
+ * Both fields depend on (the dropped set, this block's target prime), so they are computed once
+ * per thread at kernel entry and reused for every coefficient the thread owns. In the notation
+ * of rescaleK_combine below — d_t = the t-th dropped prime in DROP ORDER, j = the target prime,
+ * K = QlQlInvModqlDivqlModq, qinv = q_inv:
+ *   c[t] — drop t's weight at the target: K[d_t][j] * prod_{s>t} qinv[d_s][j], the qinv factors
+ *          being the later drops that still divide drop t's contribution.
+ * (Stage 2's C = prod_t qinv[d_t][j] is rebuilt in rescaleK_fusion, the only place it is used;
+ *  the constants that propagate a drop onto a LATER-dropped limb live in rr_prepare_drops,
+ *  which is where that recursion belongs — it does not depend on j.) */
+template <typename T, ALGO algo_>
+struct RescaleKCtx {
+    static constexpr ALGO algo = algo_ == ALGO_SHOUP ? ALGO_BARRETT : algo_;
+
+    int k;
+    int d[RESCALEK_MAX];
+    T c[RESCALEK_MAX];
+
+    __device__ __forceinline__ void init(const int packed, const int pj, const Global::Globals* Globals) {
+        k = rescaleK_count(packed);
+        assert(k >= 1 && k <= RESCALEK_MAX);
+#pragma unroll
+        for (int t = 0; t < RESCALEK_MAX; ++t)
+            d[t] = rescaleK_id(packed, t);
+        // Walk t downwards so the suffix product prod_{s>t} qinv[d_s][j] is built incrementally.
+        T suffix = 1;
+#pragma unroll
+        for (int t = RESCALEK_MAX - 1; t >= 0; --t)
+            if (t < k) {
+                c[t] = modmult<algo>((T)G_->QlQlInvModqlDivqlModq[MAXP * d[t] + pj], suffix, pj);
+                suffix = modmult<algo>(suffix, (T)G_->q_inv[MAXP * d[t] + pj], pj);
+            }
+    }
+};
+
+/* RR (TO-TRY §2.10a): per-coefficient k-way combine — the whole point of NTT_RESCALEK.
+ *
+ * `u[t]` is v_t: the coefficient-domain value that dropped prime d_t's limb holds when its OWN
+ * turn comes in the sequential loop, i.e. after drops 0..t-1 have been applied to it. That
+ * recursion is NOT done here — it depends only on the dropped set, so rr_prepare_drops
+ * (LimbPartition.cu) runs it once over the k dropped limbs before this pass, rather than once
+ * per surviving limb. Doing it here instead cost the entire prize; see that comment.
+ *
+ * What is left is the part that genuinely depends on the target: each v_t lifted onto j and
+ * weighted by the drops that still divide it. Two facts make the whole k-step composition
+ * collapse into this one pre-NTT value:
+ *   - the per-step update is elementwise-LINEAR in the coefficient domain, so applying it
+ *     there instead of after the forward transform is exact, not approximate (the modular NTT
+ *     is a bijective linear map — INTT(a*X + b*Y) = a*INTT(X) + b*INTT(Y) with no rounding);
+ *   - per-prime scalars commute with the NTT, so drop t's weight c[t] may be applied BEFORE
+ *     the transform where the sequential path applies K after it.
+ * The result is therefore BIT-IDENTICAL to k sequential NTT_RESCALE passes, which is what
+ * test_rr_poly checks against the CPU reference. k=2 reduces to rescale2_combine term for term.
+ *
+ * The drop ORDER is not free to permute — each step divides (x - [x]_d) by d, and its rounding
+ * feeds the next — but the order is carried entirely by v_t and by c[t]'s suffix product. */
+template <typename T, ALGO algo_>
+__device__ __forceinline__ T rescaleK_combine(const T* u, const int pj, const RescaleKCtx<T, algo_>& rk) {
+    constexpr ALGO algo = algo_ == ALGO_SHOUP ? ALGO_BARRETT : algo_;
+    T acc = 0;
+#pragma unroll
+    for (int t = 0; t < RESCALEK_MAX; ++t) {
+        if (t >= rk.k)
+            continue;
+        T vj = u[t];
+        CKKS::SwitchModulus(vj, rk.d[t], pj);
+        acc = modadd(acc, modmult<algo>(rk.c[t], vj, pj), pj);
+    }
+    return acc;
+}
+
 template <typename T, bool second, ALGO algo, NTT_MODE mode>
 __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restrict__ dat, const int primeid,
                                       T* __restrict__ res, const T* __restrict__ pt, const int primeid_rescale,
@@ -517,6 +589,15 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
         r2_K_bj = (T)G_->QlQlInvModqlDivqlModq[MAXP * r2_rb + primeid];
         r2_C1 = modmult<algo_c>(K_aj, qinv_bj, primeid);
     }
+
+    // RR (NTT_RESCALEK stage 1): the k dropped limbs ride in through `pt`, which for this mode
+    // holds the DEVICE POINTER TABLE of the drops (in drop order) rather than one limb — the
+    // kernel needs k sources and the signature carries only two. dat is that table's entry 0.
+    [[maybe_unused]] const T* const* rk_src = (const T* const*)(const void*)pt;
+    [[maybe_unused]] RescaleKCtx<T, algo> rk;
+    if constexpr (mode == NTT_RESCALEK && !second) {
+        rk.init(primeid_rescale, primeid, Globals);
+    }
 #ifdef COOPERATIVE_GROUPS
     cg::grid_group grid = cg::this_grid();
     for (int second_ = 0; second_ < 2; ++second_) {
@@ -550,6 +631,24 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                                                                   primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
                         ((T*)&aux)[1] = rescale2_combine<T, algo>(((T*)&aux)[1], ((const T*)&aux2)[1], r2_ra, r2_rb,
                                                                   primeid, r2_qinv_ab, r2_K_ab, r2_C1, r2_K_bj);
+                    }
+                    if constexpr (mode == NTT_RESCALEK && !second) {
+                        // fused k-way drop: every dropped limb read with the identical
+                        // transposed pattern (so each stays coalesced); drop 0 is already in
+                        // `aux`, since dat == rk_src[0].
+                        T u0[RESCALEK_MAX], u1[RESCALEK_MAX];
+                        u0[0] = ((const T*)&aux)[0];
+                        u1[0] = ((const T*)&aux)[1];
+#pragma unroll
+                        for (int t = 1; t < RESCALEK_MAX; ++t)
+                            if (t < rk.k) {
+                                const int4 aux2 =
+                                    FIDESLIB_NTT_STREAM_LD((const int4*)rk_src[t] + (pos_transp >> 1));
+                                u0[t] = ((const T*)&aux2)[0];
+                                u1[t] = ((const T*)&aux2)[1];
+                            }
+                        ((T*)&aux)[0] = rescaleK_combine<T, algo>(u0, primeid, rk);
+                        ((T*)&aux)[1] = rescaleK_combine<T, algo>(u1, primeid, rk);
                     }
                     if constexpr (1) {
                         AS(j & 2, pos_res) = ((uint64_t*)&aux)[0];
@@ -591,6 +690,29 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                                                                r2_K_ab, r2_C1, r2_K_bj);
                         aux.w = (int)rescale2_combine<T, algo>((T)aux.w, (T)aux2.w, r2_ra, r2_rb, primeid, r2_qinv_ab,
                                                                r2_K_ab, r2_C1, r2_K_bj);
+                    }
+                    if constexpr (mode == NTT_RESCALEK && !second) {
+                        // fused k-way drop, U32: four coefficient lanes per int4, each with its
+                        // own private residue set. Drop 0 is already in `aux` (dat == rk_src[0]).
+                        T u[4][RESCALEK_MAX];
+                        u[0][0] = (T)aux.x;
+                        u[1][0] = (T)aux.y;
+                        u[2][0] = (T)aux.z;
+                        u[3][0] = (T)aux.w;
+#pragma unroll
+                        for (int t = 1; t < RESCALEK_MAX; ++t)
+                            if (t < rk.k) {
+                                const int4 aux2 =
+                                    FIDESLIB_NTT_STREAM_LD((const int4*)rk_src[t] + (pos_transp >> 1));
+                                u[0][t] = (T)aux2.x;
+                                u[1][t] = (T)aux2.y;
+                                u[2][t] = (T)aux2.z;
+                                u[3][t] = (T)aux2.w;
+                            }
+                        aux.x = (int)rescaleK_combine<T, algo>(u[0], primeid, rk);
+                        aux.y = (int)rescaleK_combine<T, algo>(u[1], primeid, rk);
+                        aux.z = (int)rescaleK_combine<T, algo>(u[2], primeid, rk);
+                        aux.w = (int)rescaleK_combine<T, algo>(u[3], primeid, rk);
                     }
                     ((T*)&temp[0])[i] = aux.x;
                     ((T*)&temp[1])[i] = aux.y;
@@ -956,6 +1078,9 @@ __device__ __forceinline__ void NTT__(const Global::Globals* Globals, T* __restr
                 if constexpr (mode == NTT_RESCALE2) {
                     rescale2_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, Globals);
                 }
+                if constexpr (mode == NTT_RESCALEK) {
+                    rescaleK_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, Globals);
+                }
                 if constexpr (mode == NTT_MULTPT) {
                     multpt_fusion<T, algo, M>(buffer, logBD, j, primeid, primeid_rescale, res, pt, Globals);
                 }
@@ -1021,25 +1146,26 @@ __global__ void NTT_(const Global::Globals* Globals, void** __restrict__ dat, co
     assert(primeid >= 0 && primeid < MAXP);
     // NTT_RESCALE2 stage 1 reads BOTH coeff-domain top limbs: dat[0] = qb limb, dat[1] = qa
     // top (rides the otherwise-unused pt slot into NTT__).
+    // NTT_RESCALEK stage 1 needs k of them, so it rides the WHOLE pointer table `dat` into that
+    // same slot and indexes it device-side; dat[0] still arrives as the primary source.
+    constexpr bool scalar_src = (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2 ||
+                                 mode == NTT_RESCALEK) &&
+                                !second;
     if (ISU64(primeid)) {
         NTT__<uint64_t, second, algo, mode>(
-            Globals,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2) && !second ? (uint64_t*)dat[0]
-                                                                                           : (uint64_t*)dat[blockIdx.y],
-            primeid, (uint64_t*)res[blockIdx.y],
-            (mode == NTT_RESCALE2 && !second) ? (uint64_t*)dat[1]
-                                              : (pt ? (uint64_t*)pt[blockIdx.y] : nullptr),
+            Globals, scalar_src ? (uint64_t*)dat[0] : (uint64_t*)dat[blockIdx.y], primeid, (uint64_t*)res[blockIdx.y],
+            (mode == NTT_RESCALE2 && !second)   ? (uint64_t*)dat[1]
+            : (mode == NTT_RESCALEK && !second) ? (const uint64_t*)(const void*)dat
+                                                : (pt ? (uint64_t*)pt[blockIdx.y] : nullptr),
             primeid_rescale, res2 ? (uint64_t*)res2[blockIdx.y] : nullptr,
             kskb ? (uint64_t*)kskb[blockIdx.y] : nullptr);
 
     } else {
         NTT__<uint32_t, second, algo, mode>(
-            Globals,
-            (mode == NTT_RESCALE || mode == NTT_MULTPT || mode == NTT_RESCALE2) && !second ? (uint32_t*)dat[0]
-                                                                                           : (uint32_t*)dat[blockIdx.y],
-            primeid, (uint32_t*)res[blockIdx.y],
-            (mode == NTT_RESCALE2 && !second) ? (uint32_t*)dat[1]
-                                              : (pt ? (uint32_t*)pt[blockIdx.y] : nullptr),
+            Globals, scalar_src ? (uint32_t*)dat[0] : (uint32_t*)dat[blockIdx.y], primeid, (uint32_t*)res[blockIdx.y],
+            (mode == NTT_RESCALE2 && !second)   ? (uint32_t*)dat[1]
+            : (mode == NTT_RESCALEK && !second) ? (const uint32_t*)(const void*)dat
+                                                : (pt ? (uint32_t*)pt[blockIdx.y] : nullptr),
             primeid_rescale, res2 ? (uint32_t*)res2[blockIdx.y] : nullptr,
             kskb ? (uint32_t*)kskb[blockIdx.y] : nullptr);
     }

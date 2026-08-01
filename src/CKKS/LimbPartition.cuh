@@ -175,6 +175,12 @@ class LimbPartition {
      *  until the previous copy has drained — waiting on this event is free once it has (the
      *  common case) and correct when it has not. A plain reuse would be a silent data race. */
     cudaEvent_t pin_evt = nullptr;
+    /** RR (TO-TRY §2.10a): device table of ONE group's dropped-limb pointers, in drop order —
+     *  what NTT_RESCALEK stage 1 indexes. RESCALEK_MAX slots, allocated on first use (so only
+     *  RR chains ever pay for it) and kept for the partition's lifetime; the gather that fills
+     *  it is stream-ordered, so consecutive groups reuse the same slots safely. */
+    void** rr_drop_ptr_ = nullptr;
+    void** rr_dropptr();
     /** n32 speed: fused composite DOUBLE prime drop (bit-identical to two rescale() calls,
      * ~half the kernel work). Returns false if the shape doesn't fit — caller must then fall
      * back to the sequential per-prime loop. See the definition for the eligibility rules. */

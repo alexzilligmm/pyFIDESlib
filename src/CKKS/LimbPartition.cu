@@ -14,6 +14,7 @@
 #include "CKKS/Conv.cuh"
 #include "CKKS/ElemenwiseBatchKernels.cuh"
 #include "CKKS/LimbPartition.cuh"
+#include "CKKS/Rescale.cuh"  // device SwitchModulus, for the RR k-way drop pre-pass
 #include "LimbUtils.cuh"
 #include "NTT.cuh"
 #include "Rotation.cuh"
@@ -198,6 +199,8 @@ LimbPartition::~LimbPartition() {
         cudaEventDestroy(pin_evt);
     if (pin_stage)
         cudaFreeHost(pin_stage);
+    if (rr_drop_ptr_)
+        cudaFree(rr_drop_ptr_);
     if (bufferKSKPACK)
         GPUfree(bufferKSKPACK, id, (int)bufferKSKPACKbytes, s.ptr());
     if (bufferLIMB) {
@@ -1084,6 +1087,87 @@ bool LimbPartition::rescale2() {
     return true;
 }
 
+/* RR (TO-TRY §2.10a): gather the group's dropped-limb data pointers into a contiguous table
+ * that NTT_RESCALEK stage 1 can index. Device-side on purpose: the drops can sit at BOTH
+ * window edges, so their slots are not contiguous in limbptr, and doing the gather on the host
+ * would mean either a pageable H2D (which is allowed to block) or a second pinned staging
+ * buffer whose reuse needs an event sync — and a host sync in this path is exactly the pipeline
+ * drain that was taken out of it once already. `packed_slots` carries the drop SLOTS in drop
+ * order, in the same layout rescaleK_pack uses for primeids. */
+__global__ void rr_gather_drop_ptrs(void** __restrict__ dst, void* const* __restrict__ src,
+                                    const int __grid_constant__ packed_slots) {
+    if ((int)threadIdx.x < rescaleK_count(packed_slots))
+        dst[threadIdx.x] = src[rescaleK_id(packed_slots, threadIdx.x)];
+}
+
+/* RR (TO-TRY §2.10a): turn the k dropped limbs from "what they held before the rescale" into
+ * "what each of them holds when its OWN turn comes" — the values v_0..v_{k-1} that
+ * rescaleK_combine then lifts onto each survivor.
+ *
+ * This exists because of a measurement. The recursion is O(k^2) per coefficient and depends
+ * only on the dropped set, NOT on the target prime — so running it inside the survivors' pass
+ * recomputed it once per surviving limb. nsys said exactly that: the fused stage 1 ran 4x
+ * fewer times but each launch cost 4x more (34.2 us vs 8.6 us), so the whole prize cancelled.
+ * Hoisted here it is paid ONCE, over k limbs instead of n, and the survivors' pass is left with
+ * the k-term accumulation that genuinely does depend on the target.
+ *
+ * A limb that is dropped LATER is an ordinary live limb until its turn, which is why it is
+ * updated by the earlier drops with the very same formula a survivor gets. Purely elementwise,
+ * so the coefficient order is irrelevant and this indexes linearly (the transposed pattern in
+ * the NTT kernels is a coalescing detail of the transform, not of the arithmetic). */
+__global__ void rr_prepare_drops(void** __restrict__ drops, const int __grid_constant__ packed_pids,
+                                 const uint32_t __grid_constant__ N4, const Global::Globals* Globals) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N4)
+        return;
+    const int k = rescaleK_count(packed_pids);
+    int d[RESCALEK_MAX];
+#pragma unroll
+    for (int t = 0; t < RESCALEK_MAX; ++t)
+        d[t] = rescaleK_id(packed_pids, t);
+
+    uint4 u[RESCALEK_MAX];
+#pragma unroll
+    for (int t = 0; t < RESCALEK_MAX; ++t)
+        if (t < k)
+            u[t] = ((const uint4*)drops[t])[i];
+
+#pragma unroll
+    for (int t = 0; t < RESCALEK_MAX; ++t) {
+        if (t >= k)
+            continue;
+        const uint4 v = u[t];
+#pragma unroll
+        for (int s = 1; s < RESCALEK_MAX; ++s) {
+            if (s <= t || s >= k)
+                continue;
+            const uint32_t qinv = (uint32_t)G_->q_inv[MAXP * d[t] + d[s]];
+            const uint32_t K = (uint32_t)G_->QlQlInvModqlDivqlModq[MAXP * d[t] + d[s]];
+#pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                uint32_t vs = ((const uint32_t*)&v)[e];
+                SwitchModulus(vs, d[t], d[s]);
+                uint32_t& us = ((uint32_t*)&u[s])[e];
+                us = modadd(modmult<ALGO_BARRETT>(qinv, us, d[s]), modmult<ALGO_BARRETT>(K, vs, d[s]), d[s]);
+            }
+        }
+    }
+
+#pragma unroll
+    for (int t = 1; t < RESCALEK_MAX; ++t)
+        if (t < k)
+            ((uint4*)drops[t])[i] = u[t];  // drop 0 is never modified
+}
+
+void** LimbPartition::rr_dropptr() {
+    if (rr_drop_ptr_ == nullptr) {
+        cudaSetDevice(device);
+        cudaMalloc(&rr_drop_ptr_, RESCALEK_MAX * sizeof(void*));
+        CudaCheckErrorModNoSync;
+    }
+    return rr_drop_ptr_;
+}
+
 /* RATIONAL RESCALING, FUSED (RR_PLAN milestone (c).4).
  *
  * The unfused reference (RRRescaleStep, milestone (c).1) launches, per dropped prime, one
@@ -1098,6 +1182,9 @@ bool LimbPartition::rescale2() {
  * The kernel never assumed the dropped limb was the top one — it takes it as a single dat[0]
  * pointer and the survivors as res[blockIdx.y] — so the only generalization needed is to let
  * the dropped slot sit anywhere and to launch one pass per contiguous run of survivors.
+ *
+ * Since TO-TRY §2.10a the k drops are then collapsed into ONE pass (NTT_RESCALEK) instead of
+ * one per prime, which is where the measured cost was: see the fuse_k comment below.
  *
  * ORDER MATTERS and is not free to choose: each step divides (x - [x]_d) by d, so the rounding
  * of one step feeds the next. The drops are processed in the CPU reference's order
@@ -1156,29 +1243,94 @@ void LimbPartition::rrRescale(const std::vector<int>& drop, const std::vector<in
     const int byF = (32 / M) * bdF.x * (2 * M + 1 + 1);  // +1: ALGO_SHOUP carries a shoup table
     const int byS = (32 / M) * bdS.x * (2 * M + 1 + 1);
 
-    std::vector<char> dead(n, 0);
-    for (int d : drop) {
-        const int ds = d - pbase;
-        assert(ds >= 0 && ds < n && PRIMEID(limb.at(ds)) == d && !dead[ds]);
-        SWITCH(limb.at(ds), INTT<ALGO_SHOUP>());  // dropped limb -> coefficient domain
+    // TO-TRY §2.10a — k-WAY FUSION. The per-prime loop below used to run one INTT + one full
+    // NTT_RESCALE pass over the survivors PER DROPPED PRIME, and that was the measured gap
+    // against classic: a Δ=2^40 payload step drops 3-4 primes, so it paid 3-4 wide passes where
+    // classic's composite rescale pays one. NTT_RESCALEK collapses a group of up to
+    // RESCALEK_MAX drops into ONE pass — the survivors are transformed once and every dropped
+    // limb's contribution is combined per-coefficient before the transform (rescaleK_combine,
+    // NTT.cu), which is bit-identical to the sequential composition. Ablation-bound:
+    // FIDESLIB_RR_RESCALE_K=0 restores the per-prime path for the A/B.
+    static const bool fuse_k = [] {
+        const char* e = std::getenv("FIDESLIB_RR_RESCALE_K");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
 
-        // one NTT_RESCALE pass per contiguous run of still-live limbs (at most two: the
-        // reference's order can leave the dropped slot in the MIDDLE of the live set)
+    std::vector<char> dead(n, 0);
+    for (size_t g = 0; g < drop.size();) {
+        const int gk = fuse_k ? std::min<int>(RESCALEK_MAX, (int)(drop.size() - g)) : 1;
+        int pids[RESCALEK_MAX], slots[RESCALEK_MAX];
+        for (int t = 0; t < gk; ++t) {
+            pids[t] = drop[g + t];
+            slots[t] = pids[t] - pbase;
+            assert(slots[t] >= 0 && slots[t] < n && PRIMEID(limb.at(slots[t])) == pids[t] && !dead[slots[t]]);
+        }
+
+        // (i) the group's dropped limbs -> coefficient domain, batched over each contiguous run
+        //     of slots (drop order is ascending in slot, but the two window edges leave a gap).
+        for (int t = 0; t < gk;) {
+            int e = t;
+            while (e + 1 < gk && slots[e + 1] == slots[e] + 1)
+                ++e;
+            const uint32_t num = (uint32_t)(e - t + 1);
+            const int beg = slots[t];
+            // Same staging as rescale2()'s top-pair INTT: through this partition's own aux
+            // slots, which the survivors' pass never touches at a dropped index.
+            const dim3 bdI1{(uint32_t)(1 << ((cc.logN) / 2 - 1))};
+            const dim3 bdI2{(uint32_t)(1 << ((cc.logN + 1) / 2 - 1))};
+            const int byI1 = (32 / M) * bdI1.x * (2 * M + 1 + 1);
+            const int byI2 = (32 / M) * bdI2.x * (2 * M + 1 + 1);
+            INTT_<false, algo, INTT_NONE><<<dim3{cc.N / (bdI1.x * M * 2), num}, bdI1, byI1, s.ptr()>>>(
+                getGlobals(), limbptr.data + beg, PB(beg), auxptr.data + beg);
+            INTT_<true, algo, INTT_NONE><<<dim3{cc.N / (bdI2.x * M * 2), num}, bdI2, byI2, s.ptr()>>>(
+                getGlobals(), auxptr.data + beg, PB(beg), limbptr.data + beg);
+            t = e + 1;
+        }
+
+        // (ii) one pass per contiguous run of still-live limbs. With the whole group dropped at
+        //      once the live set is the window minus BOTH edges, so this is normally one run —
+        //      but the general split is kept: a group can still leave a hole mid-window.
+        const int packed_pids = rescaleK_pack(pids, gk);
+        if (gk > 1) {
+            rr_gather_drop_ptrs<<<1, RESCALEK_MAX, 0, s.ptr()>>>(rr_dropptr(), limbptr.data,
+                                                                 rescaleK_pack(slots, gk));
+            // Hoisted out of the survivors' pass: O(gk^2) per coefficient, but over gk limbs
+            // instead of n, and it does not depend on the target prime.
+            const uint32_t n4 = cc.N / 4;
+            rr_prepare_drops<<<(n4 + 255) / 256, 256, 0, s.ptr()>>>(rr_dropptr(), packed_pids, n4, getGlobals());
+        }
+        std::vector<char> in_group(n, 0);
+        for (int t = 0; t < gk; ++t)
+            in_group[slots[t]] = 1;
+
         int beg = -1;
         for (int k = 0; k <= n; ++k) {
-            const bool live = (k < n) && !dead[k] && k != ds;
+            const bool live = (k < n) && !dead[k] && !in_group[k];
             if (live && beg < 0)
                 beg = k;
             if ((!live) && beg >= 0) {
                 const uint32_t num = (uint32_t)(k - beg);
-                NTT_<false, algo, NTT_RESCALE><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF, s.ptr()>>>(
-                    getGlobals(), limbptr.data + ds, PB(beg), auxptr.data + beg, nullptr, d, nullptr, nullptr);
-                NTT_<true, algo, NTT_RESCALE><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
-                    getGlobals(), auxptr.data + beg, PB(beg), limbptr.data + beg, nullptr, d, nullptr, nullptr);
+                if (gk > 1) {
+                    NTT_<false, algo, NTT_RESCALEK><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF, s.ptr()>>>(
+                        getGlobals(), rr_dropptr(), PB(beg), auxptr.data + beg, nullptr, packed_pids, nullptr,
+                        nullptr);
+                    NTT_<true, algo, NTT_RESCALEK><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
+                        getGlobals(), auxptr.data + beg, PB(beg), limbptr.data + beg, nullptr, packed_pids, nullptr,
+                        nullptr);
+                } else {
+                    NTT_<false, algo, NTT_RESCALE><<<dim3{cc.N / (bdF.x * M * 2), num}, bdF, byF, s.ptr()>>>(
+                        getGlobals(), limbptr.data + slots[0], PB(beg), auxptr.data + beg, nullptr, pids[0], nullptr,
+                        nullptr);
+                    NTT_<true, algo, NTT_RESCALE><<<dim3{cc.N / (bdS.x * M * 2), num}, bdS, byS, s.ptr()>>>(
+                        getGlobals(), auxptr.data + beg, PB(beg), limbptr.data + beg, nullptr, pids[0], nullptr,
+                        nullptr);
+                }
                 beg = -1;
             }
         }
-        dead[ds] = 1;
+        for (int t = 0; t < gk; ++t)
+            dead[slots[t]] = 1;
+        g += gk;
     }
 
     // --- 4. drop the dead slots and re-base ---

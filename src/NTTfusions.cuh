@@ -416,6 +416,33 @@ __device__ __forceinline__ void rescale2_fusion(char* buffer, const int logBD, c
     }
 }
 
+// RR (NTT_RESCALEK stage 2, TO-TRY §2.10a): the k-way generalization of rescale2_fusion. The
+// shared value already carries the full K-weighted contribution of ALL k dropped limbs
+// (rescaleK_combine built it at stage-1 load), so the only thing left is the store-side weight
+// on the survivor's own coefficient: prod_t qinv[d_t][j], the k divisions it has to undergo.
+// A adds with weight 1. Exactly the composition of k rescale_fusion applications.
+template <typename T, ALGO algo_, int M>
+__device__ __forceinline__ void rescaleK_fusion(char* buffer, const int logBD, const int j, const int primeid,
+                                                const int packed, const T* res, const Global::Globals* Globals) {
+    constexpr ALGO algo = algo_ == ALGO_SHOUP ? ALGO_BARRETT : algo_;
+
+    const int k = rescaleK_count(packed);
+    T c0 = 1;
+#pragma unroll
+    for (int t = 0; t < RESCALEK_MAX; ++t)
+        if (t < k)
+            c0 = modmult<algo>(c0, (T)G_->q_inv[MAXP * rescaleK_id(packed, t) + primeid], primeid);
+
+    for (int i = 0; i < M; i += 1) {
+        T* A = (T*)(buffer + (i << (logBD)));
+        const int jS = swz_pos<T>(i, j);
+
+        T in[2] = {res[OFFSET_T(i)], res[OFFSET_T(i) | 1]};
+        A[jS] = modadd(modmult<algo>(c0, in[0], primeid), A[jS], primeid);
+        A[jS ^ 1] = modadd(modmult<algo>(c0, in[1], primeid), A[jS ^ 1], primeid);
+    }
+}
+
 template <typename T, ALGO algo, int M>
 __device__ __forceinline__ void moddown_fusion(char* buffer, const int logBD, const int j, const int primeid,
                                                const T* res) {
