@@ -31,6 +31,9 @@ class Parameters {
     // otherwise serve the wrong one.
     std::vector<uint32_t> rrWindows;
     int rrNumSmalls = 0;
+    /** RR scaling factors by OpenFHE level (rescale count from the top) — see
+     *  RawParams::rrScalingFactorReal. Read via ContextData::sfAtLevel(r). */
+    std::vector<double> rrScalingFactorReal;
     std::vector<PrimeRecord> primes;
     std::vector<PrimeRecord> Sprimes;
     std::vector<double> ModReduceFactor;

@@ -306,6 +306,17 @@ FIDESlib::CKKS::RawParams FIDESlib::CKKS::GetRawParams(lbcrypto::CryptoContext<l
         result.ScalingFactorReal[result.L - i] = cryptoParams->GetScalingFactorReal(i);
     }
 
+    // RR (c).4c step 1: the RR table is indexed by rescale count from the top and is only
+    // nLvl entries long (nLvl != L+1 — the chain has 27 levels over 48 limbs), so it cannot be
+    // folded into the limb-keyed import above. Past nLvl the patch stores the composite-style
+    // sentinel 1.0, which is exactly what sfAtLevel must refuse to hand out.
+    if (cryptoParams->IsRRChain()) {
+        const size_t nLvl = cryptoParams->GetRRWindows().size() / 2;
+        result.rrScalingFactorReal.resize(nLvl);
+        for (size_t l = 0; l < nLvl; ++l)
+            result.rrScalingFactorReal[l] = cryptoParams->GetScalingFactorReal(l);
+    }
+
     result.ScalingFactorRealBig.resize(result.L + 1);
     for (size_t i = 0; i < result.ScalingFactorRealBig.size(); ++i) {
         result.ScalingFactorRealBig[result.L - i] = cryptoParams->GetScalingFactorRealBig(i);

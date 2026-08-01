@@ -286,6 +286,18 @@ class ContextData {
      *  indices, so the grid condition is (L - limbTop) % d == 0. Reading off-grid is
      *  always a bug — this accessor makes it loud instead of a silent scale of 1. */
     double sfAtLimb(int limbTop) const;
+    /** RATIONAL RESCALING scaling factor at RR level `r` (RR_PLAN (c).4c step 1).
+     *
+     *  Separate from sfAtLimb for two reasons, both of which would otherwise be silent:
+     *   - sfAtLimb is keyed by LIMB COUNT, and on an RR chain limb count does not identify a
+     *     level (levels drop a variable number of limbs and add some back), so its
+     *     composite-grid guard would either abort or hand back a neighbouring level's factor;
+     *   - the DIRECTION is opposite. FIDESlib's RR level is the WINDOW index — 0 is the 3-limb
+     *     bottom, rrNumLevels()-1 the full top, and rrRescale DECREMENTS it. OpenFHE's level is
+     *     the rescale count FROM the top, which is how the RR patch indexes
+     *     m_scalingFactorsReal. So r maps to rrNumLevels()-1-r, and getting that backwards
+     *     yields a plausible-looking factor from the wrong end of the chain. */
+    double sfAtLevel(int r) const;
     /** Product of the compositeDegree ModReduceFactor entries dropped when rescaling a
      *  ciphertext whose top limb is limbTop (single factor on classic chains). */
     double modReduceProduct(int limbTop) const;

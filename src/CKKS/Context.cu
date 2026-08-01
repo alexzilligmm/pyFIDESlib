@@ -923,6 +923,44 @@ double ContextData::sfAtLimb(const int limbTop) const {
     return param.ScalingFactorReal[limbTop];
 }
 
+double ContextData::sfAtLevel(const int r) const {
+    if (!isRR()) {
+        std::fprintf(stderr, "FIDESlib: sfAtLevel(%d) called on a classic chain — use sfAtLimb\n", r);
+        std::abort();
+    }
+    const int nLvl = rrNumLevels();
+    if (r < 0 || r >= nLvl) {
+        std::fprintf(stderr, "FIDESlib: sfAtLevel(%d) out of range [0, %d)\n", r, nLvl);
+        std::abort();
+    }
+    // FIDESlib RR level (window index, 0 = bottom) -> OpenFHE level (rescale count from the top).
+    // FIDESLIB_RR_SF_NOFLIP=1 drops the inversion. It exists as the NEGATIVE CONTROL for
+    // test_rr_sf: without it, "the gate passes" says nothing, because a flipped index still
+    // returns a perfectly plausible scaling factor — just from the other end of the chain.
+    // With it, the payload region reads ~2^55 and the bts region ~2^40 and the gate fails.
+    static const bool noflip = [] {
+        const char* e = std::getenv("FIDESLIB_RR_SF_NOFLIP");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    const int l = noflip ? r : nLvl - 1 - r;
+    if ((int)param.rrScalingFactorReal.size() != nLvl) {
+        std::fprintf(stderr,
+                     "FIDESlib: rrScalingFactorReal has %zu entries, expected %d — the RR table was "
+                     "not imported (RawParams::rrScalingFactorReal)\n",
+                     param.rrScalingFactorReal.size(), nLvl);
+        std::abort();
+    }
+    const double sf = param.rrScalingFactorReal[l];
+    // The patch stores the composite-style sentinel 1.0 past the level count; a 1.0 inside the
+    // range means the table was built for a different chain, and using it would scale by 1.
+    if (!(sf > 1.0)) {
+        std::fprintf(stderr, "FIDESlib: sfAtLevel(%d) -> openfhe level %d holds the sentinel %g, not a scaling factor\n",
+                     r, l, sf);
+        std::abort();
+    }
+    return sf;
+}
+
 double ContextData::modReduceProduct(const int limbTop) const {
     double factor = 1.0;
     for (int j = 0; j < param.compositeDegree; ++j)

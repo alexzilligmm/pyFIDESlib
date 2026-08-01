@@ -32,6 +32,7 @@ Parameters Parameters::adaptTo(RawParams& raw) const {
                    .compositeDegree = raw.compositeDegree,
                    .rrWindows = raw.rrWindows,
                    .rrNumSmalls = raw.rrNumSmalls,
+                   .rrScalingFactorReal = raw.rrScalingFactorReal,
                    .primes = std::move(new_primes),
                    .Sprimes = std::move(new_SPECIALprimes),
                    .ModReduceFactor = raw.ModReduceFactor,

@@ -64,6 +64,15 @@ struct RawParams {
     // then behaves byte-identically to before). rrNumSmalls = layout index of q0.
     std::vector<uint32_t> rrWindows;
     int rrNumSmalls = 0;
+    /** RATIONAL RESCALING scaling factors (RR_PLAN (c).4c step 1), indexed by OpenFHE's level —
+     *  the RESCALE COUNT FROM THE TOP, which is how the RR patch builds m_scalingFactorsReal
+     *  (with the region-boundary reset). It is a SEPARATE table, not a re-index of
+     *  ScalingFactorReal, because that one is keyed by limb count and on an RR chain limb count
+     *  does not identify a level: levels drop a variable number of limbs and add some back.
+     *  Read it through ContextData::sfAtLevel(r), which does the r <-> level inversion —
+     *  FIDESlib's RR level is the WINDOW index (0 = the 3-limb bottom, nLvl-1 = the full top),
+     *  the opposite direction from OpenFHE's. Empty on classic chains. */
+    std::vector<double> rrScalingFactorReal;
     lbcrypto::ScalingTechnique scalingTechnique;
     std::vector<uint64_t> moduli;
     std::vector<uint64_t> root_of_unity;
