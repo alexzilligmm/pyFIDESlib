@@ -14,6 +14,7 @@
 #include <cassert>
 #include <iostream>
 #include <list>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 
@@ -138,6 +139,26 @@ class ContextData {
      *  keyswitch is in flight at a time and its digits are consumed by the dot immediately. */
     std::unique_ptr<RNSPoly> rr_ks_workspace;
     RNSPoly& getRRKeySwitchWorkspace();
+
+    /** RR (TO-TRY §2.10f): LEVEL-KEYED SCRATCH. The classic path reuses one set of temporaries
+     *  down a whole circuit, because a classic poly can simply be re-levelled. An RR poly
+     *  cannot: its storage IS its window, and every level's window differs in SIZE and in BASE
+     *  (`pbase`) — `dropToLevel` throws downward on RR by design, and `generateLimbToLevel`
+     *  asserts a live window is never regrown. So a circuit that walks levels was constructing
+     *  fresh scratch at every one of them, which MEASURED 1.07 ms of a 5.48 ms 10-level walk
+     *  (0.107 ms/level, ~19.5 %) — host time the classic comparator does not carry at all,
+     *  since `test_classic_walk` builds its ciphertexts outside its timer.
+     *
+     *  This is the borrow: one poly per (level, slot), built on first use and held for the
+     *  context's lifetime, exactly like rr_ks_workspace above.
+     *
+     *  CONTRACT: pooled scratch must NOT be rrRescale'd. Its level is its key, so a borrower
+     *  that moves it down a level silently poisons the slot for every later borrower — the
+     *  accessor therefore CHECKS the level on every hand-out and throws rather than hand back
+     *  a poly at the wrong window. Anything that gets rescaled (the running ciphertext, the
+     *  c0/c1 of an evalmult) must stay privately owned. */
+    std::map<std::pair<int, int>, std::unique_ptr<RNSPoly>> rr_scratch;
+    RNSPoly& getRRScratch(int level, int slot);
 
     //      std::array<Stream, 8> blockingStream;
     //      std::vector<std::vector<Stream>> asyncStream;

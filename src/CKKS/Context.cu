@@ -433,6 +433,21 @@ RNSPoly& ContextData::getRRKeySwitchWorkspace() {
     return *rr_ks_workspace;
 }
 
+RNSPoly& ContextData::getRRScratch(const int level, const int slot) {
+    assert(isRR() && "getRRScratch is only meaningful on an RR chain");
+    assert(level >= 0 && level < rrNumLevels());
+    auto& p = rr_scratch[{level, slot}];
+    if (p == nullptr)
+        p = std::make_unique<RNSPoly>(*this, level, false);
+    else if (p->getLevel() != level)
+        // Not defensive noise: an rrRescale'd slot comes back at a DIFFERENT window — different
+        // size and different pbase — and every later borrower would silently compute on it.
+        throw std::runtime_error("RR scratch slot " + std::to_string(slot) + " was left at level " +
+                                 std::to_string(p->getLevel()) + ", not " + std::to_string(level) +
+                                 " — pooled scratch must not be rrRescale'd (its level IS its key)");
+    return *p;
+}
+
 RNSPoly& ContextData::getKeySwitchAux() {
     auto& p = key_switch_aux[ks_aux_slot];
     if (p == nullptr)
@@ -1079,6 +1094,7 @@ std::vector<std::vector<LimbRecord>> ContextData::generateSplitSpecialMeta(std::
 ContextData::~ContextData() {
     CudaCheckErrorMod;
     rr_ks_workspace.reset(nullptr);
+    rr_scratch.clear();
     if (rr_digits_dev)
         cudaFree(rr_digits_dev);
     if (rr_digits_host)

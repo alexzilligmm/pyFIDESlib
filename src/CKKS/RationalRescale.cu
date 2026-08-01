@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -449,6 +450,43 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
 }
 
 namespace {
+
+/* TO-TRY §2.10f: borrow level-keyed scratch from the context, or own it privately.
+ *
+ * The ablation is the point. `FIDESLIB_RR_SCRATCH_POOL=0` puts every borrower back to
+ * constructing a fresh poly at every level — the shape the walk had when the per-level
+ * construction measured 0.107 ms/level — so the pool's prize is an env flip, not a rebuild.
+ *
+ * Only scratch that KEEPS its level may be pooled; see ContextData::rr_scratch. */
+bool rrScratchPooled() {
+    static const bool pooled = [] {
+        const char* e = std::getenv("FIDESLIB_RR_SCRATCH_POOL");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return pooled;
+}
+
+class RRScratch {
+    static constexpr int NSLOT = 8;
+    ContextData& cc;
+    const bool pooled;
+    // FIXED storage, deliberately: callers hold REFERENCES across several get() calls, and a
+    // std::vector that reallocates would move the polys out from under them (the pooled arm
+    // is safe by construction — std::map references are stable). This bit at first build.
+    std::array<std::optional<RNSPoly>, NSLOT> own;
+
+   public:
+    explicit RRScratch(ContextData& c) : cc(c), pooled(rrScratchPooled()) {}
+    RNSPoly& get(const int level, const int slot) {
+        assert(slot >= 0 && slot < NSLOT);
+        if (pooled)
+            return cc.getRRScratch(level, slot);
+        own[slot].reset();             // destroy-then-construct, exactly the old scoped-local
+        own[slot].emplace(cc, level);  // lifetime, so the OFF arm is the honest "before"
+        return *own[slot];
+    }
+};
+
 void rrLoadWindow(ContextData& cc, RNSPoly& p, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level) {
     const int lo = cc.windowLo(level);
     std::vector<std::vector<uint64_t>> data(coeffLimbs.size());
@@ -486,8 +524,16 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
         in[k]->NTT(1, false);
     }
 
-    // the textbook degree-2 product — the same three lines RRChain::EvalMultRelin computes
-    RNSPoly c0(cc, level), c1(cc, level), c2(cc, level), tmp(cc, level);
+    // the textbook degree-2 product — the same three lines RRChain::EvalMultRelin computes.
+    // c0/c1 stay privately owned: the rescale arm moves them down a level, which is exactly
+    // what pooled scratch may not do. tmp/c2/d0/d1 keep their level and are borrowed — which
+    // is also what makes THIS test the pool's correctness gate: it is bit-exact against the
+    // CPU reference over 7 windows x both rescale arms, and every window reuses the same
+    // slots, so stale state from a previous borrow would show up here as a mismatch.
+    RRScratch scratch(cc);
+    RNSPoly c0(cc, level), c1(cc, level);
+    RNSPoly& c2 = scratch.get(level, 2);
+    RNSPoly& tmp = scratch.get(level, 3);
     c0.multElement(A0, B0);
     c1.multElement(A0, B1);
     tmp.multElement(A1, B0);
@@ -495,7 +541,8 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
     c2.multElement(A1, B1);
 
     // relinearize: the degree-2 term is keyswitched and folded back in
-    RNSPoly d0(cc, level), d1(cc, level);
+    RNSPoly& d0 = scratch.get(level, 0);
+    RNSPoly& d1 = scratch.get(level, 1);
     RRKeySwitchCore(c2, cc.GetEvalKey(keyid), d0, d1);
     c0.add(d0);
     c1.add(d1);
@@ -576,7 +623,13 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
     assert(cc.isRR());
     cudaSetDevice(cc.GPUid[0]);
     std::vector<double> samples;
+    // TO-TRY §2.10f probe: HOST time spent constructing the four per-level scratch polys,
+    // which is the slice the walk carries and test_classic_walk (ciphertexts built outside
+    // its timer) does not. Reported as a median alongside the walk.
+    std::vector<double> ctor_samples;
+    RRScratch scratch(cc);
     for (int it = -1; it < iters; ++it) {  // it == -1 warms
+        double ctor_ms = 0;
         // RNSPoly has neither copy- nor move-ASSIGNMENT (reference members), so the running
         // ciphertext lives in an optional and each level move-CONSTRUCTS into it.
         std::optional<RNSPoly> c;
@@ -589,7 +642,14 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
         const auto t0 = std::chrono::steady_clock::now();
         for (int r = top_level; r >= 1; --r) {
             // one circuit level: square, relinearize, rescale
-            RNSPoly sq(cc, r), d0(cc, r), d1(cc, r), c2(cc, r);
+            const auto tc0 = std::chrono::steady_clock::now();
+            // sq is the ONE poly that cannot be pooled: rrRescale moves it to r-1 and it
+            // BECOMES the next ciphertext, so its level is not stable and it is not scratch.
+            RNSPoly sq(cc, r);
+            RNSPoly& d0 = scratch.get(r, 0);
+            RNSPoly& d1 = scratch.get(r, 1);
+            RNSPoly& c2 = scratch.get(r, 2);
+            ctor_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count();
             sq.multElement(*c, *c);
             c2.multElement(*c, *c);
             c2.SetModUp(false);
@@ -599,8 +659,16 @@ double RRPayloadWalkHost(ContextData& cc, const std::vector<std::vector<uint32_t
             c.emplace(std::move(sq));
         }
         cudaDeviceSynchronize();
-        if (it >= 0)
+        if (it >= 0) {
             samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            ctor_samples.push_back(ctor_ms);
+        }
+    }
+    if (std::getenv("RR_WALK_CTOR_PROBE")) {
+        std::sort(ctor_samples.begin(), ctor_samples.end());
+        fprintf(stderr, "[rr_walk_ctor] per-level scratch construction (host, median over the run): %7.3f ms"
+                        "  -> %6.3f ms/level\n",
+                ctor_samples[ctor_samples.size() / 2], ctor_samples[ctor_samples.size() / 2] / top_level);
     }
     std::sort(samples.begin(), samples.end());
     return samples[samples.size() / 2];
