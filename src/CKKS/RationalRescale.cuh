@@ -65,7 +65,8 @@ class KeySwitchingKey;
  * already sit at the same RR level and receive the (b, a) contributions ModDown'ed back to
  * the window basis — i.e. exactly RRChain::KeySwitchCore's return value.
  */
-void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1);
+void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
+                     double* phase_ms = nullptr);  //!< optional [modup, dot, moddown] breakdown
 
 /**
  * Milestone (c).2 harness: the same rescale step driven through the WINDOWED poly
@@ -99,7 +100,17 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
  * TU-boundary rule as the other harnesses here.
  */
 std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RRKeySwitchHost(
-    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level, const std::string& keyid);
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level, const std::string& keyid,
+    double* phase_ms = nullptr);
+
+/**
+ * Milestone (c).4 pricing harness: `iters` keyswitches at the SAME level with the polys and
+ * their decomp/digit storage allocated ONCE, so the reported [modup, dot, moddown] means are
+ * steady-state. The per-call harness over-attributes to modup — a fresh RNSPoly allocates the
+ * whole DECOMP/DIGIT working set on its first modup, which a real pipeline pays once.
+ */
+void RRKeySwitchBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, int level,
+                          const std::string& keyid, int iters, double* phase_ms);
 
 // out-of-line field accessors for gate-side sanity checks
 uint64_t RRPrimeAt(ContextData& cc, int primeid);

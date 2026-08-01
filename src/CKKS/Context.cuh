@@ -112,6 +112,18 @@ class ContextData {
     bool canP2P = false;
     std::list<uint64_t*> free_limb;
 
+    /** RR keyswitch (RR_PLAN (c).4): the dnum*6 digit pointer table, allocated ONCE per
+     *  context instead of cudaMallocAsync/FreeAsync per keyswitch, with PINNED host staging so
+     *  the upload needs no stream sync. Measured: those two per-call costs were a fifth of the
+     *  whole keyswitch at the payload levels, where the window is small and everything else
+     *  scales down with it. Freed in ~ContextData.
+     *
+     *  NOT thread-safe: one table per context, so two threads keyswitching on the same context
+     *  would race on it. That is why the classic paths allocate per call. RR is single-threaded
+     *  today (RRKeySwitchCore asserts single-GPU); give this a slot pool before that changes. */
+    void*** rr_digits_dev = nullptr;
+    void** rr_digits_host = nullptr;
+
     //      std::array<Stream, 8> blockingStream;
     //      std::vector<std::vector<Stream>> asyncStream;
     RNSPoly& getKeySwitchAux();

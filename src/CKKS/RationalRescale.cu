@@ -227,7 +227,20 @@ const uint32_t* rrRegenSeed(const LimbPartition& ka, const int block_x, int* sha
 }
 }  // namespace
 
-void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1) {
+void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
+                     double* phase_ms) {
+    // phase_ms, when given, is [modup, dot, moddown] in ms — each fenced by a device sync.
+    // It exists to PRICE the remaining fusion before building it: the *ModupDotKSK path this
+    // would fold into is also the classic shipping path's, so the prize has to justify the risk.
+    auto tick = [&](int i, const std::chrono::steady_clock::time_point& t0) {
+        if (!phase_ms) return std::chrono::steady_clock::now();
+        cudaDeviceSynchronize();
+        const auto t1 = std::chrono::steady_clock::now();
+        phase_ms[i] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        return t1;
+    };
+    if (phase_ms) cudaDeviceSynchronize();
+    auto tmark = std::chrono::steady_clock::now();
     ContextData& cc = *key.cc;  // Context is a shared_ptr<ContextData>
     assert(cc.isRR() && "RRKeySwitchCore is only defined on an RR chain");
     assert(cc.GPUid.size() == 1 && "RR keyswitch is single-GPU");
@@ -245,6 +258,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     c.generateDecompAndDigit(false);
     RNSPoly& aux = cc.getKeySwitchAux2();
     src.modup(aux.GPU.at(0));
+
+    tmark = tick(0, tmark);
 
     out0.generateSpecialLimbs(false, false);
     out1.generateSpecialLimbs(false, false);
@@ -280,9 +295,13 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         h_digits[d + 4 * cc.dnum] = ka.limbptr.data;    // key limbs: full-chain, primeid-indexed
         h_digits[d + 5 * cc.dnum] = kb.limbptr.data;
     }
-    void*** dDigits = nullptr;
-    cudaMallocAsync(&dDigits, cc.dnum * 6 * sizeof(void**), s.ptr());
-    cudaMemcpyAsync(dDigits, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
+    if (cc.rr_digits_dev == nullptr) {
+        cudaMalloc(&cc.rr_digits_dev, cc.dnum * 6 * sizeof(void**));
+        cudaMallocHost(&cc.rr_digits_host, cc.dnum * 6 * sizeof(void**));
+    }
+    std::copy(h_digits.begin(), h_digits.end(), (void***)cc.rr_digits_host);
+    void*** dDigits = cc.rr_digits_dev;
+    cudaMemcpyAsync(dDigits, cc.rr_digits_host, cc.dnum * 6 * sizeof(void**), cudaMemcpyHostToDevice, s.ptr());
     // Argument order: the launcher's out1 collects the `a`-key product and out2 the `b`-key
     // product, whereas RRChain::KeySwitchCore returns (b-part, a-part) — so out1/out0 here.
     // Packed keys and in-kernel regen both work at RR levels (milestone (c).4a): packing is
@@ -296,20 +315,20 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
                         o1.SPECIALlimbptr.data, o0.limbptr.data, o0.SPECIALlimbptr.data, dDigits, nDigits, id,
                         nSpecial, 0, ka.key_pack_bits, regenSeed, (uint32_t)cc.N >> 4, regenShape,
                         /*qbase=*/src.pbase, /*dbase=*/dBase);
-    cudaFreeAsync(dDigits, s.ptr());
-    cudaStreamSynchronize(s.ptr());  // h_digits is host-staged; unfused path, correctness first
-    CudaCheckErrorModNoSync;
+    CudaCheckErrorModNoSync;  // pinned staging + a context-lifetime table: no sync, no per-call malloc
 
     o0.getS().wait(s);
     o1.getS().wait(s);
     ka.getS().wait(s);
     kb.getS().wait(s);
+    tmark = tick(1, tmark);
 
     // --- moddown back to the window basis ---
     out0.SetModUp(true);
     out1.SetModUp(true);
     out0.moddown(true, true, 0);
     out1.moddown(true, true, 1);
+    tick(2, tmark);
 }
 
 //==================================================================================
@@ -431,7 +450,8 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
 }
 
 std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>> RRKeySwitchHost(
-    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level, const std::string& keyid) {
+    ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level, const std::string& keyid,
+    double* phase_ms) {
     assert(cc.isRR());
     assert((int)coeffLimbs.size() == cc.windowSize(level));
     cudaSetDevice(cc.GPUid[0]);
@@ -441,7 +461,7 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
     c.NTT(1, false);
 
     RNSPoly out0(cc, level), out1(cc, level);
-    RRKeySwitchCore(c, cc.GetEvalKey(keyid), out0, out1);
+    RRKeySwitchCore(c, cc.GetEvalKey(keyid), out0, out1, phase_ms);
 
     out0.INTT(1, false);
     out1.INTT(1, false);
@@ -449,5 +469,31 @@ std::pair<std::vector<std::vector<uint32_t>>, std::vector<std::vector<uint32_t>>
     out1.sync();
     return {rrStoreWindow(out0), rrStoreWindow(out1)};
 }
+
+void RRKeySwitchBenchHost(ContextData& cc, const std::vector<std::vector<uint32_t>>& coeffLimbs, const int level,
+                          const std::string& keyid, const int iters, double* phase_ms) {
+    assert(cc.isRR());
+    cudaSetDevice(cc.GPUid[0]);
+    RNSPoly c(cc, level), out0(cc, level), out1(cc, level);
+    // MEDIAN, not mean: this box is shared, and a single contention spike (measured: one L5
+    // dot reading of 0.604 ms among 0.169/0.178) moves a 5-sample mean by 3x. Same lesson the
+    // wall A/B harness records — high iteration count PLUS a robust statistic.
+    std::vector<std::vector<double>> samples(3);
+    for (int it = -1; it < iters; ++it) {  // it == -1 is the warm/allocating pass
+        rrLoadWindow(cc, c, coeffLimbs, level);
+        c.NTT(1, false);
+        c.SetModUp(false);
+        double ph[3] = {0, 0, 0};
+        RRKeySwitchCore(c, cc.GetEvalKey(keyid), out0, out1, ph);
+        if (it >= 0)
+            for (int i = 0; i < 3; ++i)
+                samples[i].push_back(ph[i]);
+    }
+    for (int i = 0; i < 3; ++i) {
+        std::sort(samples[i].begin(), samples[i].end());
+        phase_ms[i] = samples[i][samples[i].size() / 2];
+    }
+}
+
 
 }  // namespace FIDESlib::CKKS

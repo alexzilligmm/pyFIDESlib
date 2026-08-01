@@ -1070,6 +1070,10 @@ std::vector<std::vector<LimbRecord>> ContextData::generateSplitSpecialMeta(std::
 
 ContextData::~ContextData() {
     CudaCheckErrorMod;
+    if (rr_digits_dev)
+        cudaFree(rr_digits_dev);
+    if (rr_digits_host)
+        cudaFreeHost(rr_digits_host);
     for (auto& i : key_switch_aux) {
         i.reset(nullptr);
     }
