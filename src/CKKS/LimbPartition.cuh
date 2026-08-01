@@ -166,6 +166,15 @@ class LimbPartition {
      *  its window base. Used by the RR keyswitch workspace so it supplies digit storage
      *  without the ciphertext's data ever being copied. Device-to-device, `n` pointers. */
     void adoptLimbPtrsFrom(const LimbPartition& src, int n);
+    /** PINNED staging for refreshLimbPtrs, allocated lazily and kept for the partition's
+     *  lifetime. Exists so the pointer-table upload does not need a stream sync to keep its
+     *  source alive — a stack vector forced one, twice per RR rescale. */
+    void** pin_stage = nullptr;
+    /** Completion of the last pin_stage upload. The buffer is REUSED across calls and a
+     *  pinned cudaMemcpyAsync is genuinely asynchronous, so the host must not overwrite it
+     *  until the previous copy has drained — waiting on this event is free once it has (the
+     *  common case) and correct when it has not. A plain reuse would be a silent data race. */
+    cudaEvent_t pin_evt = nullptr;
     /** n32 speed: fused composite DOUBLE prime drop (bit-identical to two rescale() calls,
      * ~half the kernel work). Returns false if the shape doesn't fit — caller must then fall
      * back to the sequential per-prime loop. See the definition for the eligibility rules. */

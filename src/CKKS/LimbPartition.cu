@@ -194,6 +194,10 @@ LimbPartition::~LimbPartition() {
     if (bufferSPECIAL)
         GPUfree(bufferSPECIAL, id, 0, s.ptr());
     //cudaFreeAsync(bufferSPECIAL, s.ptr());
+    if (pin_evt)
+        cudaEventDestroy(pin_evt);
+    if (pin_stage)
+        cudaFreeHost(pin_stage);
     if (bufferKSKPACK)
         GPUfree(bufferKSKPACK, id, (int)bufferKSKPACKbytes, s.ptr());
     if (bufferLIMB) {

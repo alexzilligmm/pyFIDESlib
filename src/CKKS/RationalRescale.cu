@@ -158,19 +158,27 @@ void LimbPartition::refreshLimbPtrs() {
     const size_t n = limb.size();
     if (n == 0)
         return;
-    std::vector<void*> cpu_ptr(n, nullptr), cpu_auxptr(n, nullptr);
+    // PINNED, partition-lifetime staging: the upload's source outlives the call, so no stream
+    // sync is needed. It used to be a stack vector, which forced a cudaStreamSynchronize here
+    // — twice per RR rescale, draining the pipeline each time.
+    if (pin_stage == nullptr) {
+        cudaMallocHost(&pin_stage, 2 * MAXP * sizeof(void*));
+        cudaEventCreateWithFlags(&pin_evt, cudaEventDisableTiming);
+    } else {
+        cudaEventSynchronize(pin_evt);  // the previous upload must have drained before reuse
+    }
+    void** cpu_ptr    = pin_stage;
+    void** cpu_auxptr = pin_stage + MAXP;
     for (size_t k = 0; k < n; ++k) {
         assert(limb[k].index() == U32 && "RR chains are all-U32 (< 2^30) by design");
         auto& l       = std::get<U32>(limb[k]);
         cpu_ptr[k]    = &l.v.data[0];
         cpu_auxptr[k] = &l.aux.data[0];
     }
-    assert((int)n <= limbptr.size);
-    cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    cudaMemcpyAsync(auxptr.data, cpu_auxptr.data(), n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    // The host staging vectors die at the end of this scope, so the uploads must have
-    // consumed them by then (they are pageable, but do not lean on the driver's staging).
-    cudaStreamSynchronize(s.ptr());
+    assert((int)n <= limbptr.size && (int)n <= MAXP);
+    cudaMemcpyAsync(limbptr.data, cpu_ptr, n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(auxptr.data, cpu_auxptr, n * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaEventRecord(pin_evt, s.ptr());
     CudaCheckErrorModNoSync;
 }
 
