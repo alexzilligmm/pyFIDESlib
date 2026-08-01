@@ -802,6 +802,19 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #else
 #define FIDESLIB_STREAM_LD(p) (*(p))
 #endif
+// Evict-first STORES on the hoisted4 automorphism outputs (2026-08-02, post-V9 ncu):
+// hoisted4's L2 hit rate is 42% although the digit streams (~80 MB, re-read n× per launch)
+// FIT the 128 MB L2 — the kernel's own write-allocated output stores (~30 MB/rotation)
+// are the suspected evictor. §1.14's "stores stay normal" rule inverts here: the outputs
+// are read ONCE later (LT dot), the digits n×. __stcs marks the stores evict-first.
+#ifndef FIDESLIB_HOISTED_STCS
+#define FIDESLIB_HOISTED_STCS 0
+#endif
+#if FIDESLIB_HOISTED_STCS
+#define FIDESLIB_HOISTED_ST(p, v) __stcs((p), (v))
+#else
+#define FIDESLIB_HOISTED_ST(p, v) (*(p) = (v))
+#endif
 // V1 (TO-TRY §2.0, 2026-08-01): LAZY u64 ACCUMULATION in the coop4 dot kernels. The inner
 // loop was modadd(modmult(d, kska)) per digit — ~6 dependent Barrett ops per accumulate,
 // twice per word — but d·(ks mod p) ≡ d·ks (mod p), so accumulate the RAW product
@@ -1807,11 +1820,11 @@ __global__ void
             const uint32_t r2 = aux2[w];
 #endif
             if (primeid < C_.L) {
-                ((uint32_t*)out1[j][pos_dec])[out_idx] = r1;
-                ((uint32_t*)out2[j][pos_dec])[out_idx] = r2;
+                FIDESLIB_HOISTED_ST((uint32_t*)out1[j][pos_dec] + out_idx, r1);
+                FIDESLIB_HOISTED_ST((uint32_t*)out2[j][pos_dec] + out_idx, r2);
             } else {
-                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = r1;
-                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = r2;
+                FIDESLIB_HOISTED_ST((uint32_t*)sout1[j][primeid - C_.L] + out_idx, r1);
+                FIDESLIB_HOISTED_ST((uint32_t*)sout2[j][primeid - C_.L] + out_idx, r2);
             }
         }
     }
@@ -2016,11 +2029,11 @@ __global__ void
             const uint32_t r2 = aux2[w];
 #endif
             if (primeid < C_.L) {
-                ((uint32_t*)out1[j][pos_dec])[out_idx] = r1;
-                ((uint32_t*)out2[j][pos_dec])[out_idx] = r2;
+                FIDESLIB_HOISTED_ST((uint32_t*)out1[j][pos_dec] + out_idx, r1);
+                FIDESLIB_HOISTED_ST((uint32_t*)out2[j][pos_dec] + out_idx, r2);
             } else {
-                ((uint32_t*)sout1[j][primeid - C_.L])[out_idx] = r1;
-                ((uint32_t*)sout2[j][primeid - C_.L])[out_idx] = r2;
+                FIDESLIB_HOISTED_ST((uint32_t*)sout1[j][primeid - C_.L] + out_idx, r1);
+                FIDESLIB_HOISTED_ST((uint32_t*)sout2[j][primeid - C_.L] + out_idx, r2);
             }
         }
     }
