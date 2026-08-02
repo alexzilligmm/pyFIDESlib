@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/17] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/18] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/17] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/18] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/17] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/18] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/17] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/18] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/17] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/18] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/17] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/18] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/17] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/18] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/17] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/18] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/17] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/18] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/17] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/18] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/17] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/18] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/17] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/18] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/17] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/18] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3324,7 +3324,7 @@ index c1bef6bb..21edbabf 100644
 From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:29:26 +0200
-Subject: [PATCH 14/17] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+Subject: [PATCH 14/18] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
  =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3407,7 +3407,7 @@ index 21edbabf..4f197b32 100644
 From 90b517b0fe93f3c48692943887714400b54e45c6 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:44:09 +0200
-Subject: [PATCH 15/17] RR: the signed correction, and the adjust now preserves
+Subject: [PATCH 15/18] RR: the signed correction, and the adjust now preserves
  the message exactly
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3669,7 +3669,7 @@ index 94239f00..9392c35d 100644
 From 3d7da05eaf17a481d230a14bb5d8d94dca8b9cb7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:09:15 +0200
-Subject: [PATCH 16/17] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
+Subject: [PATCH 16/18] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
  =?UTF-8?q?t=20is=2064-bit=20on=20this=20build=20=E2=80=94=20the=20message?=
  =?UTF-8?q?=20flows=20again?=
 MIME-Version: 1.0
@@ -3792,7 +3792,7 @@ index 85b1cc90..ee1916d4 100644
 From 5d149352e1372ae41dcab7e06133eac260affeed Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:22:32 +0200
-Subject: [PATCH 17/17] RR StC: realize the boundary-gated rescale; output now
+Subject: [PATCH 17/18] RR StC: realize the boundary-gated rescale; output now
  lands on the payload top
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3886,6 +3886,69 @@ index ee1916d4..d8375f1b 100644
      }
      else {
          uint64_t corFactor = static_cast<uint64_t>(1) << std::llround(correction);
+-- 
+2.43.0
+
+
+From 366ba8755862cc74182c826f8160cc9171ebdead Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 11:28:19 +0200
+Subject: [PATCH 18/18] =?UTF-8?q?RR=20StC:=20the=20output=20is=20NOISE,=20?=
+ =?UTF-8?q?not=20a=20scrambled=20message=20=E2=80=94=20a=20different=20bug?=
+ =?UTF-8?q?=20class?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Measurement, 8 slots with per-slot ratios:
+
+  got :   -528    1047   471.4  -307.9   311.8   328.8   652.4   469.5
+  want:    0.5  0.4662  0.3692  0.2223 0.04534 -0.1378 -0.3023 -0.4258
+  ratio: -1056    2245    1277   -1385    6878   -2386   -2158   -1102
+
+Uniform magnitude, random signs, no structure. That rules out the whole family of
+bugs found so far — a wrong scale, a wrong index base, a permuted ordering and a
+double-counted factor all PRESERVE structure and show a constant or patterned
+ratio. This does not: the message is destroyed inside StC, not transformed
+incorrectly.
+
+Bracketing, both measured this round:
+  pre-StC          -0.0137824  0.0266446  0.0137699   message-dependent, healthy
+  post-StC         noise
+  post-sparse-add  noise (the fold-back is not the cause; it is already noise)
+
+Also measured, and it exonerates the decode check as the CAUSE while confirming
+it is mis-parameterized: at post-StC classic reads logstd 22.38 against its
+threshold of 22, RR reads 42.12 against 20 — but relative to their scales (2^54
+and 2^95) both have ample headroom. So the check firing is a symptom of `p` being
+the scalingModSize rather than the scale, not of the ciphertext being bad.
+
+NEXT: instrument the per-stage VALUES inside EvalSlotsToCoeffs, the way the
+per-stage scales were instrumented here. StC's three stages are the last
+uninstrumented region, and CtS — the same machinery with different plaintexts —
+works, so the difference is in the plaintexts or in the stage the boundary gating
+touches.
+
+Gates: rr_cpu_gate PASS on both chains; classic control PASS at 13.6 bits.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index d8375f1b..efc35d01 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -2188,6 +2188,7 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         rrBtsTrace("post-StC", ctxtDec);
+         btsTrace("post-StC", ctxtDec);
+         cc->EvalAddInPlaceNoCheck(ctxtDec, cc->EvalRotate(ctxtDec, slots));
++        { ConstCiphertext<DCRTPoly> t = ctxtDec; rrBtsTrace("post-sparse-add", t); }
+     }
+ 
+ #if NATIVEINT != 128
 -- 
 2.43.0
 
