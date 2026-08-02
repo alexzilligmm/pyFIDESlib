@@ -580,7 +580,17 @@ std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double opera
     }
 
     typedef int128_t DoubleInteger;
-    int32_t MAX_BITS_IN_WORD_LOCAL = 125;
+    // At NATIVEINT=32 `int128_t` is NOT a 128-bit type on this build (basicint.h: it falls back
+    // to int64_t) -- the same trap that made EvalBootstrapSetup's `uint128_t(1) << 78` wrap to a
+    // shift of 14 and hid the CPU's EvalMod fault for a session. A hardcoded 125 tells the code
+    // below that `large` can hold 125 bits, so logApprox stays 0 and no splitting happens; the
+    // RR adjust's scalar is operand*scFactor = 2^29 * 2^40 = 2^69, which then wraps in a signed
+    // 64-bit word. Measured at the post-adjust checkpoint: the message came out scaled by
+    // -2^23.0 instead of +2^29, a clean constant ratio of -2^-6 across every slot.
+    //
+    // Size the cap to the type that is actually there. The scale-down/scale-back-up path below
+    // is already written for exactly this case, so the split costs nothing but a few CRT mults.
+    int32_t MAX_BITS_IN_WORD_LOCAL = (sizeof(DoubleInteger) >= 16) ? 125 : 61;
 
     int32_t logApprox = 0;
     const double res = std::fabs(operand * scFactor);

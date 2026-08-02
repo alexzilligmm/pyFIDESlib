@@ -818,7 +818,9 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
                 cudaDeviceSynchronize();
                 CudaCheckErrorMod;
             }
+            btsStageProbe("adj-in", ctxt);
             ctxt.multScalar(adjustmentFactor);
+            btsStageProbe("adj-mult", ctxt);
             if (cc.isRR() && std::getenv("RR_BTS_SCALEDBG"))
                 std::fprintf(stderr, "[rr_scale] adjust: multScalar(adj) APPLIED\n");
             BTS_DIAG("AFTER multScalar(adj)");
@@ -836,6 +838,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
             }
             //cc->EvalMultInPlace(ciphertext, adjustmentFactor);
             ctxt.rescale();
+            btsStageProbe("adj-rescale", ctxt);
             if (cc.isRR())
                 rrRequireBottom(ctxt, "adjust (non-prescaled)");
             else
@@ -925,6 +928,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
                 CudaCheckErrorMod;
             }
             ctxt.rescale();
+            btsStageProbe("adj-rescale", ctxt);
             if (cc.isRR())
                 rrRequireBottom(ctxt, "adjust (non-prescaled)");
             else
