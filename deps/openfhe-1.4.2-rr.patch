@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/11] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/12] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/11] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/12] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/11] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/12] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/11] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/12] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/11] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/12] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/11] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/12] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/11] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/12] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/11] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/12] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/11] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/12] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/11] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/12] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/11] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/12] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3060,6 +3060,168 @@ index cc0b1b7a..94239f00 100644
  DCRTPoly RRChain::Restrict(const DCRTPoly& full, uint32_t r) const {
      const auto& lvl = Level(r);
      DCRTPoly out(lvl.params, full.GetFormat(), true);
+-- 
+2.43.0
+
+
+From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 10:00:24 +0200
+Subject: [PATCH 12/12] RR bootstrap: a scale trace, and it localizes the drift
+ to the double-angle loop
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+RR_BTS_TRACE=1 prints level/limbs/deg/log2(scale) at each bootstrap stage. The
+point is that the CLASSIC path is correct and takes the same FLEXIBLEAUTO code,
+so the two traces can be diffed and the stage where they stop being structurally
+the same IS the bug — no reference implementation needed.
+
+  stage              classic (deg/log2 sf)   RR (deg/log2 sf)
+  post-CtS           2 / 54.01               2 / 110.00   ok
+  pre-cheby          1 / 27.00               1 /  55.00   ok
+  post-cheby         2 / 54.02               2 / 110.05   ok
+  post-doubleangle   2 / 54.06               2 / 140.00   <-- +30
+  pre-StC            1 / 27.03               1 / 100.00
+  post-StC           2 / 54.06               2 / 139.998
+
+RR tracks classic EXACTLY through CoeffsToSlots and the Chebyshev evaluation:
+deg-1 carries the region's scaling factor (2^55 in the bootstrap region, against
+classic's 2^27) and deg-2 carries its square. So ModRaise, CtS, the plaintext
+scales and the Chebyshev evaluator are all consistent.
+
+The divergence is ApplyDoubleAngleIterations: +29.96 bits across R_UNIFORM = 6
+iterations, i.e. +4.99 bits PER ITERATION, where classic is flat. Each iteration
+is square -> double -> add scalar -> ModReduce, and the level advances by exactly
+one per iteration (11 -> 17), so one rescale each. A per-iteration constant of ~5
+bits points at the factor that rescale divides by rather than at the arithmetic.
+
+Everything downstream is that drift carried forward: pre-StC reads 100 instead of
+~55 and the output lands at 2^100 where its level's table says 2^40, which is the
+constant-across-slots decode the probe reports.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 29 ++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index ac608d31..c1bef6bb 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -66,6 +66,7 @@
+ namespace {
+ // GetBigModulus() calculates the big modulus as the product of
+ // the "compositeDegree" number of parameter modulus
++
+ double GetBigModulus(const std::shared_ptr<lbcrypto::CryptoParametersCKKSRNS> cryptoParams) {
+     double qDouble           = 1.0;
+     uint32_t compositeDegree = cryptoParams->GetCompositeDegree();
+@@ -93,6 +94,20 @@ double GetBigModulus(const std::shared_ptr<lbcrypto::CryptoParametersCKKSRNS> cr
+ 
+ namespace lbcrypto {
+ 
++// RR_BTS_TRACE=1: the SCALE trajectory through a bootstrap. The classic path is correct and
++// takes the same FLEXIBLEAUTO code, so a side-by-side of the two traces localizes a scale bug
++// without any reference implementation — the stage where the two stop being structurally the
++// same is the stage that is wrong.
++static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
++    static const bool on = std::getenv("RR_BTS_TRACE") != nullptr;
++    if (!on)
++        return;
++    std::cerr << "[rr_trace] " << stage << ": level=" << ct->GetLevel()
++              << " limbs=" << ct->GetElements()[0].GetNumOfElements() << " deg=" << ct->GetNoiseScaleDeg()
++              << " log2(scale)=" << std::log2(ct->GetScalingFactor()) << "\n";
++}
++
++
+ // RR (RR_PLAN (c).4c step 3): the LEVEL of a ciphertext element.
+ //
+ // `level = totalLimbs - currentLimbs` is the prefix-chain identity, and OpenFHE's bootstrap
+@@ -543,8 +558,10 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrapSetupOnly(ConstCiphertext<DCRTPoly
+         //------------------------------------------------------------------------------
+ 
+         // Evaluate Chebyshev series for the sine wave
++        rrBtsTrace("pre-cheby", ctxtEnc);
+         ctxtEnc  = cc->EvalChebyshevSeries(ctxtEnc, coefficients, coeffLowerBound, coeffUpperBound);
+         ctxtEncI = cc->EvalChebyshevSeries(ctxtEncI, coefficients, coeffLowerBound, coeffUpperBound);
++        rrBtsTrace("post-cheby", ctxtEnc);
+ 
+         // Double-angle iterations
+         if ((cryptoParams->GetSecretKeyDist() == UNIFORM_TERNARY) ||
+@@ -1590,6 +1607,8 @@ static void btsTrace(const char* stage, const Ciphertext<DCRTPoly>& ct) {
+     std::cerr << std::endl;
+ }
+ 
++
++
+ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& ciphertext, uint32_t numIterations,
+                                                uint32_t precision) const {
+     // Prime the RR chain cache: EvalKeySwitchPrecomputeCore is handed crypto PARAMS with no
+@@ -1898,6 +1917,7 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         // only one linear transform is needed as the other one can be derived
+         auto ctxtEnc =
+             (isLTBootstrap) ? EvalLinearTransform(p.m_U0hatTPre, raised) : EvalCoeffsToSlots(p.m_U0hatTPreFFT, raised);
++        rrBtsTrace("post-CtS", ctxtEnc);
+ 
+         auto evalKeyMap = cc->GetEvalAutomorphismKeyMap(ctxtEnc->GetKeyTag());
+         auto conj       = Conjugate(ctxtEnc, evalKeyMap);
+@@ -1938,6 +1958,7 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+             numIter = R_SPARSE;
+         ApplyDoubleAngleIterations(ctxtEnc, numIter);
+         ApplyDoubleAngleIterations(ctxtEncI, numIter);
++        rrBtsTrace("post-doubleangle", ctxtEnc);
+ 
+         algo->MultByMonomialInPlace(ctxtEncI, slots);
+         cc->EvalAddInPlaceNoCheck(ctxtEnc, ctxtEncI);
+@@ -1964,7 +1985,9 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+             algo->ModReduceInternalInPlace(ctxtEnc, compositeDegree);
+ 
+         // Only one linear transform is needed
++        rrBtsTrace("pre-StC", ctxtEnc);
+         ctxtDec = (isLTBootstrap) ? EvalLinearTransform(p.m_U0Pre, ctxtEnc) : EvalSlotsToCoeffs(p.m_U0PreFFT, ctxtEnc);
++        rrBtsTrace("post-StC", ctxtDec);
+     }
+     else {
+         //------------------------------------------------------------------------------
+@@ -1991,6 +2014,7 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+ 
+         auto ctxtEnc =
+             (isLTBootstrap) ? EvalLinearTransform(p.m_U0hatTPre, raised) : EvalCoeffsToSlots(p.m_U0hatTPreFFT, raised);
++        rrBtsTrace("post-CtS", ctxtEnc);
+ 
+         btsTrace("post-CtS", ctxtEnc);
+         auto evalKeyMap = cc->GetEvalAutomorphismKeyMap(ctxtEnc->GetKeyTag());
+@@ -2021,7 +2045,9 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+ 
+         // Evaluate Chebyshev series for the sine wave
+         btsTrace("pre-Cheby", ctxtEnc);
++        rrBtsTrace("pre-cheby", ctxtEnc);
+         ctxtEnc = cc->EvalChebyshevSeries(ctxtEnc, coefficients, coeffLowerBound, coeffUpperBound);
++        rrBtsTrace("post-cheby", ctxtEnc);
+         btsTrace("post-Cheby", ctxtEnc);
+ 
+         // Double-angle iterations
+@@ -2029,6 +2055,7 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+             algo->ModReduceInternalInPlace(ctxtEnc, compositeDegree);
+         uint32_t numIter = (cryptoParams->GetSecretKeyDist() == UNIFORM_TERNARY) ? R_UNIFORM : R_SPARSE;
+         ApplyDoubleAngleIterations(ctxtEnc, numIter);
++        rrBtsTrace("post-doubleangle", ctxtEnc);
+         btsTrace("post-DA", ctxtEnc);
+ 
+         // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+@@ -2055,7 +2082,9 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+ 
+         // linear transform for decoding
+         btsTrace("pre-StC", ctxtEnc);
++        rrBtsTrace("pre-StC", ctxtEnc);
+         ctxtDec = (isLTBootstrap) ? EvalLinearTransform(p.m_U0Pre, ctxtEnc) : EvalSlotsToCoeffs(p.m_U0PreFFT, ctxtEnc);
++        rrBtsTrace("post-StC", ctxtDec);
+         btsTrace("post-StC", ctxtDec);
+         cc->EvalAddInPlaceNoCheck(ctxtDec, cc->EvalRotate(ctxtDec, slots));
+     }
 -- 
 2.43.0
 
