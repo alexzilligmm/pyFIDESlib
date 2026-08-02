@@ -1169,6 +1169,11 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
         if (GPUcc.compositeDegree() > 1 || GPUcc.isRR()) {
             // COMPOSITESCALING: both secret-switching keys are MAIN-context standard hybrid
             // keys (see BootstrapPrecomputation::sparse_atob) — no helper GPU context at all.
+            // NOTE the pairing, which is NOT what the atob/btoa names suggest and was verified by
+            // A/B rather than by reading: sparse_atob takes evalKeys[2N-2] and sparse_btoa takes
+            // evalKeys[2N-4]. Swapping them to "match" OpenFHE's 2N-4-then-2N-2 call order makes
+            // post-raise NaN. The names describe the SLOT each key is used in, not the automorphism
+            // index it holds. Leave them.
             result.sparse_atob = std::make_unique<FIDESlib::CKKS::KeySwitchingKey>(GPUcc_);
             {
                 std::shared_ptr<lbcrypto::EvalKeyRelinImpl<lbcrypto::DCRTPoly>> res =

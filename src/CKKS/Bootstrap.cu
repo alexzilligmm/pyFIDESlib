@@ -230,6 +230,7 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     {
 
         ModRaise(ctxt, slots, correction, prescaled);
+        btsStageProbe("post-raise", ctxt);
 
         //------------------------------------------------------------------------------
         // SETTING PARAMETERS FOR APPROXIMATE MODULAR REDUCTION
@@ -483,6 +484,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     {
         ModRaise(ctxt, slots, correction, prescaled, sparse_encaps);
+        btsStageProbe("post-raise", ctxt);
         //------------------------------------------------------------------------------
         // SETTING PARAMETERS FOR APPROXIMATE MODULAR REDUCTION
         //------------------------------------------------------------------------------

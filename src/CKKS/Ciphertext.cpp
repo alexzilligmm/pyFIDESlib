@@ -3,6 +3,7 @@
 //
 
 #include "CKKS/Ciphertext.cuh"
+#include "CKKS/RationalRescale.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/KeySwitchingKey.cuh"
 #include "CKKS/Plaintext.cuh"
@@ -1649,6 +1650,27 @@ void Ciphertext::keySwitch(const KeySwitchingKey& ksk) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 	CKKS::SetCurrentContext(cc_);
 	assert(ksk.keyID == this->keyID);
+
+	// RATIONAL RESCALING: MGPUkeySwitchCore is the PREFIX keyswitch -- it reads evk row i for
+	// ciphertext tower i, which is only the same thing while a level is a prefix of the layout.
+	// On an RR window, ciphertext slot i is global prime lo+i, so the classic path silently
+	// dots against the wrong rows and returns a well-formed but meaningless ciphertext.
+	// `RRKeySwitchCore` is the windowed twin (modup -> positional dot -> moddown) and is gated
+	// bit-exactly by test_rr_keyswitch; it was already written, just never reached from here.
+	// Measured symptom before this: the ENCAPS sparse-secret switch around ModRaise destroyed
+	// the ciphertext outright -- post-adjust exact at 8192, post-raise all NaN -- while the
+	// SPARSE route, which takes no keyswitch there, came through the raise finite.
+	// Same output contract as the classic arm: c0 += d0 and c1 is REPLACED by d1.
+	if (cc.isRR()) {
+		const int lvl = c1.getLevel();
+		if (std::getenv("RR_KS_DBG"))
+			std::fprintf(stderr, "[rr_ks] Ciphertext::keySwitch RR arm at level %d\n", lvl);
+		RNSPoly d0(cc, lvl), d1(cc, lvl);
+		RRKeySwitchCore(c1, ksk, d0, d1);
+		c0.add(d0);
+		c1.copy(d1);
+		return;
+	}
 
 	RNSPoly& aux = cc.getKeySwitchAux();
 	aux.copy(c1); // This is to save on memory allocations for keyswitching, not best performance but not expected for relinearize or rotation
