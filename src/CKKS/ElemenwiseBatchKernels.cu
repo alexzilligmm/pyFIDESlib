@@ -760,6 +760,21 @@ __global__ void __launch_bounds__(128, KSK_BITS ? FIDESLIB_DOT_MINCTA_PACKED : 1
 #ifndef FIDESLIB_DIN_ABLATE
 #define FIDESLIB_DIN_ABLATE 0
 #endif
+// S8 (TO-TRY §2.0b, §2.18's stated residue): __restrict__-qualify the coop4 hoisted kernel's
+// pointer-table params so ptxas may hoist the j-invariant din pointer chases out of the
+// rotation loop AT ITS OWN register budget (a forced register hoist of ~14 ptrs is the exact
+// +13-reg shape that lost +0.51 ms). All tables address disjoint device buffers; the seeds
+// param was already __restrict__. Compile-time A/B only (variant binary), default 0.
+#ifndef FIDESLIB_PTR_RESTRICT
+#define FIDESLIB_PTR_RESTRICT 0
+#endif
+#if FIDESLIB_PTR_RESTRICT
+#define FLPT3 void* const* const* __restrict__
+#define FLPT2 void* const* __restrict__
+#else
+#define FLPT3 void***
+#define FLPT2 void**
+#endif
 // Staged kskb unpack for the regen kernels (2026-07-31 ksk_dot session). The kskb-stream
 // ablation bounds its cost at −2.33 ms/bts and ncu shows both regen kernels LATENCY-bound
 // (53–60 % DRAM, 24 %/13 % warps): per (digit, thread) the per-coefficient kskUnpack issues
@@ -1657,9 +1672,9 @@ __global__ void
 #if FIDESLIB_DOT_REGEN4_MINCTA
     __launch_bounds__(128, FIDESLIB_DOT_REGEN4_MINCTA)
 #endif
-        hoistedRotateDotKSKRegen4_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
-                                   const int n, const int* indexes, void*** digits, int num_d, int id,
-                                   int num_special, int init, void** sc0, bool c0_modup,
+        hoistedRotateDotKSKRegen4_(FLPT3 din1, FLPT2 c0, FLPT3 out1, FLPT3 sout1, FLPT3 out2, FLPT3 sout2,
+                                   const int n, const int* indexes, FLPT3 digits, int num_d, int id,
+                                   int num_special, int init, FLPT2 sc0, bool c0_modup,
                                    const uint32_t* __restrict__ seeds, const uint32_t n16) {
     constexpr int SLOTS = 4;
     const uint32_t gtid = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);

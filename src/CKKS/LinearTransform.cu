@@ -195,7 +195,7 @@ void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, c
                 }
 
                 //results[0]->modDown(false);
-                ctxt.copy(*results[0]);
+                ctxt.takeFrom(*results[0]);  // S3: results[0] dies at scope end — swap, don't copy
             } else {
 
                 assert(rowSize == pts.size());
@@ -435,7 +435,7 @@ void FIDESlib::CKKS::ConvolutionTransform(Ciphertext& ctxt, int rowSize, int bSt
 			if (blockResults[0]->c1.isModUp())
 				blockResults[0]->modDown(false);
 
-			ctxt.copy(*blockResults[0]);
+			ctxt.takeFrom(*blockResults[0]);  // S3: blockResults dies at scope end
 		}
 	}
 }
@@ -646,7 +646,7 @@ void FIDESlib::CKKS::SpecialConvolutionTransform(Ciphertext& ctxt,
 			if (blockResults[0]->c1.isModUp())
 				blockResults[0]->modDown(false);
 
-			ctxt.copy(*blockResults[0]);
+			ctxt.takeFrom(*blockResults[0]);  // S3: blockResults dies at scope end
 			ctxt.rescale();
 		}
 	}
@@ -965,7 +965,7 @@ void FIDESlib::CKKS::LinearTransformSpecial(FIDESlib::CKKS::Ciphertext& ctxt1, F
         }
     }
 
-    ctxt1.copy(result);
+    ctxt1.takeFrom(result);  // S3: result is a dying local
     CudaCheckErrorModNoSync;
 }
 

@@ -84,6 +84,17 @@ RNSPoly::RNSPoly(RNSPoly&& src) noexcept
     //src.setLevel(-2);
 }
 
+void RNSPoly::swap(RNSPoly& other) noexcept {
+    assert(&cc == &other.cc);
+    std::swap(level, other.level);
+    std::swap(modUp, other.modUp);
+    GPU.swap(other.GPU);
+    for (auto& g : GPU)
+        g.level = &this->level;
+    for (auto& g : other.GPU)
+        g.level = &other.level;
+}
+
 int RNSPoly::getLevel() const {
     return level;
 }

@@ -25,6 +25,11 @@ class RNSPoly {
     explicit RNSPoly(ContextData& context, const std::vector<std::vector<uint64_t>>& data);
     RNSPoly(RNSPoly&& src) noexcept;
 
+    /** Buffer-ownership swap between two polys of the same context (no device traffic).
+     *  LimbPartition objects travel wholesale with their uid/stream/buffers; the only
+     *  per-poly back-pointer, `level`, is re-seated on both sides. */
+    void swap(RNSPoly& other) noexcept;
+
     void grow(int level, bool single_malloc = false, bool constant = false);
 
     void load(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli);

@@ -1531,6 +1531,29 @@ void Ciphertext::copy(const Ciphertext& ciphertext) {
 	this->copyMetadata(ciphertext);
 }
 
+// S3 copy-elimination: swap buffers instead of launching two copy_bytes_. The env gate is
+// read once; =0 restores the old copy() for A/B and triage.
+static bool takeFromEnabled() {
+	static const bool v = [] {
+		const char* e = getenv("FIDESLIB_TAKEFROM");
+		return !e || atoi(e) != 0;
+	}();
+	return v;
+}
+
+void Ciphertext::takeFrom(Ciphertext& src) {
+	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
+	CKKS::SetCurrentContext(cc_);
+	assert(this != &src);
+	if (!takeFromEnabled()) {
+		this->copy(src);
+		return;
+	}
+	c0.swap(src.c0);
+	c1.swap(src.c1);
+	this->copyMetadata(src);
+}
+
 void Ciphertext::multPt(const Ciphertext& c, const Plaintext& b, bool rescale) {
 	this->copy(c);
 	multPt(b, rescale);

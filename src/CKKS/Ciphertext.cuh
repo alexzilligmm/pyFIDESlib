@@ -560,6 +560,15 @@ class Ciphertext {
     void copy(const Ciphertext& ciphertext);
 
     /**
+     * @brief Takes the polynomial buffers of `src` by swap (no device copy) and copies its
+     * metadata. `src` must be dying or about to be fully overwritten: it is left holding
+     * *this*'s previous buffers (valid, unspecified contents). S3 copy-elimination lever:
+     * replaces `copy()` where the source is a local accumulator about to go out of scope.
+     * Env ablation: FIDESLIB_TAKEFROM=0 falls back to copy().
+     */
+    void takeFrom(Ciphertext& src);
+
+    /**
      * @brief Adds a plaintext to a ciphertext and stores the result in *this*.
      *
      * @param ciphertext Ciphertext operand.
