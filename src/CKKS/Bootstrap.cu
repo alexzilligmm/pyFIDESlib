@@ -590,22 +590,18 @@ double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
     if (cc.rescaleTechnique == CKKS::FLEXIBLEAUTO || cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT) {
         const int d_ = cc.compositeDegree();
         uint32_t lvl = cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT;
-        double targetSF = cc.sfAtLimb(cc.L - lvl * d_);
+        // RATIONAL RESCALING: the same three quantities keyed by LEVEL instead of by limb. The
+        // pre-raise ciphertext sits at RR level 1 (one rescale above the bottom), the adjust's
+        // rescale takes it to level 0, and that rescale divides the scale by
+        // F(1) = prod(dropped)/prod(added) — a RATIO, since an RR rescale also ADDS primes.
+        // The classic arms must not be EVALUATED on an RR chain: sfAtLimb now throws there.
         // composite: the pre-raise ciphertext sits at 2 LEVELS = 2d limbs; its scale lives at
         // limb 2d-1 and the adjust's rescale drops the top d primes (their product).
-        double sourceSF = cc.sfAtLimb(2 * d_ - 1);  // ciphertext->GetScalingFactor();
-        uint32_t numTowers = 2 * d_;                // ciphertext->GetElements()[0].GetNumOfElements();
-        double modToDrop = cc.modReduceProduct(2 * d_ - 1);
-        // RATIONAL RESCALING: the same three quantities, keyed by LEVEL instead of by limb.
-        // The pre-raise ciphertext sits at RR level 1 (one rescale above the bottom), the
-        // adjust's rescale takes it to level 0, and that rescale divides the scale by
-        // F(1) = prod(dropped)/prod(added) — a RATIO, since an RR rescale also ADDS primes.
-        if (cc.isRR()) {
-            targetSF  = cc.sfAtLevel(cc.topLevel());
-            sourceSF  = cc.sfAtLevel(1);
-            numTowers = cc.windowSize(1);
-            modToDrop = cc.rrRescaleFactor(1);
-        }
+        const bool rr_     = cc.isRR();
+        double targetSF    = rr_ ? cc.sfAtLevel(cc.topLevel()) : cc.sfAtLimb(cc.L - lvl * d_);
+        double sourceSF    = rr_ ? cc.sfAtLevel(1) : cc.sfAtLimb(2 * d_ - 1);
+        uint32_t numTowers = rr_ ? (uint32_t)cc.windowSize(1) : (uint32_t)(2 * d_);
+        double modToDrop   = rr_ ? cc.rrRescaleFactor(1) : cc.modReduceProduct(2 * d_ - 1);
         //cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
         // in the case of FLEXIBLEAUTO, we need to bring the ciphertext to the right scale using a
         // a scaling multiplication. Note the at currently FLEXIBLEAUTO is only supported for NATIVEINT = 64.
@@ -678,21 +674,19 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
 
     if (cc.rescaleTechnique == CKKS::FLEXIBLEAUTO || cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT) {
         uint32_t lvl = cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT;
-        double targetSF = cc.sfAtLimb(cc.L - lvl * cc.compositeDegree());
-        double sourceSF = ctxt.NoiseFactor;        // ciphertext->GetScalingFactor();
-        uint32_t numTowers = ctxt.getLevel() + 1;  // ciphertext->GetElements()[0].GetNumOfElements();
-        // composite: the adjust's rescale drops the top d primes — divide by their product
-        double modToDrop = cc.modReduceProduct(ctxt.getLevel());
         // RATIONAL RESCALING: sourceSF is already dynamic (the ciphertext's own NoiseFactor);
         // only the two chain-derived quantities move to level indexing. The rescale that
         // follows is the one from the ciphertext's CURRENT level, so its factor is
-        // F(getLevel()) — and the ciphertext must be at level >= 1 for that to exist, which
-        // is the precondition the drop sites below enforce.
-        if (cc.isRR()) {
-            targetSF  = cc.sfAtLevel(cc.topLevel());
-            numTowers = cc.windowSize(ctxt.getLevel());
-            modToDrop = ctxt.getLevel() >= 1 ? cc.rrRescaleFactor(ctxt.getLevel()) : 1.0;
-        }
+        // F(getLevel()) — and the ciphertext must be at level >= 1 for that to exist, which is
+        // the precondition the drop sites below enforce. The classic arms must not be
+        // EVALUATED on an RR chain: sfAtLimb now throws there.
+        const bool rr_     = cc.isRR();
+        double targetSF    = rr_ ? cc.sfAtLevel(cc.topLevel()) : cc.sfAtLimb(cc.L - lvl * cc.compositeDegree());
+        double sourceSF    = ctxt.NoiseFactor;  // ciphertext->GetScalingFactor();
+        uint32_t numTowers = rr_ ? (uint32_t)cc.windowSize(ctxt.getLevel()) : (uint32_t)(ctxt.getLevel() + 1);
+        // composite: the adjust's rescale drops the top d primes — divide by their product
+        double modToDrop = rr_ ? (ctxt.getLevel() >= 1 ? cc.rrRescaleFactor(ctxt.getLevel()) : 1.0)
+                               : cc.modReduceProduct(ctxt.getLevel());
         //cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
 
         // in the case of FLEXIBLEAUTO, we need to bring the ciphertext to the right scale using a

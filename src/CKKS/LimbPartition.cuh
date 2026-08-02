@@ -142,6 +142,16 @@ class LimbPartition {
      *  Not a level transition: residues are untouched. See the definition for why this does
      *  not violate (c).2's no-widen rule. */
     void rrWidenToLevel(int new_level);
+    /** RR: NARROW a live window onto a CONTAINED one — the exact twin of rrWidenToLevel, and a
+     *  genuine free drop. Legal exactly when the target window is a subset of the current one,
+     *  which is a property of the SCHEDULE, not of RR in general: the bootstrap region's
+     *  windows are nested (both edges move inward, so a step discards primes and adds none),
+     *  while the payload region's add smalls at the low edge and can only be reached by
+     *  rescaling. Discarding the primes outside the target is a reduction modulo a divisor of
+     *  the current modulus, so the surviving residues and the scale are untouched — exactly
+     *  what a classic prefix drop does, minus the assumption that the discarded primes are the
+     *  top ones. The caller checks containment (RNSPoly::dropToLevel). */
+    void rrDropToLevel(int new_level);
 
     enum GENERATION_MODE { AUTOMATIC, SINGLE_BUFFER, DUAL_BUFFER };
 

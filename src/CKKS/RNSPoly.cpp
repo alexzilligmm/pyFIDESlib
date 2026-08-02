@@ -920,17 +920,39 @@ void RNSPoly::copyShallow(const RNSPoly& poly) {
 }
 
 void RNSPoly::dropToLevel(int level) {
-    // RR: dropping a level is not free — a window's LOW edge moves too, and the residues
-    // change. The only legal transition is rrRescale.
+    // RR: whether a free drop exists is a property of the SCHEDULE, and it differs by region.
     //
-    // level < 0 is the ONE exception, and it is not a level move: it is "this polynomial
-    // holds nothing", which every Ciphertext constructor issues on the auxiliary polys it
-    // takes from the pool (Ciphertext::Ciphertext(Context&)). Emptying discards residues
-    // rather than reinterpreting them on a prime set the schedule does not contain, so the
-    // reason the guard exists does not apply. Anything else stays refused.
-    if (cc.isRR() && level >= 0 && level < this->level)
-        throw std::runtime_error("RR: dropToLevel(" + std::to_string(level) + ") from level " +
-                                 std::to_string(this->level) + " — RR levels only move via rrRescale");
+    // A drop is exact exactly when the target window is a SUBSET of the current one: then
+    // discarding the primes outside it is a reduction modulo a divisor of the current modulus,
+    // the surviving residues are untouched and the scale is unchanged — which is all a classic
+    // prefix drop ever was, minus the assumption that the discarded primes sit at the top.
+    //
+    // On this chain that splits cleanly (measured over the whole schedule):
+    //   - BOOTSTRAP region (r = 11..26): every step moves BOTH edges inward, so each window is
+    //     nested in the one above. Free drops exist, including multi-level ones.
+    //   - PAYLOAD region (r = 0..10): a step ADDS smalls at the low edge, so the target is not
+    //     contained and no amount of discarding reaches it. Only rrRescale does.
+    // This is what the earlier blanket "an RR chain has no free level drop" was missing: it is
+    // true of the payload region and false of the bootstrap region, which is where the whole
+    // bootstrap runs.
+    //
+    // level < 0 is separate and is not a level move at all: "this polynomial holds nothing",
+    // which every Ciphertext constructor issues on its pooled auxiliary polys.
+    if (cc.isRR() && level >= 0 && level < this->level) {
+        const int lo = cc.windowLo(level), hi = cc.windowHi(level);
+        const int curLo = cc.windowLo(this->level), curHi = cc.windowHi(this->level);
+        if (curLo > lo || hi > curHi)
+            throw std::runtime_error(
+                "RR: dropToLevel(" + std::to_string(level) + ") from level " + std::to_string(this->level) +
+                " — window [" + std::to_string(lo) + "," + std::to_string(hi) + "] is NOT contained in [" +
+                std::to_string(curLo) + "," + std::to_string(curHi) +
+                "], so no set of primes can be discarded to reach it (the payload region adds smalls at the low "
+                "edge). Descend by rescaling instead — Ciphertext::dropToLevel does.");
+        for (auto& g : GPU)
+            g.rrDropToLevel(level);
+        this->level = level;
+        return;
+    }
 
     if (0 && GPU.at(0).bufferLIMB == nullptr) {
         for (auto& g : GPU) {

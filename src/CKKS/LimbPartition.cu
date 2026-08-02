@@ -405,6 +405,32 @@ void LimbPartition::rrWidenToLevel(const int new_level) {
     CudaCheckErrorModNoSync;
 }
 
+void LimbPartition::rrDropToLevel(const int new_level) {
+    cudaSetDevice(device);
+    assert(cc.isRR() && "rrDropToLevel is only defined on an RR chain");
+    assert(cc.GPUid.size() == 1 && "RR is single-GPU");
+    const int lo = cc.windowLo(new_level), hi = cc.windowHi(new_level);
+    if (limb.empty()) {  // nothing live: only the base moves
+        pbase = lo;
+        return;
+    }
+    const int oldLo = pbase, oldHi = pbase + (int)limb.size() - 1;
+    if (lo == oldLo && hi == oldHi)
+        return;
+    assert(oldLo <= lo && hi <= oldHi && "RR drop: the new window must be CONTAINED in the old one");
+
+    std::vector<LimbImpl> kept;
+    kept.reserve(hi - lo + 1);
+    for (int pid = lo; pid <= hi; ++pid) {
+        assert(PRIMEID(limb[pid - oldLo]) == pid && "RR drop: live limb is not at the primeid its slot names");
+        kept.emplace_back(std::move(limb[pid - oldLo]));
+    }
+    limb  = std::move(kept);  // the limbs outside the target window are destroyed here
+    pbase = lo;
+    refreshLimbPtrs();
+    CudaCheckErrorModNoSync;
+}
+
 void LimbPartition::generateLimbToLevel(int new_level) {
     cudaSetDevice(device);
     int new_size = getLimbSize(new_level);

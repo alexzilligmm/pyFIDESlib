@@ -295,7 +295,9 @@ void Plaintext::multScalar(double c, bool rescale) {
     {
         const int drop_ = rescale ? cc.compositeDegree() : 0;
         NoiseLevel += 1;
-        NoiseFactor *= cc.sfAtLimb(c0.getLevel() + drop_);
+        // RR: one level is one rescale, so level + drop_ is still a level index — but the
+        // table it must come from is the level-keyed one.
+        NoiseFactor *= cc.isRR() ? cc.sfAtLevel(c0.getLevel() + drop_) : cc.sfAtLimb(c0.getLevel() + drop_);
         if (rescale) {
             NoiseFactor /= cc.modReduceProduct(c0.getLevel() + drop_);
             NoiseLevel -= 1;

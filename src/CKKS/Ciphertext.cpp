@@ -364,7 +364,9 @@ void Ciphertext::store(RawCipherText& rawct) {
 
 	CKKS::SetCurrentContext(cc_);
 	cudaDeviceSynchronize();
-	rawct.numRes = c0.getLevel() + 1;
+	// RR: a window's limb count is not level+1 (RNSPoly::store already resizes by
+	// windowSize; this is the metadata that has to agree with it).
+	rawct.numRes = cc.isRR() ? cc.windowSize(c0.getLevel()) : c0.getLevel() + 1;
 	rawct.sub_0.resize(rawct.numRes);
 	rawct.sub_1.resize(rawct.numRes);
 	c0.store(rawct.sub_0);
@@ -390,7 +392,9 @@ void Ciphertext::store(RawCipherText& rawct, cudaStream_t /*stream*/) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() }.substr());
 
 	CKKS::SetCurrentContext(cc_);
-	rawct.numRes = c0.getLevel() + 1;
+	// RR: a window's limb count is not level+1 (RNSPoly::store already resizes by
+	// windowSize; this is the metadata that has to agree with it).
+	rawct.numRes = cc.isRR() ? cc.windowSize(c0.getLevel()) : c0.getLevel() + 1;
 	rawct.sub_0.resize(rawct.numRes);
 	rawct.sub_1.resize(rawct.numRes);
 	c0.store(rawct.sub_0);
@@ -843,9 +847,10 @@ void Ciphertext::multScalarNoPrecheck(const double c, bool rescale) {
 	c0.multScalar(elem);
 	c1.multScalar(elem);
 
-	// Manage metadata
+	// Manage metadata. RR: the scale is level-keyed, not limb-keyed (sfAtLimb would read the
+	// classic table off-grid — the same distinction sfAtLevel exists for).
 	NoiseLevel += 1;
-	NoiseFactor *= cc.sfAtLimb(c0.getLevel());
+	NoiseFactor *= cc.isRR() ? cc.sfAtLevel(c0.getLevel()) : cc.sfAtLimb(c0.getLevel());
 	if (rescale && cc.rescaleTechnique == FIXEDAUTO) {
 		this->rescale();
 	}
@@ -1417,6 +1422,34 @@ void Ciphertext::dropToLevel(int level) {
 	CKKS::SetCurrentContext(cc_);
 	if (AdjustTrace::on())
 		++t_adjust_work.drop;
+
+	// RR: a drop is exact only onto a CONTAINED window (see RNSPoly::dropToLevel — true
+	// throughout the bootstrap region, false throughout the payload region). Where it is not
+	// contained, the only way down is to rescale, and that is NOT the same operation: a drop
+	// leaves the scale alone while each rescale divides it by F(level). So this arm is loud.
+	// A deg-1 ciphertext owes no rescale, so it is raised to deg 2 by a multiply by 1 first —
+	// the standard trick, and the reason this costs precision rather than being free.
+	if (cc.isRR() && level >= 0 && level < c0.getLevel()) {
+		const int lo = cc.windowLo(level), hi = cc.windowHi(level);
+		if (cc.windowLo(c0.getLevel()) > lo || hi > cc.windowHi(c0.getLevel())) {
+			static bool warned = false;
+			if (!warned) {
+				warned = true;
+				std::fprintf(stderr,
+							 "[rr_drop] level %d -> %d: window [%d,%d] is not contained in [%d,%d], descending by "
+							 "RESCALE instead of dropping — the scale divides by F at each step, so the caller's "
+							 "scale bookkeeping must expect it\n",
+							 c0.getLevel(), level, lo, hi, cc.windowLo(c0.getLevel()), cc.windowHi(c0.getLevel()));
+			}
+			while (c0.getLevel() > level) {
+				if (NoiseLevel == 1)
+					multScalarNoPrecheck(1.0, false);
+				rescale();
+			}
+			return;
+		}
+	}
+
 	c0.dropToLevel(level);
 	c1.dropToLevel(level);
 }
@@ -1485,7 +1518,10 @@ void Ciphertext::evalLinearWSumMutable(uint32_t n, const std::vector<Ciphertext*
 			slots = std::max(slots, ctxs[i]->slots);
 		}
 		this->NoiseLevel  = 2;
-		this->NoiseFactor = cc.sfAtLimb(getLevel()) * cc.sfAtLimb(getLevel());
+		// RR: level-keyed scale (sfAtLimb throws on an RR chain — see Context.cu). This is
+		// the Chebyshev evaluator's weighted sum, so it runs once per EvalMod stage.
+		const double sf_  = cc.isRR() ? cc.sfAtLevel(getLevel()) : cc.sfAtLimb(getLevel());
+		this->NoiseFactor = sf_ * sf_;
 	} else {
 		this->multScalar(*ctxs[0], weights[0], false);
 		for (int i = 1; i < n; ++i) {
@@ -1675,6 +1711,19 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 			return true;
 		}
 	} else if (cc.rescaleTechnique == FLEXIBLEAUTO || cc.rescaleTechnique == FLEXIBLEAUTOEXT) {
+		// RATIONAL RESCALING: the ALGEBRA of this branch carries over unchanged, because on
+		// this chain the moves it makes are all available — a drop onto a CONTAINED window is
+		// exact and free (RNSPoly::dropToLevel), and the whole bootstrap region is nested. Only
+		// the three chain-derived quantities are limb-keyed and have to be re-read by LEVEL:
+		// the scale (sfAtLevel — sfAtLimb THROWS on an RR chain), the rescale factor
+		// (F = prod(dropped)/prod(added), a ratio modReduceProduct cannot express), and the
+		// "one level below target" scale, which under RR is simply the next level up's.
+		const bool rr_ = cc.isRR();
+		auto SF		   = [&](int lvl) { return rr_ ? cc.sfAtLevel(lvl) : cc.sfAtLimb(lvl); };
+		auto DROPF	   = [&](int lvl) { return rr_ ? cc.rrRescaleFactor(lvl) : cc.modReduceProduct(lvl); };
+		auto SFBIG	   = [&](int lvl) {
+			   return rr_ ? cc.sfAtLevel(lvl) : cc.param.ScalingFactorRealBig[lvl];
+		};
 		usint c1lvl	  = getLevel();
 		usint c2lvl	  = b.getLevel();
 		usint c1depth = this->NoiseLevel;
@@ -1687,8 +1736,8 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 				if (c2depth == 2) {
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf	= cc.sfAtLimb(c1lvl);	 // cryptoParams->GetScalingFactorReal(c1lvl);
-					double q1	= cc.modReduceProduct(c1lvl); // composite: product of the d dropped primes
+					double scf	= SF(c1lvl);	 // cryptoParams->GetScalingFactorReal(c1lvl);
+					double q1	= DROPF(c1lvl); // composite: product of the d dropped primes
 					multScalarNoPrecheck(scf2 / scf1 * q1 / scf);
 					rescale();
 					if (getLevel() > b.getLevel()) {
@@ -1701,7 +1750,7 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 					rescale();
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf = cc.sfAtLimb(c1lvl);  // cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf = SF(c1lvl);  // cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					this->dropToLevel(c2lvl);
 					//LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
@@ -1712,9 +1761,9 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 						rescale();
 					} else {
 						double scf1 = NoiseFactor;
-						double scf2 = cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]; // composite: one LEVEL below target
-						double scf	= cc.sfAtLimb(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
-						double q1	= cc.modReduceProduct(c1lvl);	// composite: product of the d dropped primes
+						double scf2 = SFBIG(c2lvl + cc.compositeDegree()); // composite: one LEVEL below target
+						double scf	= SF(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
+						double q1	= DROPF(c1lvl);	// composite: product of the d dropped primes
 						multScalarNoPrecheck(scf2 / scf1 * q1 / scf);
 						rescale();
 						if (getLevel() - cc.compositeDegree() > b.getLevel()) {
@@ -1731,7 +1780,7 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 				if (c2depth == 2) {
 					double scf1 = NoiseFactor;
 					double scf2 = b.NoiseFactor;
-					double scf	= cc.sfAtLimb(c1lvl); // cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf	= SF(c1lvl); // cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					this->dropToLevel(c2lvl);
 					// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
@@ -1739,8 +1788,8 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 					NoiseFactor = scf2;
 				} else {
 					double scf1 = NoiseFactor;
-					double scf2 = cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]; // composite: one LEVEL below target
-					double scf	= cc.sfAtLimb(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
+					double scf2 = SFBIG(c2lvl + cc.compositeDegree()); // composite: one LEVEL below target
+					double scf	= SF(c1lvl);		// cryptoParams->GetScalingFactorReal(c1lvl);
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					if (c1lvl - cc.compositeDegree() > c2lvl) {
 						this->dropToLevel(c2lvl + cc.compositeDegree());

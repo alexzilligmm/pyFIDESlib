@@ -658,7 +658,13 @@ std::ostream& operator<<(std::ostream& o, const uint128_t& x) {
 #endif
 
 std::vector<uint64_t> ContextData::ElemForEvalAddOrSub(const int level, const double operand, const int noise_deg) {
-    usint sizeQl = level + 1;
+    // RATIONAL RESCALING: the addScalar twin of ElemForEvalMult, and it needs the same two
+    // corrections — the returned array is indexed by GLOBAL primeid by the batched kernels, so
+    // under RR it stays FULL-CHAIN-shaped (a level-shaped one is read past its end at every
+    // window with lo > 0, and the caller's negation loop `prime[i].p - elem[i]` is only correct
+    // against global indices too), and the scale is level-keyed.
+    const bool rr = isRR();
+    usint sizeQl  = rr ? (usint)prime.size() : level + 1;
     std::vector<lbcrypto::DCRTPoly::Integer> moduli(sizeQl);
     for (usint i = 0; i < sizeQl; i++) {
         moduli[i] = prime[i].p;
@@ -666,7 +672,9 @@ std::vector<uint64_t> ContextData::ElemForEvalAddOrSub(const int level, const do
 
     //double scFactor = param.ScalingFactorReal.at(level);
     double scFactor = 0;
-    if (this->rescaleTechnique == FLEXIBLEAUTOEXT && level == L) {
+    if (rr) {
+        scFactor = sfAtLevel(level);
+    } else if (this->rescaleTechnique == FLEXIBLEAUTOEXT && level == L) {
         scFactor =
             param.ScalingFactorRealBig.at(level);  // cryptoParams->GetScalingFactorRealBig(ciphertext->GetLevel());
     } else {
@@ -965,6 +973,17 @@ int ContextData::getCorrectionFactorOverride() const {
 }
 
 double ContextData::sfAtLimb(const int limbTop) const {
+    // On an RR chain this accessor is ALWAYS wrong: `param.ScalingFactorReal` is the classic
+    // limb-indexed table, and an RR level is a window whose limb count does not identify it.
+    // It does not merely return a neighbour's factor — past the RR level count the entries are
+    // ZERO, so a caller silently multiplies its scale by 0 and every slot decodes to non-finite
+    // with no other symptom. (Measured: the Chebyshev evaluator's weighted-sum metadata did
+    // exactly this, and the whole bootstrap output decoded as 4096 non-finite slots.) Throwing
+    // makes each remaining site name itself; the correct accessor is sfAtLevel(r).
+    if (isRR())
+        throw std::runtime_error("FIDESlib: sfAtLimb(" + std::to_string(limbTop) +
+                                 ") called on an RR chain — an RR level is a WINDOW and limb count does not "
+                                 "identify it; use sfAtLevel(level) instead");
     if ((L - limbTop) % param.compositeDegree != 0) {
         std::fprintf(stderr,
                      "FIDESlib: sfAtLimb(%d) is OFF the composite level grid (L=%d, d=%d) — "
