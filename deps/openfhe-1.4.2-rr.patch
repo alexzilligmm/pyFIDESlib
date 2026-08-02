@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/20] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/21] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/20] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/21] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/20] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/21] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/20] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/21] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/20] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/21] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/20] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/21] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/20] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/21] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/20] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/21] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/20] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/21] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/20] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/21] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/20] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/21] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/20] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/21] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/20] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/21] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3324,7 +3324,7 @@ index c1bef6bb..21edbabf 100644
 From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:29:26 +0200
-Subject: [PATCH 14/20] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+Subject: [PATCH 14/21] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
  =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3407,7 +3407,7 @@ index 21edbabf..4f197b32 100644
 From 90b517b0fe93f3c48692943887714400b54e45c6 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:44:09 +0200
-Subject: [PATCH 15/20] RR: the signed correction, and the adjust now preserves
+Subject: [PATCH 15/21] RR: the signed correction, and the adjust now preserves
  the message exactly
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3669,7 +3669,7 @@ index 94239f00..9392c35d 100644
 From 3d7da05eaf17a481d230a14bb5d8d94dca8b9cb7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:09:15 +0200
-Subject: [PATCH 16/20] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
+Subject: [PATCH 16/21] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
  =?UTF-8?q?t=20is=2064-bit=20on=20this=20build=20=E2=80=94=20the=20message?=
  =?UTF-8?q?=20flows=20again?=
 MIME-Version: 1.0
@@ -3792,7 +3792,7 @@ index 85b1cc90..ee1916d4 100644
 From 5d149352e1372ae41dcab7e06133eac260affeed Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:22:32 +0200
-Subject: [PATCH 17/20] RR StC: realize the boundary-gated rescale; output now
+Subject: [PATCH 17/21] RR StC: realize the boundary-gated rescale; output now
  lands on the payload top
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3893,7 +3893,7 @@ index ee1916d4..d8375f1b 100644
 From 366ba8755862cc74182c826f8160cc9171ebdead Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:28:19 +0200
-Subject: [PATCH 18/20] =?UTF-8?q?RR=20StC:=20the=20output=20is=20NOISE,=20?=
+Subject: [PATCH 18/21] =?UTF-8?q?RR=20StC:=20the=20output=20is=20NOISE,=20?=
  =?UTF-8?q?not=20a=20scrambled=20message=20=E2=80=94=20a=20different=20bug?=
  =?UTF-8?q?=20class?=
 MIME-Version: 1.0
@@ -3956,7 +3956,7 @@ index d8375f1b..efc35d01 100644
 From 17056014df7aab54d2c5947ea75b936f5c039481 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 12:25:45 +0200
-Subject: [PATCH 19/20] RR bootstrap FIXED: setup-pre leaked q0/2^round into
+Subject: [PATCH 19/21] RR bootstrap FIXED: setup-pre leaked q0/2^round into
  the sine lattice
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -4188,7 +4188,7 @@ index efc35d01..9c2ca261 100644
 From 977028df7834a98c6fbf524f5c6942440e507c8d Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 17:14:46 +0200
-Subject: [PATCH 20/20] n32: size the DoubleInteger cap to the real width; stop
+Subject: [PATCH 20/21] n32: size the DoubleInteger cap to the real width; stop
  shifting 1 by log2(q0)
 
 HAVE_INT128 indicates the compiler has __int128, not that int128_t is 128 bits --
@@ -4630,6 +4630,153 @@ index c53ba025..7f10b6e6 100644
      #else
      typedef int64_t DoubleInteger;
      int32_t MAX_BITS_IN_WORD_LOCAL = LargeScalingFactorConstants::MAX_BITS_IN_WORD;
+-- 
+2.43.0
+
+
+From 76e074da26048872339258f4c865f2662dbdcde1 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 21:58:28 +0200
+Subject: [PATCH 21/21] =?UTF-8?q?RR:=20single-stage=20(budget=20{1,1})=20l?=
+ =?UTF-8?q?inear=20transform=20fixed=20=E2=80=94=20window=20params,=20leve?=
+ =?UTF-8?q?l=20conversion,=20ct=20alignment?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+EvalLinearTransformPrecompute built PREFIX plaintext params (PopLastParam)
+and read lEnc/lDec as raw levels; under RR the params are the WINDOW of
+(nLvl-1) - L - compositeDegree (the multi-stage convention) via RRStageParams.
+EvalLinearTransform gains the ct-to-plaintext level alignment the multi-stage
+transforms already had (exact contained drop; throws if ct is below).
+The probe no longer aborts on a top-level-rep throw (only the low-level
+test is evidence).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Rr9eovHRigZB5v4N8d2gYP
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 63 ++++++++++++++++++++--
+ 1 file changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 46dd76b1..f2e53375 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -2776,6 +2776,10 @@ std::vector<uint32_t> FHECKKSRNS::FindSlotsToCoeffsRotationIndices(uint32_t slot
+ // Precomputations for CoeffsToSlots and SlotsToCoeffs
+ //------------------------------------------------------------------------------
+ 
++// RR: forward declaration — defined below, next to the multi-stage precomputes it serves.
++static std::shared_ptr<ILDCRTParams<BigInteger>> RRStageParams(
++    const std::shared_ptr<CryptoParametersCKKSRNS>& cryptoParams, uint32_t M, uint32_t l);
++
+ std::vector<ReadOnlyPlaintext> FHECKKSRNS::EvalLinearTransformPrecompute(
+     const CryptoContextImpl<DCRTPoly>& cc, const std::vector<std::vector<std::complex<double>>>& A, double scale,
+     uint32_t L, bool extended) const {
+@@ -2787,7 +2791,23 @@ std::vector<ReadOnlyPlaintext> FHECKKSRNS::EvalLinearTransformPrecompute(
+     auto cryptoParams     = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(cc.GetCryptoParameters());
+     auto compositeDegree  = cryptoParams->GetCompositeDegree();
+     auto elementParams    = *(cryptoParams->GetElementParams());
++    // RR: PopLastParam is the PREFIX construction — the plaintext params at level L are the
++    // WINDOW of that level (window ++ P), which RRStageParams builds; the level passed to
++    // MakeAuxPlaintext is L itself, exactly as the multi-stage precomputes do. This is what
++    // made the budget {1,1} single-stage path crash with a Modulus missmatch in ct*pt: the
++    // pt sat on top-prefix primes the windowed ciphertext does not have.
+     uint32_t towersToDrop = (L == 0) ? 0 : elementParams.GetParams().size() - L - compositeDegree;
++    std::shared_ptr<ILDCRTParams<DCRTPoly::Integer>> elementParamsPtr;
++    if (cryptoParams->IsRRChain()) {
++        // `L` counts LEVELS REMAINING (lEnc/lDec); the plaintext's OpenFHE level is the same
++        // conversion the multi-stage precomputes use: (nLvl-1) - L - compositeDegree. Passing L
++        // raw put the single-stage plaintexts at the chain BOTTOM and the LT alignment then
++        // dropped the raised ciphertext 24 levels down after it.
++        const uint32_t rrLvl = (cryptoParams->RRNumLevels() - 1) - L - compositeDegree;
++        towersToDrop         = rrLvl;
++        elementParamsPtr     = RRStageParams(cryptoParams, cc.GetCyclotomicOrder(), rrLvl);
++    }
++    else {
+     for (uint32_t i = 0; i < towersToDrop; ++i)
+         elementParams.PopLastParam();
+ 
+@@ -2805,7 +2825,8 @@ std::vector<ReadOnlyPlaintext> FHECKKSRNS::EvalLinearTransformPrecompute(
+         moduli[sizeQ + i] = paramsP[i]->GetModulus();
+         roots[sizeQ + i]  = paramsP[i]->GetRootOfUnity();
+     }
+-    auto elementParamsPtr = std::make_shared<ILDCRTParams<DCRTPoly::Integer>>(cc.GetCyclotomicOrder(), moduli, roots);
++    elementParamsPtr = std::make_shared<ILDCRTParams<DCRTPoly::Integer>>(cc.GetCyclotomicOrder(), moduli, roots);
++    }
+ 
+     // Computing the baby-step bStep and the giant-step gStep.
+     auto& p   = GetBootPrecom(slots);
+@@ -2848,6 +2869,14 @@ std::vector<ReadOnlyPlaintext> FHECKKSRNS::EvalLinearTransformPrecompute(
+     auto elementParams       = *(cryptoParams->GetElementParams());
+ 
+     uint32_t towersToDrop = (L == 0) ? 0 : elementParams.GetParams().size() - L - compositeDegree;
++    // RR: same window construction and level conversion as the single-matrix overload above.
++    std::shared_ptr<ILDCRTParams<DCRTPoly::Integer>> elementParamsPtr;
++    if (cryptoParams->IsRRChain()) {
++        const uint32_t rrLvl = (cryptoParams->RRNumLevels() - 1) - L - compositeDegree;
++        towersToDrop         = rrLvl;
++        elementParamsPtr     = RRStageParams(cryptoParams, cc.GetCyclotomicOrder(), rrLvl);
++    }
++    else {
+     for (uint32_t i = 0; i < towersToDrop; ++i)
+         elementParams.PopLastParam();
+ 
+@@ -2865,7 +2894,8 @@ std::vector<ReadOnlyPlaintext> FHECKKSRNS::EvalLinearTransformPrecompute(
+         moduli[sizeQ + i] = paramsP[i]->GetModulus();
+         roots[sizeQ + i]  = paramsP[i]->GetRootOfUnity();
+     }
+-    auto elementParamsPtr = std::make_shared<ILDCRTParams<DCRTPoly::Integer>>(cc.GetCyclotomicOrder(), moduli, roots);
++    elementParamsPtr = std::make_shared<ILDCRTParams<DCRTPoly::Integer>>(cc.GetCyclotomicOrder(), moduli, roots);
++    }
+ 
+     uint32_t slots = A.size();
+ 
+@@ -3368,17 +3398,42 @@ std::vector<std::vector<ReadOnlyPlaintext>> FHECKKSRNS::EvalSlotsToCoeffsPrecomp
+ //------------------------------------------------------------------------------
+ 
+ Ciphertext<DCRTPoly> FHECKKSRNS::EvalLinearTransform(const std::vector<ReadOnlyPlaintext>& A,
+-                                                     ConstCiphertext<DCRTPoly>& ct) const {
++                                                     ConstCiphertext<DCRTPoly>& ct_in) const {
+     // Computing the baby-step bStep and the giant-step gStep.
+     uint32_t slots = A.size();
+     auto& p        = GetBootPrecom(slots);
+     uint32_t bStep = (p.m_dim1 == 0) ? ceil(sqrt(slots)) : p.m_dim1;
+     uint32_t gStep = ceil(static_cast<double>(slots) / bStep);
+ 
+-    auto cc    = ct->GetCryptoContext();
++    auto cc    = ct_in->GetCryptoContext();
+     uint32_t M = cc->GetCyclotomicOrder();
+     uint32_t N = cc->GetRingDimension();
+ 
++    // RR: the multi-stage transforms align ct and plaintext levels; this single-stage
++    // (budget {1,1}) path multiplied the ciphertext straight against plaintexts encoded at
++    // lEnc/lDec and crashed with a Modulus missmatch whenever the levels differed. Align
++    // here: descend the ciphertext to the plaintexts' level — an EXACT contained drop in
++    // the bootstrap region (LevelReduce carries the routed RR arm). A ciphertext BELOW the
++    // plaintexts has no repair, exactly as on the GPU side.
++    Ciphertext<DCRTPoly> ctAligned;
++    std::shared_ptr<const CiphertextImpl<DCRTPoly>> ct = ct_in;
++    {
++        const auto cpRR = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ct_in->GetCryptoParameters());
++        if (cpRR->IsRRChain() && !A.empty() && A[0] != nullptr) {
++            const uint32_t ptLvl = A[0]->GetLevel();
++            const uint32_t ctLvl = ct_in->GetLevel();
++            if (ctLvl > ptLvl)
++                OPENFHE_THROW("RR EvalLinearTransform: ciphertext level " + std::to_string(ctLvl) +
++                              " is BELOW the plaintexts at level " + std::to_string(ptLvl) +
++                              " — check the EvalMod depth pairing (RR_BTS_MODEVAL twin).");
++            if (ctLvl < ptLvl) {
++                ctAligned = ct_in->Clone();
++                cc->GetScheme()->LevelReduceInternalInPlace(ctAligned, ptLvl - ctLvl);
++                ct = ctAligned;
++            }
++        }
++    }
++
+     // computes the NTTs for each CRT limb (for the hoisted automorphisms used
+     // later on)
+     auto digits = cc->EvalFastRotationPrecompute(ct);
 -- 
 2.43.0
 
