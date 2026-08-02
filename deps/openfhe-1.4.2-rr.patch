@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/13] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/14] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/13] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/14] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/13] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/14] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/13] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/14] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/13] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/14] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/13] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/14] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/13] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/14] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/13] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/14] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/13] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/14] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/13] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/14] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/13] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/14] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/13] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/14] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/13] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/14] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3317,6 +3317,89 @@ index c1bef6bb..21edbabf 100644
      }
  }
  
+-- 
+2.43.0
+
+
+From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 10:29:26 +0200
+Subject: [PATCH 14/14] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+ =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ENCAPS was throwing `Times(): Modulus missmatch` inside KeySwitchSparse, which
+is a single-tower (q0, p) fast path: it takes tower 0 of the ciphertext, extends
+it to (q, p) and returns a ONE-tower result. An RR bottom level is Cheddar's
+L0 = {q0, 2 tau} — three limbs — so that path is not even well-defined there.
+
+COMPOSITESCALING had already hit exactly this and answered it: use the standard
+hybrid keyswitch for the dense->sparse direction, and generate the M-4 key with
+algo->KeySwitchGen instead of KeySwitchGenSparse. RR takes the same route, for
+the same reason and with the stronger one on top — the design keeps ONE key at
+P*Qmax read positionally, which a single-tower helper cannot be. It is also the
+CPU twin of the GPU-side createContextSwitchingKeys fix made earlier.
+
+On the bts17 chain at dnum 5, all three secret distributions now RUN:
+
+  uniform : 21 levels consumed, ends RR level  6, gains  5
+  sparse  : 16 levels consumed, ends RR level 11, gains 10
+  encaps  : 16 levels consumed, ends RR level 11, gains 10
+
+SPARSE and ENCAPS both land on level 11 — the LAST bootstrap level — so no bare
+rescale crosses the region boundary, which was the scale-convention failure.
+UNIFORM's degree-88 Chebyshev still overruns by 5 levels and still crosses.
+
+Remaining residual, shared by all three and unchanged by this commit: the output
+decodes to ~1e-6 against a message of 0.5. That is the correction factor
+(deg = 53 vs correctionFactor = 11), which needs a SIGNED correction and the RR
+plaintext modulus, and is tracked separately.
+
+Gates: rr_cpu_gate PASS on both chains (bts16/dnum4 and bts17/dnum5); classic
+control PASS at 13.6 bits.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 21edbabf..4f197b32 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -1434,7 +1434,12 @@ std::shared_ptr<std::map<uint32_t, EvalKey<DCRTPoly>>> FHECKKSRNS::EvalBootstrap
+         // that ExtendCiphertext then over-reads => segfault). Use the standard hybrid
+         // keyswitch machinery for the dense->sparse direction instead, exactly like the
+         // sparse->dense direction below always has; it works at any tower count.
+-        if (cryptoParams->GetCompositeDegree() > 1)
++        // RR: same argument as composite, and stronger. The single-tower (q0, p) fast path
++        // cannot represent a bottom level that is a w-limb WINDOW (Cheddar's L0 = {q0, 2 tau}),
++        // and the RR design keeps ONE key at P*Qmax read positionally. So the dense->sparse key
++        // is a standard hybrid key here too — which is also what the GPU side's
++        // createContextSwitchingKeys was changed to generate.
++        if (cryptoParams->GetCompositeDegree() > 1 || cryptoParams->IsRRChain())
+             (*evalKeys)[M - 4] = algo->KeySwitchGen(privateKey, skNew);
+         else
+             (*evalKeys)[M - 4] = KeySwitchGenSparse(privateKey, skNew);
+@@ -1809,8 +1814,13 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         if (cryptoParams->GetSecretKeyDist() == SPARSE_ENCAPSULATED) {
+             auto evalKeyMap = cc->GetEvalAutomorphismKeyMap(raised->GetKeyTag());
+ 
+-            // transform from a denser secret to a sparser one
+-            raised = KeySwitchSparse(raised, evalKeyMap.at(2 * N - 4));
++            // transform from a denser secret to a sparser one. RR takes the standard hybrid
++            // keyswitch for the same reason composite does: KeySwitchSparse is single-tower and
++            // returns a 1-tower ciphertext, which the w-limb RR bottom cannot be.
++            if (cryptoParams->IsRRChain())
++                algo->KeySwitchInPlace(raised, evalKeyMap.at(2 * N - 4));
++            else
++                raised = KeySwitchSparse(raised, evalKeyMap.at(2 * N - 4));
+ 
+             // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
+             auto& ctxtDCRT = raised->GetElements();
 -- 
 2.43.0
 
