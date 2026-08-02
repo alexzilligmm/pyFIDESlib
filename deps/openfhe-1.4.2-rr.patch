@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/15] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/16] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/15] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/16] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/15] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/16] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/15] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/16] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/15] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/16] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/15] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/16] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/15] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/16] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/15] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/16] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/15] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/16] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/15] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/16] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/15] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/16] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/15] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/16] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/15] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/16] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3324,7 +3324,7 @@ index c1bef6bb..21edbabf 100644
 From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:29:26 +0200
-Subject: [PATCH 14/15] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+Subject: [PATCH 14/16] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
  =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3407,7 +3407,7 @@ index 21edbabf..4f197b32 100644
 From 90b517b0fe93f3c48692943887714400b54e45c6 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:44:09 +0200
-Subject: [PATCH 15/15] RR: the signed correction, and the adjust now preserves
+Subject: [PATCH 15/16] RR: the signed correction, and the adjust now preserves
  the message exactly
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3662,6 +3662,129 @@ index 94239f00..9392c35d 100644
  // Cache: one RRChain per crypto-parameters object. RRChain's constructor builds a
  // DCRTPoly::Params for every level, so constructing one inside ModReduce (which runs once per
  // level of every circuit) would dominate. Keyed by the params pointer — that is what identifies
+-- 
+2.43.0
+
+
+From 3d7da05eaf17a481d230a14bb5d8d94dca8b9cb7 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 11:09:15 +0200
+Subject: [PATCH 16/16] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
+ =?UTF-8?q?t=20is=2064-bit=20on=20this=20build=20=E2=80=94=20the=20message?=
+ =?UTF-8?q?=20flows=20again?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+THE BUG, and it was three lines from where the bracket said it would be:
+
+    double factor = static_cast<uint128_t>(1) << round(log2(qDouble));
+
+At NATIVEINT=32, `uint128_t` is `uint64_t` (basicint.h:57). An RR chain's q0 is
+the 3-limb bottom WINDOW, ~2^78, so this shifts by 78 on a 64-bit type: it wraps
+to a shift of 14 and `factor` comes out 2^14 instead of 2^78. Measured, side by
+side with the working chain:
+
+    classic  pre = 0.999756      qDouble = 2^27.9996
+    RR       pre = 1.79189e+19   qDouble = 2^77.9581     <- exactly 2^63.96
+
+`pre` feeds `scaleEnc`, which is the scale the CtS PLAINTEXTS are encoded at — so
+CoeffsToSlots was multiplying by a factor 2^64 wrong and destroying the message,
+while every stage around it measured correct. A classic chain never trips it
+because its q0 is 2^28 and a shift of 28 is fine. Computing the power in double
+(std::pow) fixes it.
+
+SECOND, uncovered by the first: the integer 2^deg recovery after the Chebyshev.
+COMPOSITESCALING already skips it because it uses the sf/q0 input normalization
+and carries the matching recovery in the StC plaintexts as scaleDec = q0/sf(0).
+RR uses the same convention, so applying 2^deg on top double-counts it — visible
+as a jump of exactly 8.4e6 = 2^23 = 2^deg between post-doubleangle and pre-StC,
+where classic's deg = 1 makes the same multiply harmless.
+
+RESULT: the message now flows through the whole of EvalMod with
+classic-comparable magnitudes, where before every stage past CtS was a constant.
+
+    post-CtS          0.00682  0.01223  -0.03305   (was ~1e-6)
+    pre-cheby        -0.06071  0.03035   0.06071
+    post-cheby        0.32980 -0.25794   0.48469   (was 0.779474 constant)
+    post-doubleangle -0.04087  0.02800  -0.05601
+    pre-StC          -0.04087  0.02800  -0.05601   (2^deg no longer double-counted)
+
+STILL FAILING at StC: post-StC does not decrypt, and the output scale is 2^107.2
+at a level whose table says 2^55.9. That is the one remaining stage, and the
+suspect is the StC plaintext scale (scaleDec and MakeAuxPlaintext's boundary
+gating), not the pipeline feeding it.
+
+Gates: rr_cpu_gate PASS on both chains; classic control PASS at 13.5 bits.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 29 ++++++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 85b1cc90..ee1916d4 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -270,7 +270,13 @@ void FHECKKSRNS::EvalBootstrapSetup(const CryptoContextImpl<DCRTPoly>& cc, std::
+         uint32_t compositeDegree = cryptoParams->GetCompositeDegree();
+ 
+         double qDouble  = GetBigModulus(cryptoParams);
+-        double factor   = static_cast<uint128_t>(1) << static_cast<uint32_t>(std::round(std::log2(qDouble)));
++        // `1 << round(log2 q0)` OVERFLOWS on this build. At NATIVEINT=32 `uint128_t` is not a
++        // 128-bit type, so a shift of 78 wraps to a shift of 14 and factor comes out 2^14
++        // instead of 2^78 — making pre = q0/factor = 2^63.96 (measured: 1.79e19) where it
++        // should be ~1. That poisons scaleEnc, i.e. the scale the CtS plaintexts are ENCODED
++        // at, which is why CoeffsToSlots destroyed the message while every stage around it
++        // measured correct. A classic chain never trips it because its q0 is 2^28.
++        double factor   = std::pow(2.0, std::round(std::log2(qDouble)));
+         double pre      = (compositeDegree > 1) ? 1.0 : qDouble / factor;
+         double scaleEnc = pre / k;
+         // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+@@ -337,6 +343,16 @@ void FHECKKSRNS::EvalBootstrapSetup(const CryptoContextImpl<DCRTPoly>& cc, std::
+         else {
+             precom->m_U0hatTPreFFT = EvalCoeffsToSlotsPrecompute(cc, ksiPows, rotGroup, false, scaleEnc, lEnc);
+             precom->m_U0PreFFT     = EvalSlotsToCoeffsPrecompute(cc, ksiPows, rotGroup, false, scaleDec, lDec);
++            if (std::getenv("RR_BTS_TRACE")) {
++                std::cerr << "[rr_trace] SETUP: pre=" << pre << " k=" << k << " scaleEnc=" << scaleEnc
++                          << " scaleDec=" << scaleDec << " qDouble=2^" << std::log2(qDouble)
++                          << " sf0=2^" << std::log2(cryptoParams->GetScalingFactorReal(0)) << "\n";
++                if (!precom->m_U0hatTPreFFT.empty() && !precom->m_U0hatTPreFFT[0].empty())
++                    std::cerr << "[rr_trace] SETUP: CtS pt[0][0] scale=2^"
++                              << std::log2(precom->m_U0hatTPreFFT[0][0]->GetScalingFactor())
++                              << "  StC pt[0][0] scale=2^"
++                              << std::log2(precom->m_U0PreFFT[0][0]->GetScalingFactor()) << "\n";
++            }
+         }
+     }
+ }
+@@ -1952,7 +1968,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     }
+ 
+     btsTrace("post-raise", raised);
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-norm  ", t); }
++    if (std::getenv("RR_BTS_TRACE")) std::cerr << "[rr_trace]   (pre=" << pre
++        << " k=" << k << " N=" << N << " -> factor " << (pre*(1.0/(k*N))) << ")\n";
+     cc->EvalMultInPlace(raised, pre * (1.0 / (k * N)));
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-norm ", t); }
+     btsTrace("post-kN-mult", raised);
+ 
+     // no linear transformations are needed for Chebyshev series as the range has been normalized to [-1,1]
+@@ -2126,7 +2146,12 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         btsTrace("post-DA", ctxtEnc);
+ 
+         // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+-        if (st != COMPOSITESCALINGAUTO && st != COMPOSITESCALINGMANUAL) {
++        // RR skips this for the same reason COMPOSITESCALING does: both use the sf/q0 input
++        // normalization (pre = sf(0)/q0) and carry the matching recovery in the StC plaintexts
++        // as scaleDec = q0/sf(0). Applying the integer 2^deg on top double-counts it — measured
++        // as a jump of exactly 8.4e6 = 2^23 = 2^deg between post-doubleangle and pre-StC, where
++        // classic's deg = 1 makes the same multiply harmless.
++        if (st != COMPOSITESCALINGAUTO && st != COMPOSITESCALINGMANUAL && !cryptoParams->IsRRChain()) {
+             // scale the message back up after Chebyshev interpolation
+             algo->MultByIntegerInPlace(ctxtEnc, scalar);
+         }
 -- 
 2.43.0
 
