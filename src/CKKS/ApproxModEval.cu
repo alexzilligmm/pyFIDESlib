@@ -625,9 +625,19 @@ const std::vector<double>& coefficients, double a, double b) const {
 
 	// if (ctxt.NoiseLevel == 1)
 	//     ctxt.multScalar(1.0);
+	if (std::getenv("RR_CHEB_DBG"))
+		std::fprintf(stderr, "[cheb_dbg] ctxt: lvl=%d NL=%u NF=2^%.3f | T0 post-copy: lvl=%d NL=%u NF=2^%.3f\n",
+					 ctxt.getLevel(), ctxt.NoiseLevel, std::log2(ctxt.NoiseFactor), T[0]->getLevel(), T[0]->NoiseLevel,
+					 std::log2(T[0]->NoiseFactor));
 	if (T[0]->NoiseLevel == 2)
 		T[0]->rescale();
+	amProbe("T0-init", *T[0]);
 	for (uint32_t i = 2; i <= k; i++) {
+		{
+			char lbl[24];
+			std::snprintf(lbl, sizeof lbl, "T0-i%u", i);
+			amProbe(lbl, *T[0]);
+		}
 		// if i is a power of two
 		if constexpr (sync)
 			cudaDeviceSynchronize();
@@ -636,13 +646,17 @@ const std::vector<double>& coefficients, double a, double b) const {
 			// if i is odd
 			// compute T_{2i+1}(y) = 2*T_i(y)*T_{i+1}(y) - y
 			T[i / 2]->adjustForMult(*T[i / 2 - 1]);
+			amProbe("odd-adj1", *T[i / 2 - 1]);
 			T[i / 2 - 1]->adjustForMult(*T[i / 2]);
+			amProbe("odd-adj2", *T[i / 2 - 1]);
 			T[i - 1]->mult(*T[i / 2 - 1], *T[i / 2], false);
+			amProbe("odd-mult", *T[i / 2 - 1]);
 			T[i - 1]->add(*T[i - 1]);
 			ctxt.adjustForAddOrSub(*T[i - 1]);
 			if (ctxt.NoiseLevel == 1)
 				T[i - 1]->rescale();
 			T[i - 1]->sub(ctxt);
+			amProbe("odd-end", *T[i / 2 - 1]);
 			// if (ctxt.NoiseLevel == 2)
 			//     T[i - 1]->rescale();
 		} else {

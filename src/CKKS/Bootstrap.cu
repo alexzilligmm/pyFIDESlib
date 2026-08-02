@@ -509,7 +509,16 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         //------------------------------------------------------------------------------
 
         // Coefficients of the Chebyshev series interpolating 1/(2 Pi) Sin(2 Pi K x)
-        double k = cc.GetBootK();
+        // RATIONAL RESCALING: k = 1.0, not GetBootK(). The RR OpenFHE setup folds the 1/K
+        // division into the imported CtS plaintexts (EvalBootstrapSetup's scaleEnc carries it,
+        // k = K_SPARSE_ENCAPSULATED there), and OpenFHE's own run side therefore uses k = 1.0
+        // for SPARSE/ENCAPS (ckksrns-fhe.cpp GetBootstrapConstants). Dividing by bootK here as
+        // well put the EvalMod input lattice at 1/512 where the sine's zeros sit at 1/32 —
+        // measured by grid readout against the CPU oracle, then confirmed by an env sweep:
+        // exactly x16 restores annihilation (post-DA 0.15 constant -> 3.6e-5) and the message
+        // (end-to-end -8.5 -> +3.3 bits). Classic keeps GetBootK(): its refit coefficients are
+        // built for the divided input and the shipped path is parity-validated as is.
+        double k = cc.isRR() ? 1.0 : cc.GetBootK();
 
         // TO-DO: The 1/32 scale will be pre-applied with OpenFHE v1.4, so remove it from here
         double constantEvalMult = pre * (1.0 / (k * cc.N));

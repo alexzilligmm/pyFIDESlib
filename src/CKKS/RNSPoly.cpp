@@ -945,6 +945,24 @@ void RNSPoly::dropToLevel(int level) {
     //
     // level < 0 is separate and is not a level move at all: "this polynomial holds nothing",
     // which every Ciphertext constructor issues on its pooled auxiliary polys.
+    //
+    // RATIONAL RESCALING: under RR the reset must be REAL. The classic tail below only rewrites
+    // `level` and keeps the limb storage as capacity — fine on a prefix chain, where a later
+    // grow() reuses limbs whose slot IS their prime. On a window, the kept limbs belong to
+    // whatever window the pooled poly last had; grow() to a different level then updates pbase
+    // and appends the missing tail, silently producing a MIXED-pbase partition (the guard is an
+    // assert, deleted in this Release build). That is the multMonomial bug's general form, and
+    // it hit every fresh-Ciphertext-then-copy in the Chebyshev evaluator (T0-init decoded NaN
+    // on a KNOWN input). Freeing the limbs costs the pool's reuse; correctness first.
+    if (cc.isRR() && level < 0 && this->level >= 0) {
+        for (auto& g : GPU) {
+            cudaSetDevice(g.device);
+            while (!g.limb.empty())
+                g.dropLimb();
+        }
+        this->level = level;
+        return;
+    }
     if (cc.isRR() && level >= 0 && level < this->level) {
         const int lo = cc.windowLo(level), hi = cc.windowHi(level);
         const int curLo = cc.windowLo(this->level), curHi = cc.windowHi(this->level);

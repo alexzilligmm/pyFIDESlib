@@ -56,12 +56,25 @@ void FIDESlib::CKKS::Accumulate(Ciphertext& ctxt, const int bStep, const int str
             indexes.push_back(idx);
             auxptr.emplace_back(&aux[idx / stride / s - 1]);
         }
-        ctxt.rotate_hoisted(indexes, auxptr, true);
-        ctxt.extend();
-        for (size_t i = 0; i < indexes.size(); ++i) {
-            ctxt.add(*auxptr[i]);
+        // RATIONAL RESCALING: the ext=true / extend / modDown trio defers the hoisted keyswitch's
+        // ModDown so the adds happen once in the extended P*Q basis — a classic-path optimisation.
+        // The RR rotate_hoisted fallback performs FULL rotations (each already moddowned) and only
+        // ALLOCATES special limbs for ext=true, never fills them, so the extended add consumed
+        // garbage: post-raise finite, pre-CtS nonfinite=64 at slots=64, measured. Under RR do the
+        // arithmetic plainly: rotate non-ext, add in Q, no extend/modDown.
+        if (ctxt.cc.isRR()) {
+            ctxt.rotate_hoisted(indexes, auxptr, false);
+            for (size_t i = 0; i < indexes.size(); ++i) {
+                ctxt.add(*auxptr[i]);
+            }
+        } else {
+            ctxt.rotate_hoisted(indexes, auxptr, true);
+            ctxt.extend();
+            for (size_t i = 0; i < indexes.size(); ++i) {
+                ctxt.add(*auxptr[i]);
+            }
+            ctxt.modDown(false);
         }
-        ctxt.modDown(false);
     }
     if (size * stride == ctxt.slots)
         ctxt.slots = stride;

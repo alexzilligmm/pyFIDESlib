@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/18] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/20] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/18] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/20] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/18] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/20] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/18] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/20] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/18] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/20] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/18] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/20] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/18] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/20] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/18] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/20] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/18] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/20] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/18] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/20] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/18] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/20] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/18] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/20] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/18] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/20] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3324,7 +3324,7 @@ index c1bef6bb..21edbabf 100644
 From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:29:26 +0200
-Subject: [PATCH 14/18] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+Subject: [PATCH 14/20] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
  =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3407,7 +3407,7 @@ index 21edbabf..4f197b32 100644
 From 90b517b0fe93f3c48692943887714400b54e45c6 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:44:09 +0200
-Subject: [PATCH 15/18] RR: the signed correction, and the adjust now preserves
+Subject: [PATCH 15/20] RR: the signed correction, and the adjust now preserves
  the message exactly
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3669,7 +3669,7 @@ index 94239f00..9392c35d 100644
 From 3d7da05eaf17a481d230a14bb5d8d94dca8b9cb7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:09:15 +0200
-Subject: [PATCH 16/18] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
+Subject: [PATCH 16/20] =?UTF-8?q?RR=20EvalMod:=20a=20128-bit=20shift=20tha?=
  =?UTF-8?q?t=20is=2064-bit=20on=20this=20build=20=E2=80=94=20the=20message?=
  =?UTF-8?q?=20flows=20again?=
 MIME-Version: 1.0
@@ -3792,7 +3792,7 @@ index 85b1cc90..ee1916d4 100644
 From 5d149352e1372ae41dcab7e06133eac260affeed Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:22:32 +0200
-Subject: [PATCH 17/18] RR StC: realize the boundary-gated rescale; output now
+Subject: [PATCH 17/20] RR StC: realize the boundary-gated rescale; output now
  lands on the payload top
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3893,7 +3893,7 @@ index ee1916d4..d8375f1b 100644
 From 366ba8755862cc74182c826f8160cc9171ebdead Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 11:28:19 +0200
-Subject: [PATCH 18/18] =?UTF-8?q?RR=20StC:=20the=20output=20is=20NOISE,=20?=
+Subject: [PATCH 18/20] =?UTF-8?q?RR=20StC:=20the=20output=20is=20NOISE,=20?=
  =?UTF-8?q?not=20a=20scrambled=20message=20=E2=80=94=20a=20different=20bug?=
  =?UTF-8?q?=20class?=
 MIME-Version: 1.0
@@ -3949,6 +3949,687 @@ index d8375f1b..efc35d01 100644
      }
  
  #if NATIVEINT != 128
+-- 
+2.43.0
+
+
+From 17056014df7aab54d2c5947ea75b936f5c039481 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 12:25:45 +0200
+Subject: [PATCH 19/20] RR bootstrap FIXED: setup-pre leaked q0/2^round into
+ the sine lattice
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The run side normalizes with pre = sf0/qDouble (exact q0, the COMPOSITESCALING
+convention); the setup took the uniform-chain arm pre = qDouble/factor and baked
+the q0-to-power-of-2 ratio 0.97138 into scaleEnc — so every q0-multiple I landed
+off the sine grid by I*2^-5.1 and EvalMod emitted randomness-dependent junk.
+Found by bootstrapping an encryption of ZERO and measuring the pre-cheby grid:
+0.97138/(2K) where the sine expects 1/(2K). One line: RR takes pre = 1.0, the
+same arm COMPOSITESCALING takes (scaleDec already did via the mixed test).
+
+Result: low-level bootstrap ENCAPS 9.1 bits / SPARSE 7.7 (RR_CORR_EXTRA=5),
+9 levels gained, 17 consumed; classic control 14.0 untouched; rr_cpu_gate PASS
+both chains. Remaining gap to classic is the structural q0/sf=2^23 recovery
+amplification of an honest ~2^-18 floor — chain-shape, not code.
+
+Also: env-gated instruments (RR_STC_DEEP, RR_CORR_EXTRA, RR_AUX_TRACE,
+RR_STC_DEFER_SCALE, [rr_sf] recursion dump, CtS/StC stage traces, 64-slot
+trace decrypts) — all off by default, documented in the repo's ENV_VARS.md.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VHVmEXyrss44n8GTMvRWBE
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 100 ++++++++++++++++++++-
+ 1 file changed, 96 insertions(+), 4 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index efc35d01..9c2ca261 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -118,9 +118,11 @@ static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
+             else {
+                 cc->Decrypt(*g_rrTraceKey, ct, &pt);
+             }
+-            pt->SetLength(4);
++            pt->SetLength(64);
+             const auto v = pt->GetCKKSPackedValue();
+-            std::cerr << "  v[0..2]= " << v[0].real() << " " << v[1].real() << " " << v[2].real();
++            std::cerr << "  v[0..63]=";
++            for (int q = 0; q < 64; ++q)
++                std::cerr << " " << v[q].real();
+         } catch (const std::exception& e) {
+             std::cerr << "  <decrypt: " << e.what() << ">";
+         }
+@@ -128,6 +130,24 @@ static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
+     std::cerr << "\n";
+ }
+ 
++// RR_STC_DEEP=1: decrypt INSIDE an StC stage — each hoisted rotation and the first
++// plaintext product, brought down from the extended basis via KeySwitchDown so the
++// trace key can read them. Discriminates "the rotations at this window are corrupt"
++// from "the stage plaintexts are corrupt": the two halves of the only stage that fails.
++static void rrStcDeep(const CryptoContext<DCRTPoly>& cc, const char* tag,
++                      const Ciphertext<DCRTPoly>& ext) {
++    static const bool on = std::getenv("RR_STC_DEEP") != nullptr;
++    if (!on || !g_rrTraceKey)
++        return;
++    try {
++        auto down                    = cc->KeySwitchDown(ext);
++        ConstCiphertext<DCRTPoly> c2 = down;
++        rrBtsTrace(tag, c2);
++    } catch (const std::exception& e) {
++        std::cerr << "[rr_deep] " << tag << " <" << e.what() << ">\n";
++    }
++}
++
+ 
+ // RR (RR_PLAN (c).4c step 3): the LEVEL of a ciphertext element.
+ //
+@@ -277,7 +297,15 @@ void FHECKKSRNS::EvalBootstrapSetup(const CryptoContextImpl<DCRTPoly>& cc, std::
+         // at, which is why CoeffsToSlots destroyed the message while every stage around it
+         // measured correct. A classic chain never trips it because its q0 is 2^28.
+         double factor   = std::pow(2.0, std::round(std::log2(qDouble)));
+-        double pre      = (compositeDegree > 1) ? 1.0 : qDouble / factor;
++        // RR takes the COMPOSITESCALING setup convention (pre = 1), matching the sf0/q0 input
++        // normalization EvalBootstrap uses on an RR chain. The uniform-chain pre = q0/factor
++        // re-introduces the q0-to-power-of-2 ratio into the CtS encode scale, and that ratio
++        // lands IN THE VALUE LATTICE: measured with a zero message, pre-cheby values sat on a
++        // grid of 0.97138/(2K) where the sine expects 1/(2K) — every q0-multiple I off-grid by
++        // I*2^-5.1, which the sine turns into the randomness-dependent output junk. A classic
++        // chain survives the same expression only because its q0 is 2^28.0004 (ratio 1.00025);
++        // the RR bottom window is 2^77.958 (ratio 0.97138). See RR_BTS_RUNLOG.
++        double pre      = (compositeDegree > 1 || cryptoParams->IsRRChain()) ? 1.0 : qDouble / factor;
+         double scaleEnc = pre / k;
+         // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+         double scaleDec = (compositeDegree > 1) ? qDouble / cryptoParams->GetScalingFactorReal(0) : 1.0 / pre;
+@@ -347,6 +375,22 @@ void FHECKKSRNS::EvalBootstrapSetup(const CryptoContextImpl<DCRTPoly>& cc, std::
+                 std::cerr << "[rr_trace] SETUP: pre=" << pre << " k=" << k << " scaleEnc=" << scaleEnc
+                           << " scaleDec=" << scaleDec << " qDouble=2^" << std::log2(qDouble)
+                           << " sf0=2^" << std::log2(cryptoParams->GetScalingFactorReal(0)) << "\n";
++                // The FLEXIBLEAUTO value lattice relies on sf(l+1) = sf(l)^2/F(l) holding to
++                // double precision — pt encode scales telescope against the actual rescales
++                // only when it does. Classic builds the table FROM that recursion; the RR table
++                // comes from the chain. Print the per-level violation to see what it costs.
++                if (cryptoParams->IsRRChain()) {
++                    const uint32_t nl = cryptoParams->RRNumLevels();
++                    for (uint32_t l = 0; l + 1 < nl; ++l) {
++                        const double sfl  = cryptoParams->GetScalingFactorReal(l);
++                        const double sfl1 = cryptoParams->GetScalingFactorReal(l + 1);
++                        const double F    = cryptoParams->RRRescaleFactorAtLevel(l);
++                        std::cerr << "[rr_sf] lvl " << l << " sf=2^" << std::log2(sfl)
++                                  << " F=2^" << std::log2(F)
++                                  << " viol=log2(sf(l+1)*F/sf(l)^2)=" << std::log2(sfl1 * F / (sfl * sfl))
++                                  << "\n";
++                    }
++                }
+                 for (size_t st_ = 0; st_ < precom->m_U0hatTPreFFT.size(); ++st_)
+                     if (!precom->m_U0hatTPreFFT[st_].empty())
+                         std::cerr << "[rr_trace] SETUP: CtS stage " << st_ << " pt scale=2^"
+@@ -1802,7 +1846,13 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+                       std::to_string(m_correctionFactor) + "].");
+     }
+ #endif
+-    const int32_t correctionSigned = static_cast<int32_t>(m_correctionFactor) - deg;
++    int32_t correctionSigned = static_cast<int32_t>(m_correctionFactor) - deg;
++    // RR_CORR_EXTRA=n (diagnostic): scale the message up by n MORE bits before the raise.
++    // If the post-bootstrap noise is an absolute floor, output SNR should improve ~1 bit per
++    // bit of extra correction until the sine-range bound (maxUp) is hit — the measurement
++    // that decides between "message sits too low" and "noise scales with the message".
++    if (const char* e = std::getenv("RR_CORR_EXTRA"); e && cryptoParams->IsRRChain())
++        correctionSigned -= std::atoi(e);
+     if (rrSigned) {
+         // The bound is on the value that actually lands in the bottom modulus: the ciphertext
+         // enters the raise at scale powP and is scaled up by 2^-correction, so the constraint
+@@ -2839,6 +2889,13 @@ std::vector<std::vector<ReadOnlyPlaintext>> FHECKKSRNS::EvalSlotsToCoeffsPrecomp
+ 
+     int32_t flagRem = (remCollapse == 0) ? 0 : 1;
+ 
++    // RR_STC_DEFER_SCALE=1 (diagnostic): leave the q0/sf recovery factor OUT of the last-stage
++    // plaintexts. If the noise at StC's output is the ENCODE of value*scale (~2^62, the only
++    // aux plaintexts that cross MAX_BITS_IN_WORD), the output becomes a clean constant-ratio
++    // mis-scale; if the noise survives, the encode is innocent.
++    if (std::getenv("RR_STC_DEFER_SCALE"))
++        scale = 1.0;
++
+     // result is the rotated plaintext version of coeff
+     std::vector<std::vector<ReadOnlyPlaintext>> result(levelBudget, std::vector<ReadOnlyPlaintext>(numRotations));
+     if (flagRem == 1 && levelBudget >= 1) {
+@@ -3178,6 +3235,12 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalCoeffsToSlots(const std::vector<std::vector
+         }
+         result = cc->KeySwitchDown(outer);
+         result->GetElements()[0] += first;
++        {
++            char nm[32];
++            std::snprintf(nm, sizeof(nm), "CtS stage %d", static_cast<int>(levelBudget - 1 - s));
++            ConstCiphertext<DCRTPoly> r2 = result;
++            rrBtsTrace(nm, r2);
++        }
+     }
+ 
+     if (flagRem) {
+@@ -3236,6 +3299,10 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalCoeffsToSlots(const std::vector<std::vector
+         }
+         result = cc->KeySwitchDown(outer);
+         result->GetElements()[0] += first;
++        {
++            ConstCiphertext<DCRTPoly> r2 = result;
++            rrBtsTrace("CtS stage rem", r2);
++        }
+     }
+     return result;
+ }
+@@ -3309,6 +3376,12 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalSlotsToCoeffs(const std::vector<std::vector
+             else
+                 fastRotation[j] = cc->KeySwitchExt(result, true);
+         }
++        for (int32_t j = 0; j < g; ++j) {
++            char nm[48];
++            std::snprintf(nm, sizeof(nm), "deep s%d rot j=%d (r=%d)", static_cast<int>(s),
++                          static_cast<int>(j), static_cast<int>(rot_in[s][j]));
++            rrStcDeep(cc, nm, fastRotation[j]);
++        }
+ 
+         Ciphertext<DCRTPoly> outer;
+         DCRTPoly first;
+@@ -3316,6 +3389,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalSlotsToCoeffs(const std::vector<std::vector
+             // for the first iteration with j=0:
+             int32_t G  = g * i;
+             auto inner = EvalMultExt(fastRotation[0], A[s][G]);
++            if (i == 0) {
++                char nm[48];
++                std::snprintf(nm, sizeof(nm), "deep s%d mult0", static_cast<int>(s));
++                rrStcDeep(cc, nm, inner);
++            }
+             // continue the loop
+             for (int32_t j = 1; j < g; ++j) {
+                 if ((G + j) != static_cast<int32_t>(numRotations))
+@@ -3351,6 +3429,12 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalSlotsToCoeffs(const std::vector<std::vector
+         }
+         result = cc->KeySwitchDown(outer);
+         result->GetElements()[0] += first;
++        {
++            char nm[32];
++            std::snprintf(nm, sizeof(nm), "StC stage %d", static_cast<int>(s));
++            ConstCiphertext<DCRTPoly> r2 = result;
++            rrBtsTrace(nm, r2);
++        }
+     }
+ 
+     if (flagRem) {
+@@ -3409,6 +3493,10 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalSlotsToCoeffs(const std::vector<std::vector
+         }
+         result = cc->KeySwitchDown(outer);
+         result->GetElements()[0] += first;
++        {
++            ConstCiphertext<DCRTPoly> r2 = result;
++            rrBtsTrace("StC stage rem", r2);
++        }
+     }
+     return result;
+ }
+@@ -3909,6 +3997,10 @@ Plaintext FHECKKSRNS::MakeAuxPlaintext(const CryptoContextImpl<DCRTPoly>& cc, co
+     int32_t logApprox   = logc - logValid;
+     double approxFactor = pow(2, logApprox);
+ 
++    if (std::getenv("RR_AUX_TRACE") && logApprox > 0)
++        std::cerr << "[rr_aux] level=" << level << " scFact=2^" << std::log2(scFact) << " logc=" << logc
++                  << " logApprox=" << logApprox << "\n";
++
+     std::vector<int64_t> temp(2 * slots);
+ 
+     for (size_t i = 0; i < slots; ++i) {
+-- 
+2.43.0
+
+
+From 977028df7834a98c6fbf524f5c6942440e507c8d Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 17:14:46 +0200
+Subject: [PATCH 20/20] n32: size the DoubleInteger cap to the real width; stop
+ shifting 1 by log2(q0)
+
+HAVE_INT128 indicates the compiler has __int128, not that int128_t is 128 bits --
+at NATIVEINT=32 basicint.h typedefs it to int64_t while HAVE_INT128 stays defined,
+so GetElementForEvalMult selected a 125-bit cap for a 64-bit word and any scalar
+with operand*scFactor >= 2^63 skipped the scale-down path and wrapped silently.
+
+Also replaces the two remaining static_cast<uint128_t>(1) << round(log2 qDouble)
+with std::pow(2.0, ...), exact for a power of two and immune to the width.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VHVmEXyrss44n8GTMvRWBE
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp    | 323 +++++++++++++++++-
+ .../lib/scheme/ckksrns/ckksrns-leveledshe.cpp |  10 +-
+ 2 files changed, 326 insertions(+), 7 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 9c2ca261..46dd76b1 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -98,6 +98,8 @@ namespace lbcrypto {
+ // takes the same FLEXIBLEAUTO code, so a side-by-side of the two traces localizes a scale bug
+ // without any reference implementation — the stage where the two stop being structurally the
+ // same is the stage that is wrong.
++static bool rrCleanDecode(ConstCiphertext<DCRTPoly>& ct, uint32_t slots, std::vector<std::complex<double>>& out);
++
+ static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
+     static const bool on = std::getenv("RR_BTS_TRACE") != nullptr;
+     if (!on)
+@@ -109,6 +111,17 @@ static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
+         try {
+             auto cc  = ct->GetCryptoContext();
+             auto cp  = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ct->GetCryptoParameters());
++            // The production decode caps every reading at ~16.7 bits (see rrCleanDecode).
++            if (std::getenv("RR_CLEAN_DECODE")) {
++                std::vector<std::complex<double>> cv;
++                if (rrCleanDecode(ct, ct->GetSlots(), cv)) {
++                    std::cerr << "  v[0..63]=";
++                    for (uint32_t q = 0; q < 64 && q < cv.size(); ++q)
++                        std::cerr << " " << cv[q].real();
++                    std::cerr << "\n";
++                    return;
++                }
++            }
+             Plaintext pt;
+             if (cp->IsRRChain()) {
+                 const RRChain& rr = GetRRChain(cc);
+@@ -149,6 +162,251 @@ static void rrStcDeep(const CryptoContext<DCRTPoly>& cc, const char* tag,
+ }
+ 
+ 
++// RR_COEFF_NOISE=1: the bootstrap's noise in ABSOLUTE COEFFICIENT UNITS, at the checkpoints
++// before CoeffsToSlots.
++//
++// Every indirect route to this number argues about a normalization — the slot decode, the
++// 1/(2K) lattice unit, the coefficient-vs-slot domain — and those arguments kept coming out
++// tens of bits apart. This reads it directly instead: decrypt to the coefficient domain
++// (b = c0 + c1*s), lift centered to the integers, and reduce centered modulo q0. Every
++// multiple of q0 vanishes identically, so what is left is m*Delta*2^-corr + e — and with a
++// ZERO message it is e alone, in the units the ciphertext actually stores.
++//
++// Valid only where the ciphertext is under the ORIGINAL secret and its modulus is a multiple
++// of q0: post-adjust (modulus IS q0) and post-raise/post-normalize (modulus Q, and q0 | Q).
++// It must NOT be called between the 2N-4 and 2N-2 switches of the encapsulated path, where
++// the ciphertext decrypts under the sparse secret.
++static void rrCoeffNoise(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
++    static const bool on = std::getenv("RR_COEFF_NOISE") != nullptr;
++    if (!on || !g_rrTraceKey)
++        return;
++    try {
++        const auto cp  = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ct->GetCryptoParameters());
++        const auto& cv = ct->GetElements();
++        if (cv.size() != 2)
++            return;
++
++        // The key restricted to the ciphertext's towers, matched by MODULUS: an RR window is
++        // not a prefix, so ciphertext tower j is not key tower j.
++        DCRTPoly s              = (*g_rrTraceKey)->GetPrivateElement();
++        const auto& ctP         = cv[0].GetParams()->GetParams();
++        const auto& sP          = s.GetParams()->GetParams();
++        DCRTPoly sr(cv[0].GetParams(), EVALUATION, true);
++        for (size_t j = 0; j < ctP.size(); ++j) {
++            size_t i = 0;
++            for (; i < sP.size(); ++i)
++                if (sP[i]->GetModulus() == ctP[j]->GetModulus())
++                    break;
++            if (i == sP.size()) {
++                std::cerr << "[rr_noise] " << stage << " <no key tower for ct modulus "
++                          << ctP[j]->GetModulus() << ">\n";
++                return;
++            }
++            sr.SetElementAtIndex(j, s.GetElementAtIndex(i));
++        }
++
++        DCRTPoly c0 = cv[0], c1 = cv[1];
++        c0.SetFormat(EVALUATION);
++        c1.SetFormat(EVALUATION);
++        DCRTPoly b = c0 + c1 * sr;
++        b.SetFormat(COEFFICIENT);
++
++        const auto big  = b.CRTInterpolate();
++        const BigInteger Q  = b.GetModulus();
++        const BigInteger Qh = Q >> 1;
++
++        BigInteger q0(1);
++        if (cp->IsRRChain()) {
++            const auto win      = cp->RRWindowAtLevel(cp->RRNumLevels() - 1);
++            const auto& paramsQ = cp->GetElementParams()->GetParams();
++            for (uint32_t i = win.first; i <= win.second; ++i)
++                q0 = q0 * BigInteger(paramsQ[i]->GetModulus());
++        }
++        else {
++            q0 = BigInteger(cp->GetElementParams()->GetParams()[0]->GetModulus());
++        }
++        // Below the raise the modulus is the level's own window and q0 does not divide it —
++        // but there is no I*q0 lattice there either, so for a ZERO message the centered lift
++        // IS the noise. Fall back to reducing mod Q (a no-op) and say which mode was used.
++        const bool latticed = (Q.Mod(q0) == BigInteger(0)) && (Q > q0);
++        if (!latticed)
++            q0 = Q;
++        const BigInteger q0h = q0 >> 1;
++
++        const usint n = b.GetRingDimension();
++        double mx = 0.0, ss = 0.0;
++        for (usint i = 0; i < n; ++i) {
++            const BigInteger& v = big[i];
++            BigInteger mag      = (v > Qh) ? (Q - v) : v;
++            BigInteger r        = mag.Mod(q0);
++            if (r > q0h)
++                r = q0 - r;
++            const double d = r.ConvertToDouble();
++            mx             = std::max(mx, d);
++            ss += d * d;
++        }
++        const double rms = std::sqrt(ss / static_cast<double>(n));
++        std::cerr << "[rr_noise] " << stage << (latticed ? " [mod q0]" : " [raw]  ") << ": max=2^" << (mx > 0 ? std::log2(mx) : -999.0)
++                  << " rms=2^" << (rms > 0 ? std::log2(rms) : -999.0) << "  (q0=2^"
++                  << std::log2(q0.ConvertToDouble()) << ", ct scale=2^" << std::log2(ct->GetScalingFactor())
++                  << ", limbs=" << cv[0].GetNumOfElements() << ")\n";
++    } catch (const std::exception& e) {
++        std::cerr << "[rr_noise] " << stage << " <" << e.what() << ">\n";
++    }
++}
++
++// RR_CLEAN_DECODE=1: decrypt WITHOUT the production decode's 2^p renormalization.
++//
++// `CKKSPackedEncoding::Decode`'s multi-tower branch brings the scaling factor down through
++// 2^p with p = GetPlaintextModulus() = the context's scalingModSize (25), which costs ~16.7
++// bits REGARDLESS of the chain's real 2^40/2^55 scales (measured: the round trip tracks
++// scalingModSize 1:1). Every stage value printed by the trace has therefore been read through
++// a 16.7-bit instrument, and at pre-cheby — where the ciphertext carries the I lattice at
++// magnitude ~0.3 — that alone accounts for a lattice residual of ~9e-5 against the ~1.1e-4
++// observed. So the trace could not distinguish "CoeffsToSlots injected noise" from "the decode
++// could not see it".
++//
++// This path CRT-interpolates, centers, divides by the ciphertext's ACTUAL scaling factor and
++// runs FFTSpecial — the same steps, minus the renormalization — so it is limited by double
++// precision (~50 bits) instead. Slow (a BigInteger reconstruction per coefficient), diagnostic only.
++static bool rrCleanDecode(ConstCiphertext<DCRTPoly>& ct, uint32_t slots,
++                          std::vector<std::complex<double>>& out) {
++    const auto& cv = ct->GetElements();
++    if (cv.size() != 2 || !g_rrTraceKey)
++        return false;
++    DCRTPoly s      = (*g_rrTraceKey)->GetPrivateElement();
++    const auto& ctP = cv[0].GetParams()->GetParams();
++    const auto& sP  = s.GetParams()->GetParams();
++    DCRTPoly sr(cv[0].GetParams(), EVALUATION, true);
++    for (size_t j = 0; j < ctP.size(); ++j) {
++        size_t i = 0;
++        for (; i < sP.size(); ++i)
++            if (sP[i]->GetModulus() == ctP[j]->GetModulus())
++                break;
++        if (i == sP.size())
++            return false;
++        sr.SetElementAtIndex(j, s.GetElementAtIndex(i));
++    }
++    DCRTPoly c0 = cv[0], c1 = cv[1];
++    c0.SetFormat(EVALUATION);
++    c1.SetFormat(EVALUATION);
++    DCRTPoly b = c0 + c1 * sr;
++    b.SetFormat(COEFFICIENT);
++
++    const auto big      = b.CRTInterpolate();
++    const BigInteger M  = b.GetModulus();
++    const BigInteger Mh = M >> 1;
++    const uint32_t N    = b.GetRingDimension();
++    const uint32_t Nh   = N / 2;
++    const uint32_t gap  = Nh / slots;
++    const double sc     = ct->GetScalingFactor();
++
++    out.assign(slots, std::complex<double>(0.0, 0.0));
++    for (uint32_t i = 0; i < slots; ++i) {
++        const BigInteger& re = big[gap * i];
++        const BigInteger& im = big[gap * i + Nh];
++        const double dre = (re > Mh) ? -((M - re).ConvertToDouble()) : re.ConvertToDouble();
++        const double dim = (im > Mh) ? -((M - im).ConvertToDouble()) : im.ConvertToDouble();
++        out[i] = std::complex<double>(dre / sc, dim / sc);
++    }
++    DiscreteFourierTransform::FFTSpecial(out, N * 2);
++    return true;
++}
++
++// RR_CTS_ROTCHECK=1: does ONE hoisted rotation preserve its input?
++//
++// The hoisted path runs a SINGLE modup (`EvalFastRotationPrecompute`) and dots many rotations
++// against it, accumulating in the extended basis before one `KeySwitchDown`. That shared
++// precompute is the only place in CoeffsToSlots where one rotation's precision depends on work
++// done for a DIFFERENT rotation — which is exactly the kind of defect that survives the
++// component-wise testing every other CtS suspect has now passed.
++//
++// No lattice and no host DFT are needed, because a rotation is just a PERMUTATION of the slot
++// values: decode both sides with the clean decode and find the cyclic shift that matches best.
++// The residual at that shift IS the rotation's error, self-calibrated against the input.
++static void rrRotCheck(const CryptoContext<DCRTPoly>& cc, const char* tag, const Ciphertext<DCRTPoly>& in,
++                       const Ciphertext<DCRTPoly>& ext) {
++    static const bool on = std::getenv("RR_CTS_ROTCHECK") != nullptr;
++    if (!on || !g_rrTraceKey)
++        return;
++    try {
++        auto down = cc->KeySwitchDown(ext);
++        ConstCiphertext<DCRTPoly> a = in, b = down;
++        const uint32_t sl = cc->GetRingDimension() / 2;  // decode every slot, not the sparse view
++        std::vector<std::complex<double>> va, vb;
++        if (!rrCleanDecode(a, sl, va) || !rrCleanDecode(b, sl, vb))
++            return;
++        const size_t n = std::min(va.size(), vb.size());
++        double mag = 0.0;
++        for (size_t i = 0; i < n; ++i)
++            mag = std::max(mag, std::abs(va[i]));
++        double bestErr = 1e300;
++        size_t bestK   = 0;
++        for (size_t k = 0; k < n; ++k) {
++            double e = 0.0;
++            for (size_t i = 0; i < n; ++i) {
++                const double d = std::abs(vb[i] - va[(i + k) % n]);
++                if (d > e) {
++                    e = d;
++                    if (e >= bestErr)
++                        break;  // this shift is already worse than the best
++                }
++            }
++            if (e < bestErr) {
++                bestErr = e;
++                bestK   = k;
++            }
++        }
++        std::cerr << "[rr_rotchk] " << tag << ": best shift " << bestK << " -> "
++                  << (mag > 0 && bestErr > 0 ? -std::log2(bestErr / mag) : 99.0) << " bits  (|v|max=" << mag
++                  << ", scale 2^" << std::log2(in->GetScalingFactor()) << ")\n";
++    } catch (const std::exception& e) {
++        std::cerr << "[rr_rotchk] " << tag << " <" << e.what() << ">\n";
++    }
++}
++
++// RR_AUX_SELFTEST=1: MakeAuxPlaintext's OWN precision, measured alone.
++//
++// This is the last component of CoeffsToSlots never measured in isolation. It is a DIFFERENT
++// encoder from the one `rr_op_precision` cleared (CKKSPackedEncoding): its own logApprox
++// scale-down path, its own NATIVEINT=32 FitToNativeVector. Every other CtS suspect is excluded.
++//
++// The measurement takes no decode and no ciphertext, so nothing else can contaminate it:
++// MakeAuxPlaintext computes `inverse = FFTSpecialInv(value)` and then rounds
++// `inverse[i]*scFact` into the polynomial's coefficients, so recomputing that on the host and
++// diffing the INTEGER coefficients reads the encoder's error directly. Reported relative to the
++// largest coefficient, which is the scale the ciphertext product actually sees.
++static double rrAuxEncodeBits(const Plaintext& p, const std::vector<std::complex<double>>& value,
++                              uint32_t slots) {
++    DCRTPoly e = p->GetElement<DCRTPoly>();
++    e.SetFormat(COEFFICIENT);
++    const auto big      = e.CRTInterpolate();
++    const BigInteger M  = e.GetModulus();
++    const BigInteger Mh = M >> 1;
++    const uint32_t N    = e.GetRingDimension();
++    const uint32_t Nh   = N / 2;
++    const uint32_t gap  = Nh / slots;
++    const double scFact = p->GetScalingFactor();
++
++    std::vector<std::complex<double>> inv(value);
++    inv.resize(slots);
++    DiscreteFourierTransform::FFTSpecialInv(inv, N * 2);
++
++    auto centered = [&](const BigInteger& v) -> double {
++        return (v > Mh) ? -((M - v).ConvertToDouble()) : v.ConvertToDouble();
++    };
++
++    double err = 0.0, mag = 0.0;
++    for (uint32_t i = 0; i < slots; ++i) {
++        const double wantRe = inv[i].real() * scFact;
++        const double wantIm = inv[i].imag() * scFact;
++        err = std::max(err, std::fabs(centered(big[gap * i]) - wantRe));
++        err = std::max(err, std::fabs(centered(big[gap * i + Nh]) - wantIm));
++        mag = std::max(mag, std::max(std::fabs(wantRe), std::fabs(wantIm)));
++    }
++    return (err > 0 && mag > 0) ? -std::log2(err / mag) : 99.0;
++}
++
+ // RR (RR_PLAN (c).4c step 3): the LEVEL of a ciphertext element.
+ //
+ // `level = totalLimbs - currentLimbs` is the prefix-chain identity, and OpenFHE's bootstrap
+@@ -405,6 +663,42 @@ void FHECKKSRNS::EvalBootstrapSetup(const CryptoContextImpl<DCRTPoly>& cc, std::
+                                   << " level=" << precom->m_U0PreFFT[st_][0]->GetLevel()
+                                   << " limbs=" << precom->m_U0PreFFT[st_][0]->GetElement<DCRTPoly>().GetNumOfElements()
+                                   << "\n";
++                // RR_AUX_SELFTEST: re-encode a KNOWN vector with each stage's OWN params, level
++                // and scale, then diff the integer coefficients against the host FFTSpecialInv.
++                // Two magnitudes, because the stages differ by ~2^23: unit (the DFT entries the
++                // CtS stages carry) and 2^23 (what scaleDec puts in StC's last stage).
++                if (std::getenv("RR_AUX_SELFTEST")) {
++                    auto probe = [&](const char* tag, const std::vector<std::vector<ReadOnlyPlaintext>>& A) {
++                        for (size_t st_ = 0; st_ < A.size(); ++st_) {
++                            if (A[st_].empty())
++                                continue;
++                            const auto& P0   = A[st_][0];
++                            const auto prms  = P0->GetElement<DCRTPoly>().GetParams();
++                            const uint32_t l = P0->GetLevel();
++                            const uint32_t sl = slots;
++                            for (double amp : {1.0, 8388608.0}) {
++                                std::vector<std::complex<double>> v(sl);
++                                for (uint32_t i = 0; i < sl; ++i) {
++                                    const double th = 2.0 * M_PI * static_cast<double>(i * 3 + 1) / sl;
++                                    v[i] = std::complex<double>(amp * std::cos(th), amp * std::sin(th));
++                                }
++                                try {
++                                    auto Q = MakeAuxPlaintext(cc, prms, v, 1, l, sl);
++                                    std::cerr << "[rr_aux_self] " << tag << " stage " << st_ << " level " << l
++                                              << " |v|=2^" << std::log2(amp) << " ptScale=2^"
++                                              << std::log2(Q->GetScalingFactor())
++                                              << " -> encode precision " << rrAuxEncodeBits(Q, v, sl)
++                                              << " bits\n";
++                                } catch (const std::exception& ex) {
++                                    std::cerr << "[rr_aux_self] " << tag << " stage " << st_ << " |v|=2^"
++                                              << std::log2(amp) << " THREW " << ex.what() << "\n";
++                                }
++                            }
++                        }
++                    };
++                    probe("CtS", precom->m_U0hatTPreFFT);
++                    probe("StC", precom->m_U0PreFFT);
++                }
+             }
+         }
+     }
+@@ -1600,7 +1894,7 @@ void FHECKKSRNS::EvalBootstrapPrecompute(const CryptoContextImpl<DCRTPoly>& cc,
+     uint32_t compositeDegree = cryptoParams->GetCompositeDegree();
+ 
+     double qDouble  = GetBigModulus(cryptoParams);
+-    double factor   = static_cast<uint128_t>(1) << static_cast<uint32_t>(std::round(std::log2(qDouble)));
++    double factor   = std::pow(2.0, std::round(std::log2(qDouble)))  /* NOT 1<<n: uint128_t is 64-bit at NATIVEINT=32 */;
+     double pre      = (compositeDegree > 1) ? 1.0 : qDouble / factor;
+     double scaleEnc = pre / k;
+     // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+@@ -1910,9 +2204,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     btsTrace("input", raised);
+     algo->ModReduceInternalInPlace(raised, compositeDegree * (raised->GetNoiseScaleDeg() - 1));
+     btsTrace("pre-adjust", raised);
+-    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-adjust ", t); }
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-adjust ", t);
++      rrCoeffNoise("FRESH ENCRYPTION (pre-adjust)   ", t); }
+     AdjustCiphertext(raised, rrSigned ? static_cast<double>(correctionSigned) : static_cast<double>(correction));
+-    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-adjust", t); }
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-adjust", t);
++      rrCoeffNoise("post-adjust (bottom, modulus IS q0)", t); }
+     btsTrace("post-adjust", raised);
+ 
+     uint32_t N = cc->GetRingDimension();
+@@ -2027,11 +2323,13 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     }
+ 
+     btsTrace("post-raise", raised);
+-    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-norm  ", t); }
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-norm  ", t);
++      rrCoeffNoise("post-raise (top, mod q0)        ", t); }
+     if (std::getenv("RR_BTS_TRACE")) std::cerr << "[rr_trace]   (pre=" << pre
+         << " k=" << k << " N=" << N << " -> factor " << (pre*(1.0/(k*N))) << ")\n";
+     cc->EvalMultInPlace(raised, pre * (1.0 / (k * N)));
+-    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-norm ", t); }
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-norm ", t);
++      rrCoeffNoise("post-normalize (x scConstant)   ", t); }
+     btsTrace("post-kN-mult", raised);
+ 
+     // no linear transformations are needed for Chebyshev series as the range has been normalized to [-1,1]
+@@ -2147,6 +2445,12 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         btsTrace("raised", raised);
+         for (uint32_t j = 1; j < N / (2 * slots); j <<= 1)
+             cc->EvalAddInPlaceNoCheck(raised, cc->EvalRotate(raised, j * slots));
++        // The lattice survives the PartialSum — rotations permute coefficients and a sum of
++        // multiples of q0 is a multiple of q0 — so the mod-q0 noise probe still reads here.
++        // This is the last point before the first ModReduce, after which the value is divided
++        // by F and stops being an integer lattice. It splits the loss between the sparse
++        // fold-back's rotations and CoeffsToSlots itself.
++        { ConstCiphertext<DCRTPoly> t = raised; rrCoeffNoise("post-PartialSum (6 rotations)   ", t); }
+ 
+ #ifdef BOOTSTRAPTIMING
+         TIC(t);
+@@ -3193,6 +3497,13 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalCoeffsToSlots(const std::vector<std::vector
+             else
+                 fastRotation[j] = cc->KeySwitchExt(result, true);
+         }
++        // Each rotation against the SHARED modup, checked on its own (see rrRotCheck).
++        for (int32_t j = 0; j < g; ++j) {
++            char nm[64];
++            std::snprintf(nm, sizeof(nm), "CtS s%d rot j=%d (r=%d)", static_cast<int>(s), static_cast<int>(j),
++                          static_cast<int>(rot_in[s][j]));
++            rrRotCheck(cc, nm, result, fastRotation[j]);
++        }
+ 
+         Ciphertext<DCRTPoly> outer;
+         DCRTPoly first;
+@@ -4369,7 +4680,7 @@ void FHECKKSRNS::EvalFBTSetupInternal(const CryptoContextImpl<DCRTPoly>& cc, con
+ 
+     BigInteger q    = cryptoParams->GetElementParams()->GetParams()[0]->GetModulus().ConvertToInt();
+     auto qDouble    = q.ConvertToLongDouble();
+-    double factor   = static_cast<uint128_t>(1) << static_cast<uint32_t>(std::round(std::log2(qDouble)));
++    double factor   = std::pow(2.0, std::round(std::log2(qDouble)))  /* NOT 1<<n: uint128_t is 64-bit at NATIVEINT=32 */;
+     double pre      = qDouble / factor;
+     double scaleEnc = pre / k;
+     double scaleMod = QPrime.ConvertToLongDouble() / (Bigq.ConvertToLongDouble() * POut.ConvertToDouble());
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+index c53ba025..7f10b6e6 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+@@ -509,9 +509,17 @@ std::vector<DCRTPoly::Integer> LeveledSHECKKSRNS::GetElementForEvalMult(ConstCip
+ 
+     double scFactor = cryptoParams->GetScalingFactorReal(ciphertext->GetLevel());
+ 
++    // HAVE_INT128 says the COMPILER has __int128; it does NOT say `int128_t` is 128 bits.
++    // At NATIVEINT=32 basicint.h typedefs int128_t -> int64_t (and uint128_t -> uint64_t), so
++    // this used to select the 125-bit cap for a 64-bit word: any scalar with
++    // operand*scFactor >= 2^63 then skipped the scale-down path and wrapped SILENTLY.
++    // Size the cap to the type that is actually present. (The RR bootstrap's own adjust sits at
++    // 2^54 and was never hit, but this is the exact defect that cost a session on the GPU twin,
++    // FIDESlib ContextData::ElemForEvalMult.)
+     #if defined(HAVE_INT128)
+     typedef int128_t DoubleInteger;
+-    int32_t MAX_BITS_IN_WORD_LOCAL = 125;
++    int32_t MAX_BITS_IN_WORD_LOCAL =
++        (sizeof(DoubleInteger) >= 16) ? 125 : LargeScalingFactorConstants::MAX_BITS_IN_WORD;
+     #else
+     typedef int64_t DoubleInteger;
+     int32_t MAX_BITS_IN_WORD_LOCAL = LargeScalingFactorConstants::MAX_BITS_IN_WORD;
 -- 
 2.43.0
 

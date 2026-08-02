@@ -1836,7 +1836,17 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 		auto SF		   = [&](int lvl) { return rr_ ? cc.sfAtLevel(lvl) : cc.sfAtLimb(lvl); };
 		auto DROPF	   = [&](int lvl) { return rr_ ? cc.rrRescaleFactor(lvl) : cc.modReduceProduct(lvl); };
 		auto SFBIG	   = [&](int lvl) {
-			   return rr_ ? cc.sfAtLevel(lvl) : cc.param.ScalingFactorRealBig[lvl];
+			   // "Big" = the PRE-RESCALE scale at lvl: classic ScalingFactorRealBig[l] ~ sf(l-1)*q(l).
+			   // The d1d1/d2d1 arms below use it as scf2 so that the residue multiplier
+			   // round(scf2/scf1) times the later rescale's 1/F lands the VALUE unchanged at the
+			   // target's table scale — the invariant is scf2 = sf(target)*F(target+1), computed
+			   // here DIRECTLY (exact even across the region-boundary sf reset, where the
+			   // recursion sf(l)^2 = sf(l-1)*F(l) does not hold). Substituting plain sfAtLevel
+			   // made the multiplier round(~1.0007) = 1 and the follow-up rescale divided the
+			   // value by F ~ 2^55: the operand came back EXACTLY ZERO. That single arm zeroed
+			   // T[0] inside the Chebyshev T-power loop (measured: odd-adj2 = 0 on a known
+			   // input) and with it the whole GPU EvalMod.
+			   return rr_ ? cc.sfAtLevel(lvl - 1) * cc.rrRescaleFactor(lvl) : cc.param.ScalingFactorRealBig[lvl];
 		};
 		usint c1lvl	  = getLevel();
 		usint c2lvl	  = b.getLevel();
@@ -1858,7 +1868,9 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 						this->dropToLevel(b.getLevel());
 					}
 
-					assert(std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
+										if (rr_ && std::getenv("RR_ADJ_CHECK") && std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) >= 0.001)
+						std::fprintf(stderr, "[rr_adj] d2d2 INVARIANT BROKEN: lvl %d->%d deg %d->%d NF=2^%.3f want=2^%.3f\n", (int)c1lvl, (int)c2lvl, (int)c1depth, (int)c2depth, std::log2(NoiseFactor), std::log2(b.NoiseFactor));
+assert(std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
 					NoiseFactor = b.NoiseFactor;
 					/*
 					rescale();
@@ -1885,7 +1897,9 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 							// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl - 2);
 						}
 						rescale();
-						assert(std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
+											if (rr_ && std::getenv("RR_ADJ_CHECK") && std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) >= 0.001)
+						std::fprintf(stderr, "[rr_adj] d2d1 INVARIANT BROKEN: lvl %d->%d deg %d->%d NF=2^%.3f want=2^%.3f\n", (int)c1lvl, (int)c2lvl, (int)c1depth, (int)c2depth, std::log2(NoiseFactor), std::log2(b.NoiseFactor));
+assert(std::abs((NoiseFactor * scf2 / scf1 * q1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
 
 						NoiseFactor = b.NoiseFactor;
 					}
@@ -1898,7 +1912,9 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 					multScalarNoPrecheck(scf2 / scf1 / scf);
 					this->dropToLevel(c2lvl);
 					// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
-					assert(std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
+										if (rr_ && std::getenv("RR_ADJ_CHECK") && std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) >= 0.001)
+						std::fprintf(stderr, "[rr_adj] d1d2 INVARIANT BROKEN: lvl %d->%d deg %d->%d NF=2^%.3f want=2^%.3f\n", (int)c1lvl, (int)c2lvl, (int)c1depth, (int)c2depth, std::log2(NoiseFactor), std::log2(b.NoiseFactor));
+assert(std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
 					NoiseFactor = scf2;
 				} else {
 					double scf1 = NoiseFactor;
@@ -1910,7 +1926,9 @@ bool Ciphertext::adjustForAddOrSubBody(const Ciphertext& b) {
 						// LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl - 1);
 					}
 					rescale();
-					assert(std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
+										if (rr_ && std::getenv("RR_ADJ_CHECK") && std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) >= 0.001)
+						std::fprintf(stderr, "[rr_adj] d1d1 INVARIANT BROKEN: lvl %d->%d deg %d->%d NF=2^%.3f want=2^%.3f\n", (int)c1lvl, (int)c2lvl, (int)c1depth, (int)c2depth, std::log2(NoiseFactor), std::log2(b.NoiseFactor));
+assert(std::abs((NoiseFactor * scf2 / scf1 / scf - b.NoiseFactor) / b.NoiseFactor) < 0.001);
 					NoiseFactor = b.NoiseFactor;
 				}
 			}

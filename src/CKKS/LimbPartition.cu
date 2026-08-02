@@ -440,7 +440,14 @@ void LimbPartition::generateLimbToLevel(int new_level) {
         // edges move and the residues change) — that must go through rrRescale. The one legal
         // widen is ModRaise's, and it has its own entry point (rrWidenToLevel) so that this
         // assert keeps catching everything else.
-        assert(limb.empty() && "RR: growing a live window must go through rrRescale (or rrWidenToLevel for ModRaise)");
+        // Throw, not assert: this build is Release and the deleted assert is exactly what let
+        // pooled polys grow into MIXED-pbase partitions undetected (RNSPoly::dropToLevel(-1)
+        // now frees limbs under RR, so every legitimate caller arrives here empty).
+        if (!limb.empty())
+            throw std::runtime_error("RR: growing a LIVE window (pbase " + std::to_string(pbase) + ", " +
+                                     std::to_string(limb.size()) + " limbs) to level " + std::to_string(new_level) +
+                                     " — level moves go through rrRescale / rrWidenToLevel; a reset must drop to "
+                                     "level -1 first");
         pbase = cc.windowLo(new_level);
     }
     if (new_size > limb.size()) {
