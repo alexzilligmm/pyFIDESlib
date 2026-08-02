@@ -642,7 +642,14 @@ int RNSPoly::automorph_index_precomp(const int idx) const {
 }
 
 void RNSPoly::automorph(const int idx, const int br, RNSPoly* src) {
-    int k = automorph_index_precomp(idx);
+    // idx is a ROTATION COUNT, converted to the Galois exponent 5^(2N-idx) below — EXCEPT the
+    // conjugation, whose Galois element IS 2N-1 and arrives as such. hoistedRotationFused makes
+    // the same distinction (its line `indexes[j] == 2N-1 ? 2N-1 : precomp(...)`), and a
+    // normalized rotation index can never equal 2N-1, so the tag is unambiguous. Without this,
+    // the RR conjugate arm (rotate-style keySwitch + automorph composition) applied 5^1 — a
+    // one-slot rotation — instead of conjugation, and EvalMod's input decoded to NaN while
+    // post-CtS was healthy (measured: post-CtS 1.95e-2, post-conj nonfinite=4096).
+    int k = (idx == 2 * (int)cc.N - 1) ? idx : automorph_index_precomp(idx);
     //int k2 = modpow(5, idx, cc.N * 2);
 
     //std::cout << k << " " << k2 << std::endl;

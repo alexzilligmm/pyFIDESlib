@@ -3727,8 +3727,27 @@ void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*>
     cudaMemcpyAsync(elems, weights.data(), weights.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
     std::vector<void**> psptr(n, nullptr);
     for (int i = 0; i < n; ++i) {
-        psptr[i] = ps[i]->limbptr.data;
-        assert(ps[i]->limb.size() >= limbsize);
+        // RATIONAL RESCALING: the kernel pairs OUTPUT limb j with INPUT limb j, which is the
+        // prefix assumption — on windows, slot j of a level-l poly is global prime lo(l)+j, so
+        // an input at a HIGHER level (wider window, smaller lo) holds this output's primes at
+        // slot lo(out)-lo(in)+j, not j. The Chebyshev weighted sum feeds T powers at mixed
+        // levels here (classic relies on exactly this), so offset each input's limb-pointer
+        // array host-side — the same trick the batched LT plan records — for zero kernel
+        // changes. In the bootstrap region every lower window is contained in the higher one,
+        // so the offset entries exist; a NEGATIVE offset (input below output) has no repair
+        // and throws.
+        int off = 0;
+        if (cc.isRR()) {
+            const int inLvl = *ps[i]->level;
+            off             = cc.windowLo(*level) - cc.windowLo(inLvl);
+            if (off < 0 || cc.windowHi(*level) > cc.windowHi(inLvl))
+                throw std::runtime_error("RR evalLinearWSum: input " + std::to_string(i) + " at level " +
+                                         std::to_string(inLvl) + " (window [" + std::to_string(cc.windowLo(inLvl)) +
+                                         "," + std::to_string(cc.windowHi(inLvl)) + "]) does not contain the output window at level " +
+                                         std::to_string(*level));
+        }
+        psptr[i] = ps[i]->limbptr.data + off;
+        assert((int)ps[i]->limb.size() >= limbsize + off);
     }
     void*** d_psptr;
     cudaMallocAsync(&d_psptr, psptr.size() * sizeof(void**), s.ptr());

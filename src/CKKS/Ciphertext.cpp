@@ -591,6 +591,38 @@ void Ciphertext::mult(const Ciphertext& b, bool rescale, const bool moddown) {
 
 	KeySwitchingKey& kskEval = cc.GetEvalKey(keyID);
 
+	// RATIONAL RESCALING: the fused path below relinearizes through MGPUkeySwitchCore /
+	// modup_ksk_moddown_mgpu — the PREFIX keyswitch, which reads evk row i for ciphertext
+	// tower i. On an RR window slot i is global prime lo+i, so it dots against the wrong rows
+	// and returns well-formed garbage. This was the last unrouted entry point of the four the
+	// [oracle] runlog entry named (keySwitch, rotate/conjugate and rotate_hoisted got their arms
+	// first), and it is why EvalMod exploded (~1e228 at am-cheby) while every checkpoint before
+	// the first ct*ct multiply was healthy. Compose the multiply exactly as the bit-exact-gated
+	// host reference (RREvalMultRelinHost) does: elementwise binomial products at the window,
+	// RRKeySwitchCore on the degree-2 term, add. Fresh window polys, not the keyswitch aux pool
+	// — the pool's single-malloc prefix shape is exactly what an RR window is not.
+	if (cc.isRR()) {
+		const int lvl = c1.getLevel();
+		if (b.c1.getLevel() != lvl)
+			throw std::runtime_error("RR mult: operands at different levels (" + std::to_string(lvl) + " vs " +
+									 std::to_string(b.c1.getLevel()) + ") after adjust — alignment failed");
+		RNSPoly n0(cc, lvl), n1(cc, lvl), c2(cc, lvl), tmp(cc, lvl), d0(cc, lvl), d1(cc, lvl);
+		n0.multElement(c0, b.c0);
+		n1.multElement(c0, b.c1);
+		tmp.multElement(c1, b.c0);
+		n1.add(tmp);
+		c2.multElement(c1, b.c1);
+		RRKeySwitchCore(c2, kskEval, d0, d1);
+		n0.add(d0);
+		n1.add(d1);
+		c0.copy(n0);
+		c1.copy(n1);
+		this->multMetadata(*this, b);
+		if (moddown && rescale && cc.rescaleTechnique == CKKS::FIXEDMANUAL)
+			this->rescale();
+		return;
+	}
+
 	if (0 && cc.GPUid.size() == 1) {
 		if constexpr (0) {
 			constexpr bool PRINT = true;
@@ -2031,9 +2063,18 @@ void Ciphertext::multMonomial(/*Ciphertext& ctxt,*/ int power) {
 
 	if (!cc.precom.monomialCache.contains(power) || cc.precom.monomialCache.find(power)->second.getLevel() != this->getLevel()) {
 		// TODO compute fully as a GPU function.
-		RNSPoly monomial(cc.getAuxilarPoly());
-		monomial.grow(c0.getLevel());
-		monomial.dropToLevel(c0.getLevel());
+		// RATIONAL RESCALING: the pooled auxiliary poly is a LIVE WINDOW from whatever used it
+		// last, and grow() on a live RR window is illegal (its guard is an assert, deleted in a
+		// Release build) — grow-then-drop on it silently yields limbs with a mixed pbase, and the
+		// monomial's residues land on the wrong primes. A fresh poly constructed AT the target
+		// level takes generateLimbToLevel's window path (pbase = windowLo(level)) and is correct
+		// by construction. Classic keeps the pooled poly verbatim.
+		RNSPoly monomial = cc.isRR() ? RNSPoly(cc, c0.getLevel()) : [&] {
+			RNSPoly m(cc.getAuxilarPoly());
+			m.grow(c0.getLevel());
+			m.dropToLevel(c0.getLevel());
+			return m;
+		}();
 		std::vector<uint64_t> coefs(cc.N, 0);
 
 		if (power < cc.N) {

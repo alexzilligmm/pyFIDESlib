@@ -292,10 +292,13 @@ void FIDESlib::CKKS::BootstrapCPUraise(
 
     if (cc.N / 2 == slots) {
         aux.conjugate(ctxt);
+        btsStageProbe("post-conj", aux);
         Ciphertext ctxtEncI(cc_);
         ctxtEncI.sub(ctxt, aux);
         ctxt.add(aux);
+        btsStageProbe("post-add", ctxt);
         ctxtEncI.multMonomial(3 * 2 * cc.N / 4);
+        btsStageProbe("post-mono", ctxtEncI);
         if (cc.rescaleTechnique == CKKS::FIXEDMANUAL)
             ctxt.rescale();
         if (cc.rescaleTechnique == CKKS::FIXEDMANUAL)
@@ -559,10 +562,13 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     if (cc.N / 2 == slots) {
         aux.conjugate(ctxt);
+        btsStageProbe("post-conj", aux);
         Ciphertext ctxtEncI(cc_);
         ctxtEncI.sub(ctxt, aux);
         ctxt.add(aux);
+        btsStageProbe("post-add", ctxt);
         ctxtEncI.multMonomial(3 * 2 * cc.N / 4);
+        btsStageProbe("post-mono", ctxtEncI);
         if (cc.rescaleTechnique == CKKS::FIXEDMANUAL)
             ctxt.rescale();
         if (cc.rescaleTechnique == CKKS::FIXEDMANUAL)

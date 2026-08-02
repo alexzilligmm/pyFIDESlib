@@ -486,6 +486,9 @@ Ciphertext<DCRTPoly> AdvancedSHECKKSRNS::InnerEvalChebyshevPS(ConstCiphertext<DC
 			//    su.dropToLevel(su.getLevel() - 1);
 		}
 
+		amProbe("ps-cu", cu);
+		amProbe("ps-qu", qu);
+		amProbe("ps-su", su);
 		if (flag_c) {
 			if (max_m - m <= 1)
 				T2[m - 1]->adjustForAddOrSub(
@@ -498,7 +501,9 @@ Ciphertext<DCRTPoly> AdvancedSHECKKSRNS::InnerEvalChebyshevPS(ConstCiphertext<DC
 		}
 		if (cc.rescaleTechnique == FIXEDMANUAL && out.NoiseLevel == 2)
 			cu.rescale();
+		amProbe("ps-cu+T2", cu);
 		cu.mult(qu, false);
+		amProbe("ps-cu*qu", cu);
 		cu.add(su); // cu aliases out
 	}
 }
@@ -701,6 +706,11 @@ const std::vector<double>& coefficients, double a, double b) const {
 		if (T[i - 1]->NoiseLevel == 2)
 			T[i - 1]->rescale();
 	}
+	for (size_t i = 1; i <= k; i++) {
+		char lbl[24];
+		std::snprintf(lbl, sizeof lbl, "cheb-T%zu", i);
+		amProbe(lbl, *T[i - 1]);
+	}
 
 	if (cc.rescaleTechnique == CKKS::FIXEDMANUAL) {
 
@@ -753,6 +763,11 @@ const std::vector<double>& coefficients, double a, double b) const {
 		// T2[i]->rescale();
 		if (cc.rescaleTechnique == FIXEDMANUAL && T2[i]->NoiseLevel == 2)
 			T2[i]->rescale();
+	}
+	for (uint32_t i = 0; i < m; i++) {
+		char lbl[24];
+		std::snprintf(lbl, sizeof lbl, "cheb-T2_%u", i);
+		amProbe(lbl, *T2[i]);
 	}
 
 	if constexpr (PRINT) {
@@ -833,11 +848,14 @@ const std::vector<double>& coefficients, double a, double b) const {
 	//  cc->LevelReduceInPlace(T2.front(), nullptr);
 	*/
 
+	amProbe("cheb-T2km1", T2km1);
+
 	if constexpr (true) {
 		Ciphertext out(cc_);
 		innerEvalChebyshevPS(ctxt, ctxt, f2, k, m, T, T2, 0, m);
 		// ctxt.copy(out);
 	}
+	amProbe("cheb-inner", ctxt);
 
 	ctxt.sub(T2km1);
 	/*
