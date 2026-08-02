@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 1/9] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/10] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,8 +133,8 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 2/9] Rational-rescaling chain (Cheddar 25-30): explicit prime
- schedule, windowed levels, drop-k+add-back rescale
+Subject: [PATCH 02/10] Rational-rescaling chain (Cheddar 25-30): explicit
+ prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
   identities in inverted-terminal layout order + per-level contiguous
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 3/9] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/10] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 4/9] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/10] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 5/9] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/10] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 6/9] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/10] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,8 +1769,8 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 7/9] RR: route the HYBRID keyswitch through RRChain (rotations
- reach it); evk-shape guard
+Subject: [PATCH 07/10] RR: route the HYBRID keyswitch through RRChain
+ (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 8/9] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/10] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 9/9] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/10] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2085,6 +2085,657 @@ index ae635d3c..7dcf96d0 100644
      }
      else {
          towersToDrop = (L == 0) ? 0 : elementParams.GetParams().size() - L - compositeDegree * levelBudget;
+-- 
+2.43.0
+
+
+From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 09:35:06 +0200
+Subject: [PATCH 10/10] RR CPU bootstrap: the ModRaise, and the hoisted
+ keyswitch family
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two blockers, both the CPU twin of GPU work already gated.
+
+1. THE CPU ModRaise, diagnosed 2026-08-02 and never built. Every raise site wrote
+   `temp = poly.GetElementAtIndex(0)` — OpenFHE's idiom for "CRT-extend a SINGLE
+   residue across all towers", correct only when the bottom modulus is one prime.
+   An RR chain's bottom is Cheddar's L0 = {q0, 2 tau}: three limbs, ~2^78, so
+   taking tower 0 discarded two thirds of the value (observed: tower 0 carrying
+   chain[1]'s modulus). New RRChain-side `RRExtendCiphertext` reconstructs the
+   w-limb value per coefficient and reduces it onto the top window, CENTERED —
+   the canonical representative in [0, Qw) would turn every negative coefficient
+   into a number just under Qw. Same requirement the GPU gate had to honour
+   against its __int128 reference. Routed at all 7 sites, IsRRChain-guarded.
+
+   ExtendCiphertext (the COMPOSITESCALING raise) is the right shape but is Garner
+   specialized to a PREFIX of compositeDegree primes, while an RR level-0 window
+   sits at layout indices [14,16] — not reachable by a parameter change.
+
+2. THE HOISTED KEYSWITCH. CoeffsToSlots does one modup per stage and many dots
+   against it, accumulating in the extended basis. Milestone (b) routed
+   KeySwitchCore; the hoisted family was never routed and ran the prefix
+   keyswitch on RR windows, which is where both the CPU and the GPU bootstrap
+   were producing garbage. Now:
+
+   - RRChain::KeySwitchCore SPLIT into KeySwitchPrecompute / KeySwitchDotExt /
+     KeySwitchDownExt (+ ExtParams), and re-expressed through them, so the fused
+     and hoisted paths cannot drift apart: same digits, same positional rows,
+     same ModDown.
+   - Six HYBRID entry points get RR arms: KeySwitchExt, KeySwitchDown,
+     KeySwitchDownFirstElement, EvalKeySwitchPrecomputeCore,
+     EvalFastKeySwitchCoreExt, and EvalFastRotationExt's addFirst. The recurring
+     correction is the same one: PModq and the evk rows are indexed by GLOBAL
+     primeid, and window slot i is prime lo + i.
+   - EvalKeySwitchPrecomputeCore is the one entry point handed params but no
+     context, so GetRRChainByParams looks the chain up by crypto-params pointer
+     and THROWS if it was never built — a silent fallback there would be exactly
+     the corruption this routing exists to prevent. EvalBootstrap primes it.
+
+GATE: tests/rr_cpu_gate.cpp PASS after the split and after the routing —
+16.53-17.08 bits across all six windows, matching the recorded 16.46-16.76.
+
+STATE: the CPU RR bootstrap now runs ModRaise and the whole hoisted CtS
+keyswitch, and stops at `EvalMultRelin: operands must sit at the same rr level`
+— level alignment before the ct*ct multiply, the CPU twin of the GPU's
+adjustForAddOrSubBody. That is the next unit.
+
+NOTE on the control: tests/rr_bts_setup_probe.cpp's `classic` mode crashes with
+"double free or corruption" — but it does so IDENTICALLY on deps_n32's
+pre-today OpenFHE, so it is pre-existing (its classic parameters look
+under-provisioned: depth 17 at logN 13) and NOT a regression from this work. It
+therefore cannot serve as the prefix-path regression check it was written to be
+until its parameters are fixed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/include/scheme/ckksrns/ckksrns-rr.h   |  37 +++
+ src/pke/lib/keyswitch/keyswitch-hybrid.cpp    |  56 +++++
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp    |  42 ++++
+ .../lib/scheme/ckksrns/ckksrns-leveledshe.cpp |  12 +-
+ src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp     | 237 +++++++++++++-----
+ 5 files changed, 319 insertions(+), 65 deletions(-)
+
+diff --git a/src/pke/include/scheme/ckksrns/ckksrns-rr.h b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+index 91a73aa8..712df527 100644
+--- a/src/pke/include/scheme/ckksrns/ckksrns-rr.h
++++ b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+@@ -35,6 +35,30 @@ struct RRLevel {
+  *  standard-op dispatch below must NOT construct one per call — ModReduce runs once per level of
+  *  every circuit. Keyed by the crypto-parameters pointer, which is what identifies a chain. */
+ const RRChain& GetRRChain(const CryptoContext<DCRTPoly>& cc);
++/** The cached chain for a crypto-parameters object, for the few call sites that are handed
++ *  params but no context (EvalKeySwitchPrecomputeCore). Throws rather than falling through to
++ *  the prefix path if the chain was never built — a silent fallback there would run the classic
++ *  keyswitch on RR windows, which is precisely the bug this whole routing exists to prevent.
++ *  EvalBootstrap primes the cache up front. */
++const RRChain& GetRRChainByParams(const std::shared_ptr<CryptoParametersBase<DCRTPoly>>& params);
++
++/** RR ModRaise: reinterpret a level-0 ciphertext element on the TOP window's basis.
++ *
++ *  The classic bootstrap writes `temp = poly.GetElementAtIndex(0)`, which is OpenFHE's idiom
++ *  for "CRT-extend a SINGLE residue across all towers" and is correct only when the bottom
++ *  modulus is one prime. An RR chain's bottom is Cheddar's L0 = {q0, 2 tau} — three limbs,
++ *  ~2^78 on our schedule — so taking tower 0 alone discards two thirds of the value and the
++ *  raised ciphertext decrypts to noise (observed: tower 0 carrying chain[1]'s modulus).
++ *
++ *  ExtendCiphertext (the COMPOSITESCALING raise) is the right SHAPE but is Garner specialized
++ *  to a PREFIX of `compositeDegree` primes, whereas an RR level-0 window sits at layout indices
++ *  [lo, hi] — so it cannot be reached by a parameter change.
++ *
++ *  The value must be reconstructed CENTERED: the raise's whole point is that |m| stays small
++ *  relative to q0, and the canonical representative in [0, Q_w) would make every negative
++ *  coefficient a number just under Q_w, i.e. enormous. Same requirement the GPU gate
++ *  (test_rr_modraise) had to honour against its __int128 reference. */
++void RRExtendCiphertext(std::vector<DCRTPoly>& ctxtDCRT, const std::shared_ptr<DCRTPoly::Params>& raisedParams);
+ 
+ class RRChain {
+ public:
+@@ -53,6 +77,8 @@ public:
+      *  entry point is handed a DCRTPoly with no ciphertext to ask, and limb count alone does
+      *  not identify a level. Throws naming the size and low modulus if no window matches. */
+     uint32_t RRLevelOfElement(const DCRTPoly& e) const;
++    /** Level whose WINDOW these element params describe (low modulus + size identify it). */
++    uint32_t RRLevelOfParams(const std::shared_ptr<DCRTPoly::Params>& prm) const;
+     // factor of the rescale rHi -> rHi-1 (= prod(dropped)/prod(added))
+     double RescaleFactor(uint32_t rHi) const {
+         return m_F.at(rHi - 1);
+@@ -81,6 +107,17 @@ public:
+     // (b, a) contribution already ModDown'ed back to the window basis.
+     std::pair<DCRTPoly, DCRTPoly> KeySwitchCore(const DCRTPoly& c, const EvalKey<DCRTPoly>& evk, uint32_t r) const;
+ 
++    // The three pieces KeySwitchCore is built from, exposed because the CtS/StC stages drive
++    // them SEPARATELY: one modup per stage, many dots against it, one ModDown at the end
++    // (EvalFastRotationPrecompute / EvalFastRotationExt / KeySwitchDown). Sharing the pieces is
++    // what keeps the fused and hoisted paths from drifting apart.
++    std::shared_ptr<std::vector<DCRTPoly>> KeySwitchPrecompute(const DCRTPoly& c, uint32_t r) const;
++    std::pair<DCRTPoly, DCRTPoly> KeySwitchDotExt(const std::vector<DCRTPoly>& digits, const EvalKey<DCRTPoly>& evk,
++                                                 uint32_t r) const;
++    DCRTPoly KeySwitchDownExt(const DCRTPoly& cExt, uint32_t r) const;
++    /** Element params of level r's extended basis, [window | P]. */
++    const std::shared_ptr<DCRTPoly::Params>& ExtParams(uint32_t r) const;
++
+     // ct x ct product with relinearization (both at the same rr level, deg 1)
+     Ciphertext<DCRTPoly> EvalMultRelin(ConstCiphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const;
+ 
+diff --git a/src/pke/lib/keyswitch/keyswitch-hybrid.cpp b/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
+index c56f32f6..e999ec35 100644
+--- a/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
++++ b/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
+@@ -296,6 +296,33 @@ Ciphertext<DCRTPoly> KeySwitchHYBRID::KeySwitchExt(ConstCiphertext<DCRTPoly> cip
+ 
+     const auto paramsQl  = cv[0].GetParams();
+     const auto paramsP   = cryptoParams->GetParamsP();
++
++    // RR: the extended basis is the LEVEL's [window | P], and PModq is indexed by GLOBAL
++    // primeid — window slot i carries prime lo + i, so PModq[i] would scale by the wrong
++    // residue on every window whose low edge is above 0.
++    if (cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChain(ciphertext->GetCryptoContext());
++        const uint32_t r  = rr.RRLevelOfParams(paramsQl);
++        const uint32_t lo = rr.Level(r).lo;
++        const auto& PModq = cryptoParams->GetPModq();
++        std::vector<NativeInteger> PModqW(paramsQl->GetParams().size());
++        for (size_t i = 0; i < PModqW.size(); ++i)
++            PModqW[i] = PModq[lo + i];
++        const uint32_t sizeW = paramsQl->GetParams().size();
++        std::vector<DCRTPoly> resultElementsRR(cv.size());
++        for (uint32_t k = 0; k < cv.size(); ++k) {
++            resultElementsRR[k] = DCRTPoly(rr.ExtParams(r), Format::EVALUATION, true);
++            if (addFirst || k > 0) {
++                auto cMult = cv[k].TimesNoCheck(PModqW);
++                for (uint32_t i = 0; i < sizeW; ++i)
++                    resultElementsRR[k].SetElementAtIndex(i, std::move(cMult.GetElementAtIndex(i)));
++            }
++        }
++        auto resultRR = ciphertext->CloneEmpty();
++        resultRR->SetElements(std::move(resultElementsRR));
++        return resultRR;
++    }
++
+     const auto paramsQlP = cv[0].GetExtendedCRTBasis(paramsP);
+ 
+     uint32_t sizeQl = paramsQl->GetParams().size();
+@@ -334,6 +361,15 @@ Ciphertext<DCRTPoly> KeySwitchHYBRID::KeySwitchDown(ConstCiphertext<DCRTPoly> ci
+ 
+     auto cTilda = ciphertext->GetElements();
+ 
++    // RR: ModDown back to the WINDOW, with the level's own window-relaid P tables.
++    if (cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChain(ciphertext->GetCryptoContext());
++        const uint32_t r  = rr.RRLevelOf(ciphertext);
++        auto resultRR     = ciphertext->CloneEmpty();
++        resultRR->SetElements({rr.KeySwitchDownExt(cTilda[0], r), rr.KeySwitchDownExt(cTilda[1], r)});
++        return resultRR;
++    }
++
+     PlaintextModulus t = (cryptoParams->GetNoiseScale() == 1) ? 0 : cryptoParams->GetPlaintextModulus();
+ 
+     DCRTPoly ct0 = cTilda[0].ApproxModDown(paramsQl, cryptoParams->GetParamsP(), cryptoParams->GetPInvModq(),
+@@ -358,6 +394,12 @@ DCRTPoly KeySwitchHYBRID::KeySwitchDownFirstElement(ConstCiphertext<DCRTPoly> ci
+ 
+     const std::vector<DCRTPoly>& cTilda = ciphertext->GetElements();
+ 
++    // RR: same as KeySwitchDown, first element only.
++    if (cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChain(ciphertext->GetCryptoContext());
++        return rr.KeySwitchDownExt(cTilda[0], rr.RRLevelOf(ciphertext));
++    }
++
+     const auto paramsP   = cryptoParams->GetParamsP();
+     const auto paramsQlP = cTilda[0].GetParams();
+ 
+@@ -407,6 +449,12 @@ std::shared_ptr<std::vector<DCRTPoly>> KeySwitchHYBRID::KeySwitchCore(const DCRT
+ std::shared_ptr<std::vector<DCRTPoly>> KeySwitchHYBRID::EvalKeySwitchPrecomputeCore(
+     const DCRTPoly& c, std::shared_ptr<CryptoParametersBase<DCRTPoly>> cryptoParamsBase) const {
+     const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(cryptoParamsBase);
++    // RR: digits are window-intersect-partition, laid out as [window | P]. This is the ONE
++    // keyswitch entry point handed params but no context, hence the params-keyed lookup.
++    if (cryptoParams && cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChainByParams(cryptoParamsBase);
++        return rr.KeySwitchPrecompute(c, rr.RRLevelOfElement(c));
++    }
+ 
+     const std::shared_ptr<ParmType> paramsQl  = c.GetParams();
+     const std::shared_ptr<ParmType> paramsP   = cryptoParams->GetParamsP();
+@@ -518,6 +566,14 @@ std::shared_ptr<std::vector<DCRTPoly>> KeySwitchHYBRID::EvalFastKeySwitchCoreExt
+     const std::shared_ptr<std::vector<DCRTPoly>> digits, const EvalKey<DCRTPoly> evalKey,
+     const std::shared_ptr<ParmType> paramsQl) const {
+     const auto cryptoParams         = std::dynamic_pointer_cast<CryptoParametersRNS>(evalKey->GetCryptoParameters());
++    // RR: the evk is a single key at P*Qmax and its rows are read POSITIONALLY — window slot i
++    // is key row lo + i. The loop below reads row `i`, which is right only on a prefix chain.
++    if (cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChain(evalKey->GetCryptoContext());
++        auto ba           = rr.KeySwitchDotExt(*digits, evalKey, rr.RRLevelOfParams(paramsQl));
++        return std::make_shared<std::vector<DCRTPoly>>(
++            std::vector<DCRTPoly>{std::move(ba.first), std::move(ba.second)});
++    }
+     const std::vector<DCRTPoly>& bv = evalKey->GetBVector();
+     const std::vector<DCRTPoly>& av = evalKey->GetAVector();
+ 
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 7dcf96d0..e76d89b8 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -37,6 +37,7 @@
+ #include "math/hal/basicint.h"
+ #include "math/dftransform.h"
+ #include "scheme/ckksrns/ckksrns-cryptoparameters.h"
++#include "scheme/ckksrns/ckksrns-rr.h"
+ #include "scheme/ckksrns/ckksrns-fhe.h"
+ #include "scheme/ckksrns/ckksrns-utils.h"
+ #include "schemebase/base-scheme.h"
+@@ -432,6 +433,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrapSetupOnly(ConstCiphertext<DCRTPoly
+ 
+     // We only use the level 0 ciphertext here. All other towers are automatically ignored to make
+     // CKKS bootstrapping faster.
++    // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++    if (cryptoParams->IsRRChain()) {
++        RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++    }
++    else
+     for (size_t i = 0; i < ctxtDCRT.size(); i++) {
+         DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+         ctxtDCRT[i].SetFormat(COEFFICIENT);
+@@ -842,6 +848,11 @@ std::pair<Ciphertext<DCRTPoly>, Ciphertext<DCRTPoly>>  FHECKKSRNS::EvalBootstrap
+ 
+     // We only use the level 0 ciphertext here. All other towers are automatically ignored to make
+     // CKKS bootstrapping faster.
++    // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++    if (cryptoParams->IsRRChain()) {
++        RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++    }
++    else
+     for (size_t i = 0; i < ctxtDCRT.size(); i++) {
+         DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+         ctxtDCRT[i].SetFormat(COEFFICIENT);
+@@ -1078,6 +1089,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrapNoStC(ConstCiphertext<DCRTPoly> ci
+ 
+     // We only use the level 0 ciphertext here. All other towers are automatically ignored to make
+     // CKKS bootstrapping faster.
++    // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++    if (cryptoParams->IsRRChain()) {
++        RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++    }
++    else
+     for (size_t i = 0; i < ctxtDCRT.size(); i++) {
+         DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+         ctxtDCRT[i].SetFormat(COEFFICIENT);
+@@ -1562,6 +1578,12 @@ static void btsTrace(const char* stage, const Ciphertext<DCRTPoly>& ct) {
+ 
+ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& ciphertext, uint32_t numIterations,
+                                                uint32_t precision) const {
++    // Prime the RR chain cache: EvalKeySwitchPrecomputeCore is handed crypto PARAMS with no
++    // context and looks the chain up by params, throwing if it was never built. Building it
++    // here (once, cached) is what makes that lookup safe rather than order-dependent.
++    if (std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ciphertext->GetCryptoParameters())->IsRRChain())
++        GetRRChain(ciphertext->GetCryptoContext());
++
+     const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ciphertext->GetCryptoParameters());
+ 
+     if (cryptoParams->GetKeySwitchTechnique() != HYBRID)
+@@ -1735,6 +1757,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+ 
+             // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
+             auto& ctxtDCRT = raised->GetElements();
++            // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++            if (cryptoParams->IsRRChain()) {
++                RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++            }
++            else
+             for (auto& poly : ctxtDCRT) {
+                 poly.SetFormat(COEFFICIENT);
+                 DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+@@ -1750,6 +1777,11 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         else {
+             // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
+             auto& ctxtDCRT = raised->GetElements();
++            // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++            if (cryptoParams->IsRRChain()) {
++                RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++            }
++            else
+             for (auto& poly : ctxtDCRT) {
+                 poly.SetFormat(COEFFICIENT);
+                 DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+@@ -4192,6 +4224,11 @@ std::shared_ptr<seriesPowers<DCRTPoly>> FHECKKSRNS::EvalMVBPrecomputeInternal(
+ 
+         // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
+         auto& ctxtDCRT = raised->GetElements();
++        // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++        if (cryptoParams->IsRRChain()) {
++            RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++        }
++        else
+         for (auto& poly : ctxtDCRT) {
+             poly.SetFormat(COEFFICIENT);
+             DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+@@ -4207,6 +4244,11 @@ std::shared_ptr<seriesPowers<DCRTPoly>> FHECKKSRNS::EvalMVBPrecomputeInternal(
+     else {
+         // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
+         auto& ctxtDCRT = raised->GetElements();
++        // RR: the bottom is a w-limb WINDOW, not one prime — see RRExtendCiphertext.
++        if (cryptoParams->IsRRChain()) {
++            RRExtendCiphertext(ctxtDCRT, elementParamsRaisedPtr);
++        }
++        else
+         for (auto& poly : ctxtDCRT) {
+             poly.SetFormat(COEFFICIENT);
+             DCRTPoly temp(elementParamsRaisedPtr, COEFFICIENT);
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+index b361e157..4a4462f4 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+@@ -606,7 +606,17 @@ Ciphertext<DCRTPoly> LeveledSHECKKSRNS::EvalFastRotationExt(
+         const auto paramsQlP = (*cTilda)[0].GetParams();
+         size_t sizeQl        = paramsQl->GetParams().size();
+         DCRTPoly psiC0       = DCRTPoly(paramsQlP, Format::EVALUATION, true);
+-        auto cMult           = ciphertext->GetElements()[0].TimesNoCheck(cryptoParams->GetPModq());
++        // RR: PModq is indexed by GLOBAL primeid, and window slot i is prime lo + i.
++        std::vector<NativeInteger> PModqUse = cryptoParams->GetPModq();
++        if (cryptoParams->IsRRChain()) {
++            const RRChain& rr = GetRRChain(cc);
++            const uint32_t lo = rr.Level(rr.RRLevelOfParams(paramsQl)).lo;
++            std::vector<NativeInteger> w(sizeQl);
++            for (size_t i = 0; i < sizeQl; ++i)
++                w[i] = PModqUse[lo + i];
++            PModqUse = std::move(w);
++        }
++        auto cMult = ciphertext->GetElements()[0].TimesNoCheck(PModqUse);
+         for (uint32_t i = 0; i < sizeQl; i++) {
+             psiC0.SetElementAtIndex(i, std::move(cMult.GetElementAtIndex(i)));
+         }
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+index d6463116..cc0b1b7a 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+@@ -19,17 +19,91 @@ namespace lbcrypto {
+ // DCRTPoly::Params for every level, so constructing one inside ModReduce (which runs once per
+ // level of every circuit) would dominate. Keyed by the params pointer — that is what identifies
+ // a chain — and held for the process, like the rest of OpenFHE's precomputation.
++void RRExtendCiphertext(std::vector<DCRTPoly>& ctxtDCRT, const std::shared_ptr<DCRTPoly::Params>& raisedParams) {
++    const auto& targetParams = raisedParams->GetParams();
++    for (auto& poly : ctxtDCRT) {
++        poly.SetFormat(COEFFICIENT);
++
++        // Reconstruct the w-limb bottom value as one big integer per coefficient. CRTInterpolate
++        // gives the canonical representative in [0, Qw); the raise needs the CENTERED one, so
++        // anything above Qw/2 is the negative value v - Qw and its residue mod p is
++        // p - ((Qw - v) mod p).
++        const auto big = poly.CRTInterpolate();
++        BigInteger Qw   = poly.GetModulus();
++        BigInteger half = Qw >> 1;
++        const usint n   = poly.GetRingDimension();
++
++        DCRTPoly out(raisedParams, COEFFICIENT, true);
++        for (size_t j = 0; j < targetParams.size(); ++j) {
++            const auto& p_j = targetParams[j]->GetModulus();
++            NativeVector vals(n, p_j);
++            for (usint i = 0; i < n; ++i) {
++                const BigInteger& v = big[i];
++                if (v > half) {
++                    const BigInteger mag = (Qw - v).Mod(BigInteger(p_j));
++                    vals[i] = mag.ConvertToInt() == 0 ? NativeInteger(0)
++                                                      : p_j.Sub(NativeInteger(mag.ConvertToInt()));
++                }
++                else {
++                    vals[i] = NativeInteger(v.Mod(BigInteger(p_j)).ConvertToInt());
++                }
++            }
++            NativePoly tower(targetParams[j], COEFFICIENT, true);
++            tower.SetValues(std::move(vals), COEFFICIENT);
++            out.SetElementAtIndex(j, std::move(tower));
++        }
++        out.SetFormat(EVALUATION);
++        poly = std::move(out);
++    }
++}
++
++void RRRegisterChain(const void* paramsKey, const RRChain* chain);
++
+ const RRChain& GetRRChain(const CryptoContext<DCRTPoly>& cc) {
+     static std::mutex mtx;
+     static std::map<const void*, std::unique_ptr<RRChain>> cache;
+     const void* key = static_cast<const void*>(cc->GetCryptoParameters().get());
+     std::lock_guard<std::mutex> lock(mtx);
+     auto it = cache.find(key);
+-    if (it == cache.end())
++    if (it == cache.end()) {
+         it = cache.emplace(key, std::make_unique<RRChain>(cc)).first;
++        RRRegisterChain(key, it->second.get());
++    }
+     return *it->second;
+ }
+ 
++namespace {
++std::mutex g_rrByParamsMtx;
++std::map<const void*, const RRChain*> g_rrByParams;
++}  // namespace
++
++void RRRegisterChain(const void* paramsKey, const RRChain* chain) {
++    std::lock_guard<std::mutex> lock(g_rrByParamsMtx);
++    g_rrByParams[paramsKey] = chain;
++}
++
++const RRChain& GetRRChainByParams(const std::shared_ptr<CryptoParametersBase<DCRTPoly>>& params) {
++    std::lock_guard<std::mutex> lock(g_rrByParamsMtx);
++    auto it = g_rrByParams.find(static_cast<const void*>(params.get()));
++    if (it == g_rrByParams.end())
++        OPENFHE_THROW("RR: no chain registered for these crypto parameters — GetRRChain(cc) must run first "
++                      "(EvalBootstrap primes it). Falling back to the prefix keyswitch here would be silent "
++                      "corruption, so this throws instead.");
++    return *it->second;
++}
++
++uint32_t RRChain::RRLevelOfParams(const std::shared_ptr<DCRTPoly::Params>& prm) const {
++    const uint32_t n = prm->GetParams().size();
++    const auto lo0   = prm->GetParams()[0]->GetModulus();
++    for (uint32_t r = 0; r < NumLevels(); ++r) {
++        const auto& lv = m_levels[r];
++        if (lv.hi - lv.lo + 1 == n && lv.params->GetParams()[0]->GetModulus() == lo0)
++            return r;
++    }
++    OPENFHE_THROW("RR: no level has a " + std::to_string(n) + "-limb window starting at modulus " +
++                  lo0.ToString());
++}
++
+ 
+ RRChain::RRChain(const CryptoContext<DCRTPoly>& cc) : m_cc(cc) {
+     const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(cc->GetCryptoParameters());
+@@ -353,91 +427,126 @@ uint32_t RRChain::RRLevelOfElement(const DCRTPoly& e) const {
+                   " limbs starting at modulus " + ep[0]->GetModulus().ToString());
+ }
+ 
+-std::pair<DCRTPoly, DCRTPoly> RRChain::KeySwitchCore(const DCRTPoly& c, const EvalKey<DCRTPoly>& evk,
+-                                                     uint32_t r) const {
+-    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters());
+-    const auto& lvl         = Level(r);
+-    const auto& ks          = LevelKS(r);
+-    uint32_t sizeW          = lvl.hi - lvl.lo + 1;
+-    uint32_t sizeQglobal    = cryptoParams->GetElementParams()->GetParams().size();
+-    uint32_t sizeP          = cryptoParams->GetParamsP()->GetParams().size();
+-    uint32_t sizeWP         = sizeW + sizeP;
++const std::shared_ptr<DCRTPoly::Params>& RRChain::ExtParams(uint32_t r) const {
++    return LevelKS(r).paramsWP;
++}
+ 
+-    const auto& av = evk->GetAVector();
+-    const auto& bv = evk->GetBVector();
++// Hoisted keyswitch, split into the three pieces the CtS/StC stages drive separately.
++//
++// CoeffsToSlots does ONE modup per stage and many dots against it (`EvalFastRotationPrecompute`
++// + `EvalFastRotationExt`), accumulating in the EXTENDED basis and moddown'ing once at the end.
++// KeySwitchCore below is precompute+dot+moddown fused, which is all a relinearization needs but
++// cannot serve the hoisted path — and the generic HYBRID versions of those three are prefix-
++// chain code that reads evk row `i` for ciphertext tower `i`. Under RR the row is `lo + i`.
++//
++// The digits are returned in [window | P] order, which is the same layout `ks.paramsWP`
++// describes, so the dot below indexes them directly.
++std::shared_ptr<std::vector<DCRTPoly>> RRChain::KeySwitchPrecompute(const DCRTPoly& c, uint32_t r) const {
++    const auto& lvl = Level(r);
++    const auto& ks  = LevelKS(r);
++    const uint32_t sizeW  = lvl.hi - lvl.lo + 1;
++    const uint32_t sizeP  = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters())
++                               ->GetParamsP()
++                               ->GetParams()
++                               .size();
++    const uint32_t sizeWP = sizeW + sizeP;
+ 
+-    DCRTPoly cTilda0(ks.paramsWP, Format::EVALUATION, true);
+-    DCRTPoly cTilda1(ks.paramsWP, Format::EVALUATION, true);
++    auto digits = std::make_shared<std::vector<DCRTPoly>>();
++    digits->reserve(ks.digits.size());
+ 
+     for (size_t dj = 0; dj < ks.digits.size(); ++dj) {
+-        const auto& dg = ks.digits[dj];
+-        uint32_t part  = dg.gLo / cryptoParams->GetNumPerPartQ();
+-        uint32_t sizeD = dg.gHi - dg.gLo + 1;
++        const auto& dg      = ks.digits[dj];
++        const uint32_t sizeD = dg.gHi - dg.gLo + 1;
+ 
+-        // digit slice (window-local) and its base conversion onto (window\digit) ++ P
+         DCRTPoly cPart(dg.paramsD, Format::EVALUATION, true);
+         for (uint32_t i = 0; i < sizeD; ++i)
+             cPart.SetElementAtIndex(i, c.GetElementAtIndex(dg.gLo - lvl.lo + i));
+         auto cPartCoef = cPart.Clone();
+         cPartCoef.SetFormat(Format::COEFFICIENT);
+-        auto compl_ =
+-            cPartCoef.ApproxSwitchCRTBasis(dg.paramsD, dg.paramsCompl, dg.DHatInvModd, dg.DHatInvModdPrecon,
+-                                           dg.DHatModt, dg.muT);
++        auto compl_ = cPartCoef.ApproxSwitchCRTBasis(dg.paramsD, dg.paramsCompl, dg.DHatInvModd,
++                                                     dg.DHatInvModdPrecon, dg.DHatModt, dg.muT);
+         compl_.SetFormat(Format::EVALUATION);
+ 
+-        // scatter into [window | P] order and dot with the evk rows (global index)
+-        uint32_t startLocal = dg.gLo - lvl.lo;
+-        uint32_t endLocal   = startLocal + sizeD;
++        const uint32_t startLocal = dg.gLo - lvl.lo;
++        const uint32_t endLocal   = startLocal + sizeD;
++        DCRTPoly ext(ks.paramsWP, Format::EVALUATION, true);
+         for (uint32_t i = 0; i < sizeWP; ++i) {
+-            const DCRTPoly::PolyType* digitTower;
+             if (i < startLocal)
+-                digitTower = &compl_.GetElementAtIndex(i);
++                ext.SetElementAtIndex(i, compl_.GetElementAtIndex(i));
+             else if (i < endLocal)
+-                digitTower = &cPart.GetElementAtIndex(i - startLocal);
++                ext.SetElementAtIndex(i, cPart.GetElementAtIndex(i - startLocal));
+             else
+-                digitTower = &compl_.GetElementAtIndex(i - sizeD);
+-            uint32_t row = (i < sizeW) ? (lvl.lo + i) : (sizeQglobal + (i - sizeW));
+-            // The evk must be a FULL-CHAIN key at P*Qmax for this positional row read to mean
+-            // anything. Say so with numbers rather than letting PolyImpl report a bare modulus
+-            // mismatch — a rotation key generated at a different shape lands exactly here.
++                ext.SetElementAtIndex(i, compl_.GetElementAtIndex(i - sizeD));
++        }
++        digits->push_back(std::move(ext));
++    }
++    return digits;
++}
++
++/** The dot against the single evk at P*Qmax, rows read POSITIONALLY: ciphertext slot i of the
++ *  window carries global index lo + i, and the P rows sit at sizeQglobal + (i - sizeW). Output
++ *  stays in the extended basis — the hoisted caller accumulates several of these before one
++ *  ModDown. */
++std::pair<DCRTPoly, DCRTPoly> RRChain::KeySwitchDotExt(const std::vector<DCRTPoly>& digits,
++                                                       const EvalKey<DCRTPoly>& evk, uint32_t r) const {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters());
++    const auto& lvl         = Level(r);
++    const auto& ks          = LevelKS(r);
++    const uint32_t sizeW    = lvl.hi - lvl.lo + 1;
++    const uint32_t sizeQglobal = cryptoParams->GetElementParams()->GetParams().size();
++    const uint32_t sizeP       = cryptoParams->GetParamsP()->GetParams().size();
++    const uint32_t sizeWP      = sizeW + sizeP;
++
++    const auto& av = evk->GetAVector();
++    const auto& bv = evk->GetBVector();
++
++    DCRTPoly cTilda0(ks.paramsWP, Format::EVALUATION, true);
++    DCRTPoly cTilda1(ks.paramsWP, Format::EVALUATION, true);
++
++    if (digits.size() != ks.digits.size())
++        OPENFHE_THROW("RR KeySwitchDotExt: " + std::to_string(digits.size()) + " digits supplied, level r=" +
++                      std::to_string(r) + " has " + std::to_string(ks.digits.size()));
++
++    for (size_t dj = 0; dj < ks.digits.size(); ++dj) {
++        const auto& dg     = ks.digits[dj];
++        const uint32_t part = dg.gLo / cryptoParams->GetNumPerPartQ();
++        for (uint32_t i = 0; i < sizeWP; ++i) {
++            const uint32_t row = (i < sizeW) ? (lvl.lo + i) : (sizeQglobal + (i - sizeW));
++            const auto& dt     = digits[dj].GetElementAtIndex(i);
+             if (part >= bv.size() || row >= bv[part].GetNumOfElements() ||
+-                bv[part].GetElementAtIndex(row).GetModulus() != digitTower->GetModulus()) {
+-                OPENFHE_THROW("RR KeySwitchCore evk shape: level r=" + std::to_string(r) + " window [" +
++                bv[part].GetElementAtIndex(row).GetModulus() != dt.GetModulus())
++                OPENFHE_THROW("RR KeySwitchDotExt evk shape: level r=" + std::to_string(r) + " window [" +
+                               std::to_string(lvl.lo) + "," + std::to_string(lvl.hi) + "] digit " +
+-                              std::to_string(dj) + " part " + std::to_string(part) + "/" +
+-                              std::to_string(bv.size()) + " wants global row " + std::to_string(row) +
+-                              " of " + std::to_string(part < bv.size() ? bv[part].GetNumOfElements() : 0) +
+-                              " (expected sizeQglobal+sizeP = " + std::to_string(sizeQglobal) + "+" +
+-                              std::to_string(sizeP) + "); tower modulus " + digitTower->GetModulus().ToString() +
+-                              " vs evk row modulus " +
+-                              ((part < bv.size() && row < bv[part].GetNumOfElements())
+-                                   ? bv[part].GetElementAtIndex(row).GetModulus().ToString()
+-                                   : std::string("<out of range>")) +
+-                              "; c[0..2]=" + c.GetElementAtIndex(0).GetModulus().ToString() + "," +
+-                              c.GetElementAtIndex(1).GetModulus().ToString() + "," +
+-                              c.GetElementAtIndex(2).GetModulus().ToString() +
+-                              " (c has " + std::to_string(c.GetNumOfElements()) + " limbs)" +
+-                              "; lvl.params[0..2]=" + lvl.params->GetParams()[0]->GetModulus().ToString() + "," +
+-                              lvl.params->GetParams()[1]->GetModulus().ToString() + "," +
+-                              lvl.params->GetParams()[2]->GetModulus().ToString() +
+-                              "; paramsD[0..2]=" + dg.paramsD->GetParams()[0]->GetModulus().ToString() + "," +
+-                              dg.paramsD->GetParams()[1]->GetModulus().ToString() + "," +
+-                              dg.paramsD->GetParams()[2]->GetModulus().ToString() +
+-                              "; dg.gLo=" + std::to_string(dg.gLo) + " dg.gHi=" + std::to_string(dg.gHi));
+-            }
+-            cTilda0.SetElementAtIndex(i, cTilda0.GetElementAtIndex(i) + *digitTower * bv[part].GetElementAtIndex(row));
+-            cTilda1.SetElementAtIndex(i, cTilda1.GetElementAtIndex(i) + *digitTower * av[part].GetElementAtIndex(row));
++                              std::to_string(dj) + " part " + std::to_string(part) + " wants global row " +
++                              std::to_string(row) + " (sizeQglobal+sizeP = " + std::to_string(sizeQglobal) + "+" +
++                              std::to_string(sizeP) + ")");
++            cTilda0.SetElementAtIndex(i, cTilda0.GetElementAtIndex(i) + dt * bv[part].GetElementAtIndex(row));
++            cTilda1.SetElementAtIndex(i, cTilda1.GetElementAtIndex(i) + dt * av[part].GetElementAtIndex(row));
+         }
+     }
++    return {std::move(cTilda0), std::move(cTilda1)};
++}
+ 
++/** ApproxModDown from the level's [window | P] basis back to the window. The P tables are
++ *  absolute-primeid indexed and P does not move, so only the window-relaid PInvModq/PHatModq
++ *  (built per level in LevelKS) are RR-specific. */
++DCRTPoly RRChain::KeySwitchDownExt(const DCRTPoly& cExt, uint32_t r) const {
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersRNS>(m_cc->GetCryptoParameters());
++    const auto& lvl         = Level(r);
++    const auto& ks          = LevelKS(r);
+     std::vector<NativeInteger> noVec;
+-    DCRTPoly ct0 = cTilda0.ApproxModDown(lvl.params, cryptoParams->GetParamsP(), ks.PInvModq, ks.PInvModqPrecon,
+-                                         cryptoParams->GetPHatInvModp(), cryptoParams->GetPHatInvModpPrecon(),
+-                                         ks.PHatModq, ks.muQ, noVec, noVec, NativeInteger(0), noVec);
+-    DCRTPoly ct1 = cTilda1.ApproxModDown(lvl.params, cryptoParams->GetParamsP(), ks.PInvModq, ks.PInvModqPrecon,
+-                                         cryptoParams->GetPHatInvModp(), cryptoParams->GetPHatInvModpPrecon(),
+-                                         ks.PHatModq, ks.muQ, noVec, noVec, NativeInteger(0), noVec);
+-    return {std::move(ct0), std::move(ct1)};
++    return cExt.ApproxModDown(lvl.params, cryptoParams->GetParamsP(), ks.PInvModq, ks.PInvModqPrecon,
++                              cryptoParams->GetPHatInvModp(), cryptoParams->GetPHatInvModpPrecon(), ks.PHatModq,
++                              ks.muQ, noVec, noVec, NativeInteger(0), noVec);
++}
++
++std::pair<DCRTPoly, DCRTPoly> RRChain::KeySwitchCore(const DCRTPoly& c, const EvalKey<DCRTPoly>& evk,
++                                                     uint32_t r) const {
++    // Now expressed through the three pieces above, so the fused (relin) and hoisted (CtS/StC)
++    // paths cannot drift apart: same digits, same positional rows, same ModDown.
++    auto digits = KeySwitchPrecompute(c, r);
++    auto ba     = KeySwitchDotExt(*digits, evk, r);
++    return {KeySwitchDownExt(ba.first, r), KeySwitchDownExt(ba.second, r)};
+ }
+ 
+ Ciphertext<DCRTPoly> RRChain::EvalMultRelin(ConstCiphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const {
 -- 
 2.43.0
 
