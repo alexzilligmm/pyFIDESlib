@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/12] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/13] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/12] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/13] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/12] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/13] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/12] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/13] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/12] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/13] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/12] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/13] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/12] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/13] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/12] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/13] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/12] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/13] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/12] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/13] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/12] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/13] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/12] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/13] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3222,6 +3222,101 @@ index ac608d31..c1bef6bb 100644
          btsTrace("post-StC", ctxtDec);
          cc->EvalAddInPlaceNoCheck(ctxtDec, cc->EvalRotate(ctxtDec, slots));
      }
+-- 
+2.43.0
+
+
+From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 10:07:56 +0200
+Subject: [PATCH 13/13] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+ =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
+ =?UTF-8?q?oundary?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Traced the scale through the bootstrap (RR_BTS_TRACE=1) and diffed it against
+the classic path, which is correct and runs the same FLEXIBLEAUTO code. RR
+tracks classic exactly through CoeffsToSlots and the Chebyshev evaluation, then
+gains 30 bits in ApplyDoubleAngleIterations. Per-iteration it is flat for five
+iterations and jumps on the sixth — and that iteration is the one whose limb
+count drops by ONE instead of two, i.e. the crossing from RR level 10 to 9.
+
+That is the BOOTSTRAP -> PAYLOAD region boundary, and the mechanism is exact:
+
+  table sf(10) = 2^55.000     the ciphertext matches here
+  F(10 -> 9)   = 2^40.001     and the rescale divides by exactly this
+  table sf(9)  = 2^40.001     RESET (the >1.5-bit jump test fires)
+
+A deg-2 ciphertext at level 10 carries sf(10)^2 = 2^110. Rescaling divides by
+F = 2^40, leaving 2^70, where the table says 2^40 — a 2^30 gap, which is the
+regions' 15-bit scale difference doubled because deg-2 squares it. And
+sf' = sf^2/F is UNSTABLE above its fixed point, so it amplifies rather than
+corrects: 2^70 -> 2^100, which is the 140 and the 100 the trace shows.
+
+So the rescale arithmetic is right and the CONVENTION is wrong: the table's
+reset is unreachable by an ordinary rescale. Which makes this the same bug as
+the level overrun — a bootstrap that fits inside the 16-level bootstrap region
+never crosses the boundary and never meets the reset.
+
+MEASURED, and it confirms it: switching the secret distribution (RR_SECRET, new)
+changes the EvalMod depth via the Chebyshev degree, and
+
+  UNIFORM (degree 88): 21 levels consumed, crosses 6 levels early, scale -> 2^140
+  SPARSE  (degree 14): 17 levels consumed — matching the classic measurement —
+                       and the output stops exploding: it decodes to ~0 rather
+                       than 1e73, i.e. a scale that is too LARGE, which is the
+                       disabled correction factor behaving exactly as logged.
+
+ENCAPS still throws Modulus mismatch inside KeySwitchSparse: the sparse-
+encapsulation secret-switching keys (2N-2, 2N-4) need the same RR routing the
+hoisted keyswitch family just got. That is the next contained unit.
+
+Structural consequence: the chain reserves 16 bootstrap levels and the bootstrap
+needs 17-18, so it crosses the boundary even at SPARSE's depth (26 -> 9 lands ON
+the reset level). A regenerated chain with a wider bootstrap region is the clean
+fix, and it is the same conclusion the level-budget entry reached from the other
+direction.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index c1bef6bb..21edbabf 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -3472,11 +3472,27 @@ void FHECKKSRNS::ApplyDoubleAngleIterations(Ciphertext<DCRTPoly>& ciphertext, ui
+ 
+     const int32_t r = numIter;
+     for (int32_t j = 1; j <= r; ++j) {
++        {
++            ConstCiphertext<DCRTPoly> t = ciphertext;
++            rrBtsTrace("  DA in   ", t);
++        }
+         cc->EvalSquareInPlace(ciphertext);
++        {
++            ConstCiphertext<DCRTPoly> t = ciphertext;
++            rrBtsTrace("  DA sq  ", t);
++        }
+         ciphertext    = cc->EvalAdd(ciphertext, ciphertext);
+         double scalar = -1.0 / std::pow((2.0 * M_PI), std::pow(2.0, j - r));
+         cc->EvalAddInPlace(ciphertext, scalar);
++        {
++            ConstCiphertext<DCRTPoly> t = ciphertext;
++            rrBtsTrace("  DA add ", t);
++        }
+         cc->ModReduceInPlace(ciphertext);
++        {
++            ConstCiphertext<DCRTPoly> t = ciphertext;
++            rrBtsTrace("  DA modr", t);
++        }
+     }
+ }
+ 
 -- 
 2.43.0
 
