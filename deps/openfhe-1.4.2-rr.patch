@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/14] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/15] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/14] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/15] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/14] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/15] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/14] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/15] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/14] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/15] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/14] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/15] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/14] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/15] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/14] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/15] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/14] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/15] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/14] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/15] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2743,7 +2743,7 @@ index d6463116..cc0b1b7a 100644
 From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:49:27 +0200
-Subject: [PATCH 11/14] RR CPU bootstrap RUNS: level alignment, and the shared
+Subject: [PATCH 11/15] RR CPU bootstrap RUNS: level alignment, and the shared
  root cause of the bad values
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3067,7 +3067,7 @@ index cc0b1b7a..94239f00 100644
 From 5944257e013d892eb967735df18a17f95fe5639f Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:00:24 +0200
-Subject: [PATCH 12/14] RR bootstrap: a scale trace, and it localizes the drift
+Subject: [PATCH 12/15] RR bootstrap: a scale trace, and it localizes the drift
  to the double-angle loop
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3229,7 +3229,7 @@ index ac608d31..c1bef6bb 100644
 From 0584a3d5d9d96e27e087954f6ebd0e6f9dbca8b7 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:07:56 +0200
-Subject: [PATCH 13/14] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
+Subject: [PATCH 13/15] =?UTF-8?q?RR:=20the=20scale=20drift=20and=20the=20l?=
  =?UTF-8?q?evel=20overrun=20are=20ONE=20bug=20=E2=80=94=20the=20region=20b?=
  =?UTF-8?q?oundary?=
 MIME-Version: 1.0
@@ -3324,7 +3324,7 @@ index c1bef6bb..21edbabf 100644
 From 29df4819f30fbddebd887d39ba820da573689814 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 10:29:26 +0200
-Subject: [PATCH 14/14] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
+Subject: [PATCH 14/15] =?UTF-8?q?RR:=20ENCAPS=20and=20SPARSE=20both=20run?=
  =?UTF-8?q?=20=E2=80=94=20route=20the=20sparse-encapsulation=20keys?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -3400,6 +3400,268 @@ index 21edbabf..4f197b32 100644
  
              // Only level 0 ciphertext used here. Other towers ignored to make CKKS bootstrapping faster.
              auto& ctxtDCRT = raised->GetElements();
+-- 
+2.43.0
+
+
+From 90b517b0fe93f3c48692943887714400b54e45c6 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 10:44:09 +0200
+Subject: [PATCH 15/15] RR: the signed correction, and the adjust now preserves
+ the message exactly
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two fixes, and the second was found by measuring rather than reasoning.
+
+SIGNED CORRECTION. `correction = correctionFactor - deg` is how many bits the
+message is scaled DOWN before the raise ("emulate a larger q0"). An RR chain has
+the opposite problem — its bottom window dwarfs the scale — so it needs a
+NEGATIVE correction. AdjustCiphertext already takes a double and applies
+pow(2,-correction), so it handled either sign; what could not was `uint32_t` and
+the `1 << correction` recovery. The recovery for a negative correction is a
+DIVISION, which that shift cannot express — but dividing the message by 2^k is
+identical to declaring the scaling factor 2^k larger, so it costs nothing and
+adds no noise where an integer multiply would have.
+
+THE PLAINTEXT MODULUS, corrected twice. `p` is the scale the ciphertext CARRIES
+INTO the raise, which is what 2^p approximates on a classic chain:
+GetScalingFactorReal(0), the TOP level. My first cut read the BOTTOM level's
+factor instead (2^40 rather than 2^55), which made deg 38 where it is 23 and
+asked for 2^27 of scale-up where 2^12 is right. The adjust then WRAPPED the 2^78
+bottom modulus, and the trace showed it plainly:
+
+  pre-adjust : v = 0.500001  0.466167  0.36923     message perfect
+  post-adjust: v = 3.8e6     4.67e6    -1.07e7     inconsistent ratios, sign flip
+
+With the top scale it is exact:
+
+  pre-adjust : v = 0.500009  0.466168  0.369232
+  post-adjust: v = 2048      1909.41   1512.38     ratio 4096 = 2^12, all slots
+
+The bound check moved with it: the constraint is on the value that actually lands
+in the bottom modulus, |m| * powP * 2^-correction < q0/(2K), not on the
+correction alone — bounding the correction by itself is what let the 2^27 request
+through when the full adjustment was 2^42.
+
+Also adds a decrypting stage trace (g_rrTraceKey): scales alone cannot tell "the
+message is buried" from "the message is fine and the bookkeeping drifted", and
+that distinction is what located both bugs above.
+
+STILL WRONG, and stated precisely: EvalChebyshevSeries returns a CONSTANT
+(0.7794 in every slot) for an input of ~1e-6, where it should return
+approximately its input. Everything upstream is now verified good — the adjust is
+exact, ModRaise is exact, and CtS carries the message. That single step is the
+remaining fault.
+
+Gates: rr_cpu_gate PASS on both chains; classic control PASS at 14.0 bits.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/include/scheme/ckksrns/ckksrns-rr.h |   5 +
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp  | 113 ++++++++++++++++----
+ src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp   |   2 +
+ 3 files changed, 101 insertions(+), 19 deletions(-)
+
+diff --git a/src/pke/include/scheme/ckksrns/ckksrns-rr.h b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+index 6683e0b7..3900ae37 100644
+--- a/src/pke/include/scheme/ckksrns/ckksrns-rr.h
++++ b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+@@ -35,6 +35,11 @@ struct RRLevel {
+  *  standard-op dispatch below must NOT construct one per call — ModReduce runs once per level of
+  *  every circuit. Keyed by the crypto-parameters pointer, which is what identifies a chain. */
+ const RRChain& GetRRChain(const CryptoContext<DCRTPoly>& cc);
++
++/** Diagnostic only: when set, the bootstrap's RR_BTS_TRACE stages also DECRYPT and print the
++ *  first slots. Scales alone cannot distinguish "the message is buried" from "the message is
++ *  fine and the bookkeeping drifted", and that distinction is the whole game. */
++extern const PrivateKey<DCRTPoly>* g_rrTraceKey;
+ /** The cached chain for a crypto-parameters object, for the few call sites that are handed
+  *  params but no context (EvalKeySwitchPrecomputeCore). Throws rather than falling through to
+  *  the prefix path if the chain was never built — a silent fallback there would run the classic
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index 4f197b32..85b1cc90 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -104,7 +104,28 @@ static void rrBtsTrace(const char* stage, ConstCiphertext<DCRTPoly>& ct) {
+         return;
+     std::cerr << "[rr_trace] " << stage << ": level=" << ct->GetLevel()
+               << " limbs=" << ct->GetElements()[0].GetNumOfElements() << " deg=" << ct->GetNoiseScaleDeg()
+-              << " log2(scale)=" << std::log2(ct->GetScalingFactor()) << "\n";
++              << " log2(scale)=" << std::log2(ct->GetScalingFactor());
++    if (g_rrTraceKey) {
++        try {
++            auto cc  = ct->GetCryptoContext();
++            auto cp  = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ct->GetCryptoParameters());
++            Plaintext pt;
++            if (cp->IsRRChain()) {
++                const RRChain& rr = GetRRChain(cc);
++                ConstCiphertext<DCRTPoly> c = ct;
++                pt = rr.Decrypt(*g_rrTraceKey, c);
++            }
++            else {
++                cc->Decrypt(*g_rrTraceKey, ct, &pt);
++            }
++            pt->SetLength(4);
++            const auto v = pt->GetCKKSPackedValue();
++            std::cerr << "  v[0..2]= " << v[0].real() << " " << v[1].real() << " " << v[2].real();
++        } catch (const std::exception& e) {
++            std::cerr << "  <decrypt: " << e.what() << ">";
++        }
++    }
++    std::cerr << "\n";
+ }
+ 
+ 
+@@ -1715,7 +1736,18 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+         std::make_shared<ILDCRTParams<DCRTPoly::Integer>>(cc->GetCyclotomicOrder(), moduli, roots);
+ 
+     double qDouble = GetBigModulus(cryptoParams);
+-    double powP    = std::pow(2, cryptoParams->GetPlaintextModulus());
++    // RR: `p` is the message's scale in bits, and GetPlaintextModulus() returns the
++    // scalingModSize (25 here) — the size of a SMALL prime, not the scale. An RR bottom level
++    // carries sf(level 0), 2^40 on our schedule, so deg read 53 where the honest figure is 38.
++    // OpenFHE levels count rescales from the top, so RR level 0 is OpenFHE level nLvl-1.
++    // `p` is the scale the ciphertext CARRIES INTO the raise, which on a classic chain is what
++    // 2^p approximates: GetScalingFactorReal(0), the TOP level's factor (OpenFHE levels count
++    // rescales from the top). Under RR that is the bootstrap region's 2^55, not the bottom
++    // level's 2^40 — reading the bottom made deg 38 where it is 23, asked for 2^27 of scale-up
++    // where 2^12 is right, and the adjust then WRAPPED the 2^78 bottom modulus (measured:
++    // pre-adjust v = 0.500001, post-adjust v = 3.8e6 with inconsistent ratios and a sign flip).
++    double powP = cryptoParams->IsRRChain() ? cryptoParams->GetScalingFactorReal(0)
++                                            : std::pow(2, cryptoParams->GetPlaintextModulus());
+     int32_t deg    = std::round(std::log2(qDouble / powP));
+     // RR: deg is structurally LARGE and the guard's premise inverts. The RR bottom is
+     // L0 = {q0, 2 tau} (~2^78 here) against a plaintext modulus of ~2^25 and a scale of ~2^55,
+@@ -1725,25 +1757,48 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     // the GPU side does (FIDESlib Bootstrap.cu) — the cost is PRECISION (that much of q0's
+     // range goes unused), not correctness, and keeping both sides identical is what lets the
+     // CPU serve as the GPU's oracle. See docs/RR_BTS_RUNLOG.md.
+-    const bool rrDegOverflow = cryptoParams->IsRRChain() && deg > static_cast<int32_t>(m_correctionFactor);
+-    if (rrDegOverflow) {
+-        static bool warned = false;
+-        if (!warned) {
+-            warned = true;
+-            std::cerr << "[rr_bts] correction disabled: deg=" << deg << " > correctionFactor=" << m_correctionFactor
+-                      << " — the RR bottom window is " << (deg - (int32_t)m_correctionFactor)
+-                      << " bits wider than the correction machinery can absorb; that much of q0's range goes"
+-                         " unused (a precision cost)\n";
+-        }
+-    }
++    // RR: the correction is SIGNED. `correction = correctionFactor - deg` is the number of bits
++    // the message is scaled DOWN by before the raise ("emulate a larger q0"). An RR chain has
++    // the opposite problem — its bottom window (2^78) dwarfs the scale (2^40) — so the message
++    // must be scaled UP, i.e. a NEGATIVE correction. AdjustCiphertext already applies
++    // pow(2, -correction) and so handles either sign; what could not was `uint32_t` and the
++    // `1 << correction` recovery, both fixed here and at the recovery site.
++    //
++    // The magnitude is bounded by the sine's input range: after the raise the ciphertext holds
++    // m*Delta*2^-correction + I*q0, and EvalMod needs |m*Delta*2^-correction / q0| <~ 1/(2K).
++    // With Delta = 2^40, q0 = 2^78 and K <= 32 that allows up to ~2^33 of scale-up, and the
++    // formula asks for 2^27 — inside the bound with room to spare. Checked rather than assumed,
++    // because overshooting it silently destroys EvalMod instead of erroring.
++    const bool rrSigned = cryptoParams->IsRRChain() && deg > static_cast<int32_t>(m_correctionFactor);
+ #if NATIVEINT != 128
+-    if (!rrDegOverflow && deg > static_cast<int32_t>(m_correctionFactor) && st != COMPOSITESCALINGAUTO &&
++    if (!rrSigned && deg > static_cast<int32_t>(m_correctionFactor) && st != COMPOSITESCALINGAUTO &&
+         st != COMPOSITESCALINGMANUAL) {
+         OPENFHE_THROW("Degree [" + std::to_string(deg) + "] must be less than or equal to the correction factor [" +
+                       std::to_string(m_correctionFactor) + "].");
+     }
+ #endif
+-    uint32_t correction = rrDegOverflow ? 0 : m_correctionFactor - deg;
++    const int32_t correctionSigned = static_cast<int32_t>(m_correctionFactor) - deg;
++    if (rrSigned) {
++        // The bound is on the value that actually lands in the bottom modulus: the ciphertext
++        // enters the raise at scale powP and is scaled up by 2^-correction, so the constraint
++        // is |m| * powP * 2^-correction < q0/(2K). Bounding the correction ALONE (the first
++        // cut) let a 2^27 request through when the full adjustment was 2^42, straight into
++        // wraparound.
++        const double maxUp = std::log2(qDouble / (powP * 2.0 * K_SPARSE_ENCAPSULATED));
++        if (-correctionSigned > maxUp)
++            OPENFHE_THROW("RR: the signed correction asks to scale the message up by 2^" +
++                          std::to_string(-correctionSigned) + ", but the sine's input range allows only 2^" +
++                          std::to_string(maxUp) + " (q0=2^" + std::to_string(std::log2(qDouble)) + ", Delta=2^" +
++                          std::to_string(std::log2(powP)) + ")");
++        static bool announced = false;
++        if (!announced) {
++            announced = true;
++            std::cerr << "[rr_bts] signed correction: deg=" << deg << " correctionFactor=" << m_correctionFactor
++                      << " -> correction=" << correctionSigned << " (message scaled UP by 2^" << -correctionSigned
++                      << ", bound 2^" << maxUp << ")\n";
++        }
++    }
++    uint32_t correction = rrSigned ? 0 : static_cast<uint32_t>(correctionSigned);
+     double post         = std::pow(2, static_cast<double>(deg));
+ 
+     // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+@@ -1780,7 +1835,9 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     btsTrace("input", raised);
+     algo->ModReduceInternalInPlace(raised, compositeDegree * (raised->GetNoiseScaleDeg() - 1));
+     btsTrace("pre-adjust", raised);
+-    AdjustCiphertext(raised, correction);
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("pre-adjust ", t); }
++    AdjustCiphertext(raised, rrSigned ? static_cast<double>(correctionSigned) : static_cast<double>(correction));
++    { ConstCiphertext<DCRTPoly> t = raised; rrBtsTrace("post-adjust", t); }
+     btsTrace("post-adjust", raised);
+ 
+     uint32_t N = cc->GetRingDimension();
+@@ -2101,8 +2158,17 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+ 
+ #if NATIVEINT != 128
+     // 64-bit only: scale back the message to its original scale.
+-    uint64_t corFactor = static_cast<uint64_t>(1) << std::llround(correction);
+-    algo->MultByIntegerInPlace(ctxtDec, corFactor);
++    if (rrSigned) {
++        // The message was scaled UP by 2^-correctionSigned before the raise; undoing that is a
++        // DIVISION, which `1 << correction` cannot express. But dividing the message by 2^k is
++        // identical to declaring the scaling factor 2^k larger — exact, free, and it adds no
++        // noise, where an integer multiply would have.
++        ctxtDec->SetScalingFactor(ctxtDec->GetScalingFactor() * std::pow(2.0, -correctionSigned));
++    }
++    else {
++        uint64_t corFactor = static_cast<uint64_t>(1) << std::llround(correction);
++        algo->MultByIntegerInPlace(ctxtDec, corFactor);
++    }
+ #endif
+ 
+     // Mixed-size chain: rescale eagerly so the output lands deg-1 exactly on the
+@@ -3345,10 +3411,19 @@ void FHECKKSRNS::AdjustCiphertext(Ciphertext<DCRTPoly>& ciphertext, double corre
+         double targetSF    = cryptoParams->GetScalingFactorReal(lvl);
+         double sourceSF    = ciphertext->GetScalingFactor();
+         uint32_t numTowers = ciphertext->GetElements()[0].GetNumOfElements();
+-        double modToDrop = cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
++        // RR: the factor the following rescale divides the scale by is F for THIS level, a
++        // ratio prod(dropped)/prod(added). `params[numTowers-1]` is the top prime of a PREFIX
++        // chain and means nothing on a window.
++        double modToDrop;
++        if (cryptoParams->IsRRChain()) {
++            modToDrop = cryptoParams->RRRescaleFactorAtLevel(ciphertext->GetLevel());
++        }
++        else {
++        modToDrop = cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
+         for (uint32_t j = 2; j <= compositeDegree; ++j) {
+             modToDrop *= cryptoParams->GetElementParams()->GetParams()[numTowers - j]->GetModulus().ConvertToDouble();
+         }
++        }
+ 
+         // in the case of FLEXIBLEAUTO, we need to bring the ciphertext to the right scale using a
+         // a scaling multiplication. Note the at currently FLEXIBLEAUTO is only supported for NATIVEINT = 64.
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+index 94239f00..9392c35d 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+@@ -15,6 +15,8 @@
+ 
+ namespace lbcrypto {
+ 
++const PrivateKey<DCRTPoly>* g_rrTraceKey = nullptr;
++
+ // Cache: one RRChain per crypto-parameters object. RRChain's constructor builds a
+ // DCRTPoly::Params for every level, so constructing one inside ModReduce (which runs once per
+ // level of every circuit) would dominate. Keyed by the params pointer — that is what identifies
 -- 
 2.43.0
 
