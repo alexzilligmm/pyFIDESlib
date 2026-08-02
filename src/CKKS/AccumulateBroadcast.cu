@@ -63,7 +63,23 @@ void FIDESlib::CKKS::Accumulate(Ciphertext& ctxt, const int bStep, const int str
         // garbage: post-raise finite, pre-CtS nonfinite=64 at slots=64, measured. Under RR do the
         // arithmetic plainly: rotate non-ext, add in Q, no extend/modDown.
         if (ctxt.cc.isRR()) {
+            // A ~25%-of-runs corruption was born in this window (post-raise -> pre-CtS decoded
+            // all-NaN; correction-independent; GONE under CUDA_LAUNCH_BLOCKING=1 in 10/10 runs
+            // and with this entry sync in 10/10) — a stream-ordering hazard between the raise
+            // side's writes to the ciphertext and this function's first baby copy. The sync is
+            // one device fence per bootstrap (~us against ~100 ms) and makes the boundary a
+            // hard ordering point. RR_SYNC_AT overrides for bisection: 0 = off (reproduce the
+            // race), 2 adds a fence after the rotation batch. The precise missing stream edge
+            // is still to be named — see RR_BTS_RUNLOG [race].
+            static const int syncAt = [] {
+                const char* e = std::getenv("RR_SYNC_AT");
+                return e ? std::atoi(e) : 1;
+            }();
+            if (syncAt & 1)
+                cudaDeviceSynchronize();
             ctxt.rotate_hoisted(indexes, auxptr, false);
+            if (syncAt & 2)
+                cudaDeviceSynchronize();
             for (size_t i = 0; i < indexes.size(); ++i) {
                 ctxt.add(*auxptr[i]);
             }
