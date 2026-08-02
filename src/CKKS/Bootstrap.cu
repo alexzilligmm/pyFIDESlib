@@ -327,7 +327,11 @@ void FIDESlib::CKKS::BootstrapCPUraise(
 
     if (!corPre && !skipCorFactor() && corFactor != 1)
         multIntScalar(ctxt, corFactor);
-    if (rrSignedRecovery && !skipCorFactor()) {
+    static const bool rrNoRecovery = [] {
+        const char* e = std::getenv("RR_BTS_NORECOVERY");
+        return e && *e && *e != '0';
+    }();
+    if (rrSignedRecovery && !skipCorFactor() && !rrNoRecovery) {
         if (std::getenv("RR_BTS_SCALEDBG"))
             std::fprintf(stderr, "[rr_scale] recovery: NoiseFactor 2^%.2f -> 2^%.2f (x2^%d)\n",
                          std::log2(ctxt.NoiseFactor), std::log2(ctxt.NoiseFactor) - (double)correction,
@@ -588,7 +592,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     if (!corPre && !skipCorFactor() && corFactor != 1)
         multIntScalar(ctxt, corFactor);
-    if (rrSignedRecovery && !skipCorFactor()) {
+    static const bool rrNoRecovery = [] {
+        const char* e = std::getenv("RR_BTS_NORECOVERY");
+        return e && *e && *e != '0';
+    }();
+    if (rrSignedRecovery && !skipCorFactor() && !rrNoRecovery) {
         if (std::getenv("RR_BTS_SCALEDBG"))
             std::fprintf(stderr, "[rr_scale] recovery: NoiseFactor 2^%.2f -> 2^%.2f (x2^%d)\n",
                          std::log2(ctxt.NoiseFactor), std::log2(ctxt.NoiseFactor) - (double)correction,
@@ -782,8 +790,8 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
         adjustmentFactor *= pow;
         if (cc.isRR() && std::getenv("RR_BTS_SCALEDBG"))
             std::fprintf(stderr, "[rr_scale] adjust: correction=%d pow=2^%.2f targetSF=2^%.2f sourceSF=2^%.2f "
-                                 "adjFactor=2^%.2f\n", (int)correction, std::log2(pow), std::log2(targetSF),
-                         std::log2(sourceSF), std::log2(adjustmentFactor));
+                                 "adjFactor=2^%.2f prescaled=%d\n", (int)correction, std::log2(pow), std::log2(targetSF),
+                         std::log2(sourceSF), std::log2(adjustmentFactor), (int)prescaled);
         if constexpr (PRINT)
             std::cout << adjustmentFactor << std::endl;
         if (std::getenv("BTS_SF_DEBUG"))
@@ -806,6 +814,8 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
                 CudaCheckErrorMod;
             }
             ctxt.multScalar(adjustmentFactor);
+            if (cc.isRR() && std::getenv("RR_BTS_SCALEDBG"))
+                std::fprintf(stderr, "[rr_scale] adjust: multScalar(adj) APPLIED\n");
             BTS_DIAG("AFTER multScalar(adj)");
             if constexpr (PRINT) {
                 cudaDeviceSynchronize();
