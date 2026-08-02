@@ -113,7 +113,15 @@ constexpr std::array<const char*, 18> opstr{ "                   Noop: ",
 	"          HoistedRotate: ",
 	"HoistedRotate (outputs): " };
 
-std::map<OPS, int> op_count;
+// S7 thread-safety: pre-populate every enum key at static init so operator[] never
+// inserts (a concurrent map-node insert is UB); the remaining concurrent int++ can tear
+// a count but cannot corrupt the map. Counters are diagnostics, not measurements.
+std::map<OPS, int> op_count = [] {
+	std::map<OPS, int> m;
+	for (int i = 0; i <= (int)OPS::HOISTEDROTATEOUTS; ++i)
+		m[(OPS)i] = 0;
+	return m;
+}();
 
 Ciphertext::Ciphertext(Ciphertext&& ct_moved) noexcept
 : my_range(std::move(ct_moved.my_range)), keyID(std::move(ct_moved.keyID)), cc_(ct_moved.cc_), cc(*cc_), c0(std::move(ct_moved.c0)), c1(std::move(ct_moved.c1)),
@@ -1887,6 +1895,14 @@ void Ciphertext::dotProduct(const std::vector<Ciphertext*>& a, const std::vector
 void Ciphertext::multMonomial(/*Ciphertext& ctxt,*/ int power) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
 	CKKS::SetCurrentContext(cc_);
+
+	// S7 thread-safety: the cache is checked, built and replaced below — two host threads
+	// (dense slots=N/2 runs this even at cplx=0, Bootstrap.cu conjugate split) racing the
+	// erase/emplace corrupt the map. One mutex over the whole rebuild-or-read decision;
+	// the mult itself happens on this ct's streams and needs the cache entry pinned, so
+	// hold the lock through the multElement (cold: one call per bootstrap branch).
+	static std::mutex monomial_mtx;
+	std::lock_guard<std::mutex> monomial_guard(monomial_mtx);
 
 	if (!cc.precom.monomialCache.contains(power) || cc.precom.monomialCache.find(power)->second.getLevel() != this->getLevel()) {
 		// TODO compute fully as a GPU function.

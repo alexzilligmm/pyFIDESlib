@@ -2,8 +2,10 @@
 // Created by carlosad on 2/05/24.
 //
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -367,14 +369,44 @@ static int ksAuxPool() {
     return v;
 }
 
+static bool ksAuxTls();
+
 void ContextData::advanceKsAuxSlot() {
+    if (ksAuxTls())
+        return;  // slots are per-thread bindings; nothing to advance (and no race)
     ks_aux_slot = (ks_aux_slot + 1) % ksAuxPool();
 }
 
+/* S7 thread-safety (2026-08-03): concurrent host threads through one context.
+ * - Workspace lazy-init races a make_unique from two threads -> heap corruption
+ *   (the two-ct segfault's root class). Construction is mutex-guarded; the hot
+ *   path only pays a null check.
+ * - FIDESLIB_KS_AUX_TLS=1 binds each HOST THREAD to its own pool slot (assigned
+ *   round-robin on first use) instead of the per-op advancing slot, so two
+ *   threads never share a workspace set and never race ks_aux_slot. Requires
+ *   FIDESLIB_KS_AUX_POOL >= thread count (pool caps at 2). Default 0 = legacy. */
+static std::mutex ks_aux_init_mtx;
+static bool ksAuxTls() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_KS_AUX_TLS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+static int tlsKsSlot(int pool) {
+    static std::atomic<int> next{0};
+    thread_local int slot = next.fetch_add(1);
+    return slot % pool;
+}
+
 RNSPoly& ContextData::getKeySwitchAux() {
-    auto& p = key_switch_aux[ks_aux_slot];
-    if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+    const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
+    auto& p = key_switch_aux[slot];
+    if (p == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (p == nullptr)
+            p = std::make_unique<RNSPoly>(*this, L, false);
+    }
 
     p->generateDecompAndDigit(false);
     p->generateSpecialLimbs(false, false);
@@ -382,18 +414,26 @@ RNSPoly& ContextData::getKeySwitchAux() {
 }
 
 RNSPoly& ContextData::getKeySwitchAux2() {
-    auto& p = key_switch_aux2[ks_aux_slot];
-    if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+    const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
+    auto& p = key_switch_aux2[slot];
+    if (p == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (p == nullptr)
+            p = std::make_unique<RNSPoly>(*this, L, false);
+    }
     p->generateDecompAndDigit(false);
     p->generateSpecialLimbs(false, false);
     return *p;
 }
 
 RNSPoly& ContextData::getModdownAux(const int num) {
-    auto& p = moddown_aux[ks_aux_slot * 2 + (num & 1)];
-    if (p == nullptr)
-        p = std::make_unique<RNSPoly>(*this, L, false);
+    const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
+    auto& p = moddown_aux[slot * 2 + (num & 1)];
+    if (p == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (p == nullptr)
+            p = std::make_unique<RNSPoly>(*this, L, false);
+    }
     p->generateSpecialLimbs(false, true);
     return *p;
 }
@@ -1081,8 +1121,13 @@ bool ContextData::hasAuxilarPoly() const {
     return precom.auxPoly.empty();
 }
 
-RNSPoly ContextData::getAuxilarPoly() {
+// S7 thread-safety: every Ciphertext construction pops this shared pool; two host
+// threads racing the unlocked pop/push double-moved RNSPolys (heap corruption behind
+// the two-ct segfault). Cold path, plain mutex.
+static std::mutex aux_poly_mtx;
 
+RNSPoly ContextData::getAuxilarPoly() {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
     if (precom.auxPoly.empty()) {
         return RNSPoly(*this);
     } else {
@@ -1093,6 +1138,7 @@ RNSPoly ContextData::getAuxilarPoly() {
 }
 
 void ContextData::returnAuxilarPoly(RNSPoly&& c) {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
     precom.auxPoly.emplace_back(std::move(c));
 }
 

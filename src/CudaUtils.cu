@@ -399,6 +399,11 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
     }
 
     if (cache && (bytes & (bytes - 1)) == 0) {
+        // S7 thread-safety (2026-08-03): the WHOLE pooled path holds the lock — the map
+        // operator[] (node insert), the empty-check/refill/pop sequence and the shared
+        // per-id event were all racy under concurrent host threads. Cold path; the lock
+        // is nanoseconds against a 28 ms bootstrap.
+        std::lock_guard<std::mutex> guard(mempool_lock[id]);
         std::vector<void*>& free_limb = size_to_memory[id][bytes];
 
         if (s[id].ptr() == nullptr) {
@@ -409,11 +414,9 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
             uint64_t* base;
             cudaMallocAsync(&base, MBs * 1024 * 1024, s[id].ptr());
 
-            mempool_lock[id].lock();
             for (int i = 0; i < MBs * 1024 * 1024; i += bytes) {
                 free_limb.emplace_back(((char*)base) + i);
             }
-            mempool_lock[id].unlock();
         }
         CudaCheckErrorModNoSync;
 
@@ -424,10 +427,8 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
         }
 
         CudaCheckErrorModNoSync;
-        mempool_lock[id].lock();
         ptr = free_limb.back();
         free_limb.pop_back();
-        mempool_lock[id].unlock();
         //ptr = free_limb.front();
         //free_limb.pop_front();
         //std::cout << "get " << ptr << std::endl;
@@ -504,10 +505,12 @@ void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
         MBs = bytes / 1024;
     }
 
-    if (s[id].ptr() == nullptr) {
-        s[id].init();
-    }
     if (cache && (bytes & (bytes - 1)) == 0) {
+        // S7 thread-safety: same full-lock rule as GPUmalloc (map insert + shared event).
+        std::lock_guard<std::mutex> guard(mempool_lock[id]);
+        if (s[id].ptr() == nullptr) {
+            s[id].init();
+        }
         std::vector<void*>& free_limb = size_to_memory[id][bytes];
 
         CudaCheckErrorModNoSync;
@@ -516,11 +519,12 @@ void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
             s[id].wait(stream);
         }
         CudaCheckErrorModNoSync;
-        mempool_lock[id].lock();
         free_limb.emplace_back(ptr);
-        mempool_lock[id].unlock();
         //std::cout << "free " << ptr << std::endl;
         return;
+    }
+    if (s[id].ptr() == nullptr) {
+        s[id].init();
     }
 
     if (0) {
