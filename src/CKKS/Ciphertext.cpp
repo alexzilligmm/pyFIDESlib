@@ -918,7 +918,24 @@ void Ciphertext::rotate(const int index_, const bool moddown) {
 
 	assert(index != 0);
 	constexpr bool PRINT	= false;
+	if (cc.isRR() && std::getenv("RR_KS_DBG"))
+		std::fprintf(stderr, "[rr_ks] rotate: raw=%d norm=%d slots=%d\n", index_, index, (int)slots);
 	KeySwitchingKey& kskRot = cc.GetRotationKey(index, keyID, slots);
+
+	// RATIONAL RESCALING: the fused path below is a batched modup+dot that indexes the key by
+	// ciphertext TOWER, which is the prefix assumption again. Compose the rotation out of the
+	// two primitives that are already RR-correct instead:
+	//     dec(ct) = c0 + c1*s, so applying the automorphism psi gives psi(c0) + psi(c1)*psi(s);
+	//     keyswitching psi(c1) from psi(s) back to s yields (d0, d1), and the rotated
+	//     ciphertext is (psi(c0) + d0, d1) -- exactly automorph-both-then-keySwitch.
+	// Correctness first: this gives up the fused kernel's speed, and the hoisted path (one modup
+	// shared across many dots) is where that actually matters. Optimise after it is right.
+	if (cc.isRR()) {
+		c0.automorph(index, 1, nullptr);
+		c1.automorph(index, 1, nullptr);
+		keySwitch(kskRot);
+		return;
+	}
 
 	if (0 && cc.GPUid.size() == 1) {
 		if constexpr (0) {
@@ -1229,6 +1246,30 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 	// past the 27-level window table), and the drop back down is the very move an RR chain
 	// does not have. Allocate straight at the target level instead, which is (c).2's rule:
 	// storage is created at the poly's level and only rrRescale may move it.
+	// RR: the hoisted path shares ONE modup across every dot, and that sharing is exactly what
+	// has no windowed twin yet -- the dots index the key positionally per rotation. Fall back to
+	// independent rotations, which are RR-correct via automorph+keySwitch above. Costs one modup
+	// per rotation instead of one per stage; a windowed hoisted keyswitch is the optimisation.
+	if (cc.isRR()) {
+		for (size_t i = 0; i < indexes.size(); ++i) {
+			// indexes_ (the ORIGINAL), not indexes: those were already normalyzed at the top of
+			// this function and rotate() normalyzes again -- applying it twice lands on an index
+			// with no rotation key (map::at).
+			results[i]->growToLevel(this->c0.getLevel());
+			results[i]->copy(*this);
+			// index 0 is the identity entry the baby-step loop carries (the classic hoisted path
+			// special-cases it as KeySwitchExt with no automorphism); rotate() asserts index != 0
+			// and would look up a rotation key that is never generated.
+			if (normalyzeIndex(indexes_[i]) != 0)
+				results[i]->rotate(indexes_[i], true);
+			if (ext) {
+				results[i]->c0.generateSpecialLimbs(false, false);
+				results[i]->c1.generateSpecialLimbs(false, false);
+			}
+		}
+		return;
+	}
+
 	bool grow_full = !cc.isRR();
 	for (auto& i : results) {
 		i->growToLevel(grow_full ? cc.L : this->c0.getLevel());

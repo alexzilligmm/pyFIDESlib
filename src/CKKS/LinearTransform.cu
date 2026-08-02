@@ -136,6 +136,13 @@ void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, c
                     }
                 }
 
+                // RR: the hoisted rotations fall back to independent automorph+keySwitch, which
+                // returns fully moddown'd ciphertexts -- so the extended-basis flow (accumulate in
+                // P*Q, one KeySwitchDown at the end) has nothing to consume. The LT already
+                // supports the non-extended variant (it selects it for bStep==1 and for
+                // non-modUp plaintexts); take that path until a windowed hoisted keyswitch exists.
+                if (cc.isRR())
+                    ext = false;
                 ctxt.rotate_hoisted(indexes, fastRotationPtr, ext);
             }
 
@@ -329,6 +336,8 @@ void FIDESlib::CKKS::ConvolutionTransform(Ciphertext& ctxt, int rowSize, int bSt
 					}
 				}
 
+				if (cc.isRR())
+					ext = false;
 				ctxt.rotate_hoisted(indexes, fastRotationPtr, ext);
 			}
 
@@ -524,6 +533,8 @@ void FIDESlib::CKKS::SpecialConvolutionTransform(Ciphertext& ctxt,
 					}
 				}
 
+				if (cc.isRR())
+					ext = false;
 				ctxt.rotate_hoisted(indexes, fastRotationPtr, ext);
 			}
 
