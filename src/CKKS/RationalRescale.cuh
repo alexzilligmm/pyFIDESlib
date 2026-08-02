@@ -66,7 +66,12 @@ class KeySwitchingKey;
  * the window basis — i.e. exactly RRChain::KeySwitchCore's return value.
  */
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
-                     double* phase_ms = nullptr);  //!< optional [modup, dot, moddown] breakdown
+                     double* phase_ms = nullptr,  //!< optional [modup, dot, moddown] breakdown
+                     bool do_moddown = true);     //!< false: leave (out0, out1) in the EXTENDED
+                                                  //!< P*Q basis (ModUp set, specials populated) so a
+                                                  //!< caller can accumulate several switched terms and
+                                                  //!< pay ONE ModDown rounding for the whole sum — the
+                                                  //!< hoisted linear transform's noise trick.
 
 /**
  * Milestone (c).2 harness: the same rescale step driven through the WINDOWED poly

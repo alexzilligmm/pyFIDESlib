@@ -6,6 +6,7 @@
 #include "CKKS/Context.cuh"
 #include "CKKS/LinearTransform.cuh"
 #include "CKKS/Plaintext.cuh"
+#include "CKKS/RationalRescale.cuh"
 #include "CudaUtils.cuh"
 
 #if defined(__clang__)
@@ -62,6 +63,9 @@ void DotProductPtInternal(std::vector<std::shared_ptr<Ciphertext>>& result, cons
         }
     }
 }
+// Bootstrap.cu shim (see ApproxModEval.cu) — this TU already sits inside FIDESlib::CKKS.
+void btsStashPush(const char* stage, Ciphertext& ctxt);
+
 namespace {
 // ---------------------------------------------------------------------------------------------
 // RATIONAL RESCALING: a SEPARATE linear transform, not a branch inside the batched one.
@@ -119,6 +123,184 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
         ptOwned.back().copy(*pts[i]);
         ptOwned.back().c0.dropToLevel(ctLvl);
         ptUse[i] = &ptOwned.back();
+    }
+
+    // NOISE (RR_LT_EXT, default ON): the baby rotations and the inner ct*pt sums run in the
+    // EXTENDED P*Q basis and each inner sum pays ONE ModDown rounding — the hoisted transform's
+    // noise structure. The per-rotation full-rotate arm below (RR_LT_EXT=0) pays a ModDown per
+    // rotation, and its ~bStep extra roundings per stage measured as the GPU's entire noise
+    // deficit against the CPU oracle: zero-message floors 2.63e-6 at pre-StC on BOTH arms, but
+    // end noise 2.3e-3 (per-rotation) vs the CPU's ~1.8e-3 with hoisted accumulation. All the
+    // pieces are individually gated: RRKeySwitchCore(do_moddown=false) leaves (d0,d1) extended,
+    // RNSPoly::add auto-lifts the non-modUp c0 by P, automorph follows the ModUp flag onto the
+    // special limbs, the imported stage plaintexts already carry `window ++ P` residues, and
+    // dotProductPt(ext) is the classic extended accumulate at equal windows (positional = exact
+    // after the plaintext pre-drop above).
+    static const bool extAcc = [] {
+        const char* e = std::getenv("RR_LT_EXT");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    const bool ptsExtended = [&] {
+        for (int i = 0; i < rowSize; ++i)
+            if (ptUse[i] && !ptUse[i]->c0.isModUp())
+                return false;
+        return true;
+    }();
+
+    if (extAcc && ptsExtended) {
+        const int lvl = ctxt.getLevel();
+        static const bool extSync = std::getenv("RR_LT_EXT_SYNC") != nullptr;
+        if (extSync)
+            cudaDeviceSynchronize();
+        if (std::getenv("RR_LT_EXT_CHK"))
+            btsStashPush("lt-in", ctxt);
+        std::vector<Ciphertext> fr;
+        fr.reserve(bStep);
+        for (int i = 0; i < bStep; ++i) {
+            fr.emplace_back(cc_);
+            Ciphertext& f  = fr.back();
+            f.growToLevel(lvl);
+            f.copy(ctxt);
+            const int nidx = ctxt.normalyzeIndex(i * stride);
+            if (nidx == 0) {
+                // identity baby, lifted to the extended basis: specials of x*P are ZERO
+                f.c0.generateSpecialLimbs(true, false);
+                f.c0.scaleByP();
+                f.c1.generateSpecialLimbs(true, false);
+                f.c1.scaleByP();
+            } else {
+                // keySwitch FIRST (extended, no ModDown), then automorph BOTH — rotate()'s own
+                // order, kept in the P*Q basis. advanceKsAuxSlot: every library entry point
+                // that keyswitches rotates the dual-slot aux pool; calling the core directly
+                // without it makes back-to-back baby keyswitches share one aux slot.
+                cc.advanceKsAuxSlot();
+                RNSPoly d0(cc, lvl), d1(cc, lvl);
+                RRKeySwitchCore(f.c1, cc.GetRotationKey(nidx, ctxt.keyID, ctxt.slots), d0, d1, nullptr,
+                                /*do_moddown=*/false);
+                if (extSync)
+                    cudaDeviceSynchronize();
+                // RR_LT_EXT_DBG2: rebuild THIS baby from copies, moddown it, and stash next to a
+                // plain rotate() of the same input — a per-stage, non-destructive A/B of the
+                // whole deferred rotation.
+                if (std::getenv("RR_LT_EXT_DBG2") && i == 1) {
+                    Ciphertext a(cc_), b(cc_);
+                    a.growToLevel(lvl);
+                    a.copy(ctxt);
+                    a.c0.add(d0);
+                    a.c1.copy(d1);
+                    a.c0.automorph(nidx, 1, nullptr);
+                    a.c1.automorph(nidx, 1, nullptr);
+                    a.modDown(false);
+                    btsStashPush("rot-def", a);
+                    // no-automorph split: moddown straight after the extended add — NaN here
+                    // means the no-moddown core output itself is bad at this level.
+                    Ciphertext a2(cc_);
+                    a2.growToLevel(lvl);
+                    a2.copy(ctxt);
+                    a2.c0.add(d0);
+                    a2.c1.copy(d1);
+                    a2.modDown(false);
+                    btsStashPush("ks-noauto", a2);
+                    b.growToLevel(lvl);
+                    b.copy(ctxt);
+                    b.rotate(i * stride, true);
+                    btsStashPush("rot-ref", b);
+                }
+                f.c0.add(d0);  // add() lifts the non-modUp c0 by P itself (zeroed specials + scaleByP)
+                f.c1.copy(d1);
+                f.c0.automorph(nidx, 1, nullptr);
+                f.c1.automorph(nidx, 1, nullptr);
+            }
+        }
+
+        // RR_LT_EXT_DBG=1: moddown babies 0/1 IN PLACE and stash them next to a plain-rotate
+        // reference — separates "the extended rotation is wrong" from "the extended dot is
+        // wrong". Destroys the run downstream; debug only.
+        if (std::getenv("RR_LT_EXT_DBG")) {
+            for (int i = 0; i < std::min(bStep, 2); ++i) {
+                fr[i].modDown(false);
+                char lbl[24];
+                std::snprintf(lbl, sizeof lbl, "ext-fr%d", i);
+                btsStashPush(lbl, fr[i]);
+            }
+            if (bStep > 1 && ctxt.normalyzeIndex(stride) != 0) {
+                Ciphertext ref(cc_);
+                ref.growToLevel(ctxt.getLevel());
+                ref.copy(ctxt);
+                ref.rotate(stride, true);
+                btsStashPush("ref-rot1", ref);
+            }
+        }
+
+        Ciphertext acc(cc_), inner(cc_);
+        bool haveAcc = false;
+        for (int j = gStep - 1; j >= 0; --j) {
+            std::vector<Ciphertext*> cts;
+            std::vector<Plaintext*> ps;
+            for (int i = 0; i < bStep; ++i) {
+                const int idx = j * bStep + i;
+                if (idx >= rowSize || !ptUse[idx])
+                    continue;
+                cts.push_back(&fr[i]);
+                ps.push_back(ptUse[idx]);
+            }
+            if (cts.empty())
+                continue;
+            inner.growToLevel(lvl);
+            inner.c0.generateSpecialLimbs(false, false);
+            inner.c1.generateSpecialLimbs(false, false);
+            inner.dotProductPt(cts.data(), ps.data(), (int)cts.size(), true);
+            inner.c0.SetModUp(true);
+            inner.c1.SetModUp(true);
+            inner.modDown(false);  // the ONE rounding this whole inner sum pays
+            // RR_LT_EXT_CHK=1: recompute this inner sum the SLOW way (moddown each baby, multPt,
+            // add) and stash both — a direct A/B on the extended dot alone. Debug only.
+            if (std::getenv("RR_LT_EXT_CHK")) {
+                Ciphertext refInner(cc_), frd(cc_), tmp(cc_);
+                bool have = false;
+                for (size_t t = 0; t < cts.size(); ++t) {
+                    frd.growToLevel(lvl);
+                    frd.copy(*cts[t]);
+                    frd.modDown(false);
+                    tmp.growToLevel(lvl);
+                    tmp.copy(frd);
+                    tmp.multPt(*ps[t], false);
+                    if (!have) {
+                        refInner.growToLevel(lvl);
+                        refInner.copy(tmp);
+                        have = true;
+                    } else {
+                        refInner.add(tmp);
+                    }
+                }
+                btsStashPush("ext-inner", inner);
+                btsStashPush("ref-inner", refInner);
+            }
+            inner.NoiseLevel  = ctxt.NoiseLevel + ps[0]->NoiseLevel;
+            inner.NoiseFactor = ctxt.NoiseFactor * ps[0]->NoiseFactor;
+            inner.slots       = ctxt.slots;
+            inner.keyID       = ctxt.keyID;
+            if (!haveAcc) {
+                acc.growToLevel(lvl);
+                acc.copy(inner);
+                haveAcc = true;
+            } else {
+                acc.add(inner);
+            }
+            if (j > 0 && ctxt.normalyzeIndex(bStep * stride) != 0)
+                acc.rotate(bStep * stride, true);
+            if (std::getenv("RR_LT_EXT_CHK")) {
+                char lbl[24];
+                std::snprintf(lbl, sizeof lbl, "acc-j%d", j);
+                btsStashPush(lbl, acc);
+            }
+        }
+        if (ctxt.normalyzeIndex(offset) != 0)
+            acc.rotate(offset, true);
+        if (std::getenv("RR_LT_EXT_CHK"))
+            btsStashPush("acc-final", acc);
+        ctxt.copy(acc);
+        return;
     }
 
     // baby steps: bStep rotations of the input, index 0 being the identity

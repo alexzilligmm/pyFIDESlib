@@ -710,10 +710,14 @@ void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_comm
         }
     }
     if (zero_out) {
-        if (bufferSPECIAL) {
-            if (cc.N * SPECIALmeta.size() * sizeof(uint64_t) > 0)
-                cudaMemsetAsync(bufferSPECIAL, 0, cc.N * SPECIALmeta.size() * sizeof(uint64_t), s.ptr());
-        } else {
+        // Zero through the limbs' CURRENT v pointers, never through bufferSPECIAL: an in-place
+        // automorph swaps each limb's v/aux data pointers (and SPECIALlimbptr/SPECIALauxptr),
+        // so after an ODD number of automorphs the live half of the buffer is the SECOND half —
+        // a bufferSPECIAL memset then scrubs the aux half and leaves stale residues in the live
+        // one. Measured: the deferred-moddown rotation NaN'd on every pool-recycled poly with
+        // odd swap parity (defrot reps alternated pass/NaN), which is what broke stage 2 of
+        // every extended linear transform while stage 1 (virgin pool) passed.
+        if (!SPECIALlimb.empty()) {
             for (auto& i : SPECIALlimb) {
                 if (i.index() == U32) {
                     cudaMemsetAsync(std::get<U32>(i).v.data, 0, cc.N * sizeof(uint32_t), STREAM(i).ptr());
@@ -721,6 +725,9 @@ void LimbPartition::generateSpecialLimb(const bool zero_out, const bool for_comm
                     cudaMemsetAsync(std::get<U64>(i).v.data, 0, cc.N * sizeof(uint64_t), STREAM(i).ptr());
                 }
             }
+        } else if (bufferSPECIAL) {
+            if (cc.N * SPECIALmeta.size() * sizeof(uint64_t) > 0)
+                cudaMemsetAsync(bufferSPECIAL, 0, cc.N * SPECIALmeta.size() * sizeof(uint64_t), s.ptr());
         }
     }
 }

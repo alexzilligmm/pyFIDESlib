@@ -258,7 +258,7 @@ const uint32_t* rrRegenSeed(const LimbPartition& ka, const int block_x, int* sha
 }  // namespace
 
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
-                     double* phase_ms) {
+                     double* phase_ms, bool do_moddown) {
     // phase_ms, when given, is [modup, dot, moddown] in ms — each fenced by a device sync.
     // It exists to PRICE the remaining fusion before building it: the *ModupDotKSK path this
     // would fold into is also the classic shipping path's, so the prize has to justify the risk.
@@ -362,8 +362,10 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         tmark = tick(1, tmark);      // ... so phase[0] is ~0 and phase[1] carries modup+dot
         out0.SetModUp(true);
         out1.SetModUp(true);
-        out0.moddown(true, !keep_specials, 0);
-        out1.moddown(true, !keep_specials, 1);
+        if (do_moddown) {
+            out0.moddown(true, !keep_specials, 0);
+            out1.moddown(true, !keep_specials, 1);
+        }
         tick(2, tmark);
         return;
     }
@@ -443,8 +445,10 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     hph(3);  // dot, including the digit-table build + upload
     out0.SetModUp(true);
     out1.SetModUp(true);
-    out0.moddown(true, !keep_specials, 0);
-    out1.moddown(true, !keep_specials, 1);
+    if (do_moddown) {
+        out0.moddown(true, !keep_specials, 0);
+        out1.moddown(true, !keep_specials, 1);
+    }
     hph(4);  // moddown, including the special-limb FREE
     tick(2, tmark);
 }
