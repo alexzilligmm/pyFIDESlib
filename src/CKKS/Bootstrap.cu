@@ -69,9 +69,35 @@ static bool btsSfDebugOn() {
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
-        auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
-        c->copy(ctxt);
-        FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
+        // RR: the stage stash is NOT yet usable, and it must not crash the run.
+        //
+        // `Ciphertext(cc)+copy` reaches the source level via RNSPoly::copy's dropToLevel+grow --
+        // prefix moves an RR WINDOW does not support, guarded only by asserts, so a Release build
+        // walks off the end (measured: enabling the stash alone was an illegal memory access).
+        // A store/load round trip does not work either: `store` is RR-aware but the RawCipherText
+        // does not carry the window identity that `Ciphertext::load` needs to place it back, so
+        // load range-checks on an empty modulus list.
+        //
+        // The real fix is an RR-aware clone that allocates the destination AT the source's window
+        // (LimbPartition::generateLimbToLevel is the primitive; it asserts limb.empty(), which a
+        // freshly constructed poly satisfies) and then copies limbs without any level move. Until
+        // that exists, skip the stash and say so -- a silent no-op would look like "the bootstrap
+        // has no checkpoints" to the next probe.
+        if (ctxt.cc.isRR()) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::fprintf(stderr,
+                             "[rr_bts] stage stash SKIPPED on RR: cloning a windowed ciphertext needs an "
+                             "RR-aware copy (see btsStageProbe). RR_BTS_STAGE_DECRYPT will report 0 "
+                             "checkpoints -- that is this gap, not an empty bootstrap.\n");
+            }
+        }
+        else {
+            auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
+            c->copy(ctxt);
+            FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
+        }
     }
     if (!btsSfDebugOn())
         return;
