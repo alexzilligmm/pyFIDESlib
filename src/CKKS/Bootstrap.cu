@@ -88,6 +88,30 @@ static bool skipCorFactor() {
     return v;
 }
 
+// RATIONAL RESCALING — the four structural "come down to the bottom before raising" sites.
+//
+// On a classic chain `dropToLevel(d-1)` is exact and FREE: discard the top limbs and the
+// ciphertext is at the bottom modulus, same scale. An RR chain has no such move. Level r-1's
+// window CONTAINS primes level r's does not (the smalls entering at the low edge), so there
+// is nothing to discard your way to, and no intermediate stop either — holding `lo` while
+// dropping top mains yields a prime set that is not any level of the schedule. The ONLY way
+// down is the rescale, and it moves exactly one level.
+//
+// So the RR translation of "drop to the bottom" is not a drop at all: it is a PRECONDITION.
+// The ciphertext must already have arrived at RR level 0 by rescaling, which the chain's own
+// schedule does — the bootstrap is entered at level 1 and the adjust's rescale is the last
+// step down. This throws with the level it actually found rather than silently rescaling a
+// ciphertext the caller did not intend to move: a ciphertext that is not at the bottom here
+// is a FLOW error (someone bootstrapped with payload levels left), and quietly consuming
+// them would hide it while destroying precision.
+static void rrRequireBottom(FIDESlib::CKKS::Ciphertext& ctxt, const char* site) {
+    if (ctxt.getLevel() != 0)
+        throw std::runtime_error(std::string("RR bootstrap: ") + site + " expects the ciphertext at RR level 0 (" +
+                                 "the bottom window), found level " + std::to_string(ctxt.getLevel()) +
+                                 ". An RR chain has no free level drop — the ciphertext must ARRIVE at the bottom "
+                                 "by rescaling. Enter the bootstrap at level 1 (non-prescaled) or 0 (prescaled).");
+}
+
 void FIDESlib::CKKS::BootstrapCPUraise(
     Ciphertext& ctxt, const int slots,
     std::shared_ptr<
@@ -102,16 +126,15 @@ void FIDESlib::CKKS::BootstrapCPUraise(
 
     /////////////////////////////////////////////////////////////////////
     //NativeInteger q = elementParamsRaisedPtr->GetParams()[0]->GetModulus().ConvertToInt();
-    uint64_t q = cc.prime[0].p;
-    double qDouble = (double)q;  //q.ConvertToDouble();
     // COMPOSITESCALING: level 0 spans compositeDegree primes — the bootstrap's q0 is their
-    // PRODUCT (~2^54 on a 2x27-bit chain). Everything downstream (deg, correction, pre/post,
-    // the ModRaise CRT lift) is derived from it.
-    for (int j_ = 1; j_ < cc.compositeDegree(); ++j_)
-        qDouble *= (double)cc.prime[j_].p;
+    // PRODUCT (~2^54 on a 2x27-bit chain). RATIONAL RESCALING: level 0 is a WINDOW of the
+    // layout, not a prefix, so its product is taken over [windowLo(0), windowHi(0)]
+    // (~2^78 on our schedule). Everything downstream (deg, correction, pre/post, the ModRaise
+    // CRT lift) is derived from it — see ContextData::bottomModulus.
+    const double qDouble = cc.bottomModulus();
 
     if constexpr (PRINT) {
-        std::cout << "q: " << q << " ";
+        std::cout << "q0(bottom): ";
         std::cout << qDouble << std::endl;
     }
     const auto p = cc.param.raw->p;  //cryptoParams->GetPlaintextModulus();
@@ -125,14 +148,39 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
     // subtraction below underflows and corFactor = 1 << garbage poisons every
     // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
-    if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
+    // RATIONAL RESCALING: deg is structurally LARGE here and the guard's premise inverts.
+    // The RR bottom is Cheddar's L0 = {q0, 2 tau} — a THREE-limb ~2^78 window — while the
+    // scale the ciphertext carries into the raise is sf(top) ~ 2^55, so q0/sf ~ 2^23 against
+    // the classic chain's 2^2. The correction factor exists to make the message SMALLER
+    // relative to q0 ("emulate a larger q0"); an RR chain needs the opposite sign, which
+    // `uint32_t correction` and the `1 << correction` recovery cannot express.
+    //
+    // So on RR the correction is set to ZERO rather than to a negative number: no extra
+    // down-scaling, self-consistent scale bookkeeping (the mixed-chain arm below normalizes
+    // by sf/q0 and the StC plaintexts carry the q0/sf[0] recovery), and the ~log2(q0/sf)
+    // bits of headroom simply go unused. That is a PRECISION cost, not a correctness one,
+    // and it is the honest way to expose it: measure it at Phase 6 rather than hide it.
+    // The fix is a chain-design one — level 0's window is ~20 bits larger than the scale it
+    // has to hold — see docs/RR_BTS_RUNLOG.md, Phase 3.
+    const bool rrDegOverflow = cc.isRR() && deg > static_cast<int32_t>(effCorrectionFactor(cc, slots));
+    if (rrDegOverflow) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                         "[rr_bts] correction disabled: deg=%d > correctionFactor=%u — the RR bottom window is "
+                         "%d bits larger than the correction machinery can absorb, so that much of q0's range "
+                         "goes unused (a precision cost, quantified at Phase 6)\n",
+                         deg, effCorrectionFactor(cc, slots), deg - (int32_t)effCorrectionFactor(cc, slots));
+        }
+    } else if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
         throw std::runtime_error(
             "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
             " exceeds correctionFactor=" +
             std::to_string(effCorrectionFactor(cc, slots)) +
             " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
+    uint32_t correction = rrDegOverflow ? 0u : effCorrectionFactor(cc, slots) - deg;
     if constexpr (PRINT)
         std::cout << effCorrectionFactor(cc, slots) << " " << deg << std::endl;
     double post = std::pow(2, static_cast<double>(deg));
@@ -144,11 +192,11 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     // identity sf[0] ~ 2^p * 2^deg does not hold; follow the COMPOSITESCALING
     // constants: pre = sf[0]/q0 input normalization, no integer 2^deg recovery
     // (the CPU-precomputed StC matrices carry scaleDec = q0/sf[0]).
-    bool mixedChain = std::fabs(std::log2(cc.sfAtLimb(cc.L) * post / qDouble)) > 0.5;
+    bool mixedChain = std::fabs(std::log2(cc.sfAtTop() * post / qDouble)) > 0.5;
     // COMPOSITESCALING always uses the sf/q0 normalization (OpenFHE: pre = sf[0]/qDouble,
     // no integer 2^deg recovery) — the same constants the mixed-chain arm implements.
     if (mixedChain || cc.compositeDegree() > 1) {
-        pre    = cc.sfAtLimb(cc.L) / qDouble;
+        pre    = cc.sfAtTop() / qDouble;
         scalar = 1;
     }
 
@@ -287,16 +335,15 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     /////////////////////////////////////////////////////////////////////
     //NativeInteger q = elementParamsRaisedPtr->GetParams()[0]->GetModulus().ConvertToInt();
-    uint64_t q = cc.prime[0].p;
-    double qDouble = (double)q;  //q.ConvertToDouble();
     // COMPOSITESCALING: level 0 spans compositeDegree primes — the bootstrap's q0 is their
-    // PRODUCT (~2^54 on a 2x27-bit chain). Everything downstream (deg, correction, pre/post,
-    // the ModRaise CRT lift) is derived from it.
-    for (int j_ = 1; j_ < cc.compositeDegree(); ++j_)
-        qDouble *= (double)cc.prime[j_].p;
+    // PRODUCT (~2^54 on a 2x27-bit chain). RATIONAL RESCALING: level 0 is a WINDOW of the
+    // layout, not a prefix, so its product is taken over [windowLo(0), windowHi(0)]
+    // (~2^78 on our schedule). Everything downstream (deg, correction, pre/post, the ModRaise
+    // CRT lift) is derived from it — see ContextData::bottomModulus.
+    const double qDouble = cc.bottomModulus();
 
     if constexpr (PRINT) {
-        std::cout << "q: " << q << " ";
+        std::cout << "q0(bottom): ";
         std::cout << qDouble << std::endl;
     }
     const auto p = cc.param.raw->p;  //cryptoParams->GetPlaintextModulus();
@@ -310,14 +357,39 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     // must not exceed the correction factor (OpenFHE auto = 9), or the uint32
     // subtraction below underflows and corFactor = 1 << garbage poisons every
     // bootstrap SILENTLY (cost us a 6-config param sweep of tok0 garbage).
-    if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
+    // RATIONAL RESCALING: deg is structurally LARGE here and the guard's premise inverts.
+    // The RR bottom is Cheddar's L0 = {q0, 2 tau} — a THREE-limb ~2^78 window — while the
+    // scale the ciphertext carries into the raise is sf(top) ~ 2^55, so q0/sf ~ 2^23 against
+    // the classic chain's 2^2. The correction factor exists to make the message SMALLER
+    // relative to q0 ("emulate a larger q0"); an RR chain needs the opposite sign, which
+    // `uint32_t correction` and the `1 << correction` recovery cannot express.
+    //
+    // So on RR the correction is set to ZERO rather than to a negative number: no extra
+    // down-scaling, self-consistent scale bookkeeping (the mixed-chain arm below normalizes
+    // by sf/q0 and the StC plaintexts carry the q0/sf[0] recovery), and the ~log2(q0/sf)
+    // bits of headroom simply go unused. That is a PRECISION cost, not a correctness one,
+    // and it is the honest way to expose it: measure it at Phase 6 rather than hide it.
+    // The fix is a chain-design one — level 0's window is ~20 bits larger than the scale it
+    // has to hold — see docs/RR_BTS_RUNLOG.md, Phase 3.
+    const bool rrDegOverflow = cc.isRR() && deg > static_cast<int32_t>(effCorrectionFactor(cc, slots));
+    if (rrDegOverflow) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                         "[rr_bts] correction disabled: deg=%d > correctionFactor=%u — the RR bottom window is "
+                         "%d bits larger than the correction machinery can absorb, so that much of q0's range "
+                         "goes unused (a precision cost, quantified at Phase 6)\n",
+                         deg, effCorrectionFactor(cc, slots), deg - (int32_t)effCorrectionFactor(cc, slots));
+        }
+    } else if (deg > static_cast<int32_t>(effCorrectionFactor(cc, slots))) {
         throw std::runtime_error(
             "Bootstrap: deg=log2(q0/2^p)=" + std::to_string(deg) +
             " exceeds correctionFactor=" +
             std::to_string(effCorrectionFactor(cc, slots)) +
             " (uint32 underflow); pick q0_bits - scale_bits <= correctionFactor.");
     }
-    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
+    uint32_t correction = rrDegOverflow ? 0u : effCorrectionFactor(cc, slots) - deg;
     if (std::getenv("BTS_SF_DEBUG"))
         fprintf(stderr, "[bts_cf] cc=%p override=%d deg=%d correction=%u\n", (void*)&cc,
                 cc.correctionFactorOverride, deg, correction);
@@ -332,11 +404,11 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
     // identity sf[0] ~ 2^p * 2^deg does not hold; follow the COMPOSITESCALING
     // constants: pre = sf[0]/q0 input normalization, no integer 2^deg recovery
     // (the CPU-precomputed StC matrices carry scaleDec = q0/sf[0]).
-    bool mixedChain = std::fabs(std::log2(cc.sfAtLimb(cc.L) * post / qDouble)) > 0.5;
+    bool mixedChain = std::fabs(std::log2(cc.sfAtTop() * post / qDouble)) > 0.5;
     // COMPOSITESCALING always uses the sf/q0 normalization (OpenFHE: pre = sf[0]/qDouble,
     // no integer 2^deg recovery) — the same constants the mixed-chain arm implements.
     if (mixedChain || cc.compositeDegree() > 1) {
-        pre    = cc.sfAtLimb(cc.L) / qDouble;
+        pre    = cc.sfAtTop() / qDouble;
         scalar = 1;
     }
 
@@ -481,16 +553,15 @@ double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
     SetCurrentContext(cc_);
     /////////////////////////////////////////////////////////////////////
     //NativeInteger q = elementParamsRaisedPtr->GetParams()[0]->GetModulus().ConvertToInt();
-    uint64_t q = cc.prime[0].p;
-    double qDouble = (double)q;  //q.ConvertToDouble();
     // COMPOSITESCALING: level 0 spans compositeDegree primes — the bootstrap's q0 is their
-    // PRODUCT (~2^54 on a 2x27-bit chain). Everything downstream (deg, correction, pre/post,
-    // the ModRaise CRT lift) is derived from it.
-    for (int j_ = 1; j_ < cc.compositeDegree(); ++j_)
-        qDouble *= (double)cc.prime[j_].p;
+    // PRODUCT (~2^54 on a 2x27-bit chain). RATIONAL RESCALING: level 0 is a WINDOW of the
+    // layout, not a prefix, so its product is taken over [windowLo(0), windowHi(0)]
+    // (~2^78 on our schedule). Everything downstream (deg, correction, pre/post, the ModRaise
+    // CRT lift) is derived from it — see ContextData::bottomModulus.
+    const double qDouble = cc.bottomModulus();
 
     if constexpr (PRINT) {
-        std::cout << "q: " << q << " ";
+        std::cout << "q0(bottom): ";
         std::cout << qDouble << std::endl;
     }
     const auto p = cc.param.raw->p;  //cryptoParams->GetPlaintextModulus();
@@ -508,7 +579,12 @@ double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
         }
     #endif
         */
-    uint32_t correction = effCorrectionFactor(cc, slots) - deg;
+    // Same RR arm as the two bootstrap variants above: on an RR chain deg exceeds the
+    // correction factor structurally (the bottom window is ~2^78 against a ~2^55 scale), and
+    // the correction is set to zero rather than to an inexpressible negative.
+    uint32_t correction = (cc.isRR() && deg > static_cast<int32_t>(effCorrectionFactor(cc, slots)))
+                              ? 0u
+                              : effCorrectionFactor(cc, slots) - deg;
 
     double res = 0.0;
     if (cc.rescaleTechnique == CKKS::FLEXIBLEAUTO || cc.rescaleTechnique == CKKS::FLEXIBLEAUTOEXT) {
@@ -520,6 +596,16 @@ double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
         double sourceSF = cc.sfAtLimb(2 * d_ - 1);  // ciphertext->GetScalingFactor();
         uint32_t numTowers = 2 * d_;                // ciphertext->GetElements()[0].GetNumOfElements();
         double modToDrop = cc.modReduceProduct(2 * d_ - 1);
+        // RATIONAL RESCALING: the same three quantities, keyed by LEVEL instead of by limb.
+        // The pre-raise ciphertext sits at RR level 1 (one rescale above the bottom), the
+        // adjust's rescale takes it to level 0, and that rescale divides the scale by
+        // F(1) = prod(dropped)/prod(added) — a RATIO, since an RR rescale also ADDS primes.
+        if (cc.isRR()) {
+            targetSF  = cc.sfAtLevel(cc.topLevel());
+            sourceSF  = cc.sfAtLevel(1);
+            numTowers = cc.windowSize(1);
+            modToDrop = cc.rrRescaleFactor(1);
+        }
         //cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
         // in the case of FLEXIBLEAUTO, we need to bring the ciphertext to the right scale using a
         // a scaling multiplication. Note the at currently FLEXIBLEAUTO is only supported for NATIVEINT = 64.
@@ -597,6 +683,16 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         uint32_t numTowers = ctxt.getLevel() + 1;  // ciphertext->GetElements()[0].GetNumOfElements();
         // composite: the adjust's rescale drops the top d primes — divide by their product
         double modToDrop = cc.modReduceProduct(ctxt.getLevel());
+        // RATIONAL RESCALING: sourceSF is already dynamic (the ciphertext's own NoiseFactor);
+        // only the two chain-derived quantities move to level indexing. The rescale that
+        // follows is the one from the ciphertext's CURRENT level, so its factor is
+        // F(getLevel()) — and the ciphertext must be at level >= 1 for that to exist, which
+        // is the precondition the drop sites below enforce.
+        if (cc.isRR()) {
+            targetSF  = cc.sfAtLevel(cc.topLevel());
+            numTowers = cc.windowSize(ctxt.getLevel());
+            modToDrop = ctxt.getLevel() >= 1 ? cc.rrRescaleFactor(ctxt.getLevel()) : 1.0;
+        }
         //cryptoParams->GetElementParams()->GetParams()[numTowers - 1]->GetModulus().ConvertToDouble();
 
         // in the case of FLEXIBLEAUTO, we need to bring the ciphertext to the right scale using a
@@ -645,7 +741,10 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
             }
             //cc->EvalMultInPlace(ciphertext, adjustmentFactor);
             ctxt.rescale();
-            ctxt.dropToLevel(cc.compositeDegree() - 1);
+            if (cc.isRR())
+                rrRequireBottom(ctxt, "adjust (non-prescaled)");
+            else
+                ctxt.dropToLevel(cc.compositeDegree() - 1);
             if constexpr (PRINT) {
                 cudaDeviceSynchronize();
                 std::cout << "Initial ";
@@ -672,8 +771,21 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                 CudaCheckErrorMod;
             }
             if (ctxt.NoiseLevel == 2) {
-                ctxt.dropToLevel(2 * cc.compositeDegree() - 1);
+                // deg-2 ciphertext: it owes one rescale. Classic drops to 2 levels first so
+                // that the rescale lands on the bottom; under RR the ciphertext must already
+                // BE at level 1, and the rescale is what takes it to 0.
+                if (cc.isRR()) {
+                    if (ctxt.getLevel() != 1)
+                        throw std::runtime_error(
+                            "RR bootstrap: prescaled deg-2 entry expects RR level 1 (one rescale above the "
+                            "bottom), found level " +
+                            std::to_string(ctxt.getLevel()));
+                } else {
+                    ctxt.dropToLevel(2 * cc.compositeDegree() - 1);
+                }
                 ctxt.rescale();
+            } else if (cc.isRR()) {
+                rrRequireBottom(ctxt, "adjust (prescaled, deg-1)");
             } else {
                 ctxt.dropToLevel(cc.compositeDegree() - 1);
             }
@@ -709,7 +821,10 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                 CudaCheckErrorMod;
             }
             ctxt.rescale();
-            ctxt.dropToLevel(cc.compositeDegree() - 1);
+            if (cc.isRR())
+                rrRequireBottom(ctxt, "adjust (non-prescaled)");
+            else
+                ctxt.dropToLevel(cc.compositeDegree() - 1);
             if constexpr (PRINT) {
                 cudaDeviceSynchronize();
                 std::cout << "Initial ";
@@ -736,8 +851,21 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                 CudaCheckErrorMod;
             }
             if (ctxt.NoiseLevel == 2) {
-                ctxt.dropToLevel(2 * cc.compositeDegree() - 1);
+                // deg-2 ciphertext: it owes one rescale. Classic drops to 2 levels first so
+                // that the rescale lands on the bottom; under RR the ciphertext must already
+                // BE at level 1, and the rescale is what takes it to 0.
+                if (cc.isRR()) {
+                    if (ctxt.getLevel() != 1)
+                        throw std::runtime_error(
+                            "RR bootstrap: prescaled deg-2 entry expects RR level 1 (one rescale above the "
+                            "bottom), found level " +
+                            std::to_string(ctxt.getLevel()));
+                } else {
+                    ctxt.dropToLevel(2 * cc.compositeDegree() - 1);
+                }
                 ctxt.rescale();
+            } else if (cc.isRR()) {
+                rrRequireBottom(ctxt, "adjust (prescaled, deg-1)");
             } else {
                 ctxt.dropToLevel(cc.compositeDegree() - 1);
             }
@@ -790,6 +918,14 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         std::cout << std::endl;
     }
     //   std::cout << "Grow" << std::endl;
+    // RATIONAL RESCALING (RR_PLAN Phase 2): rrModRaise IS the grow + raise. It widens the
+    // level-0 window onto the TOP window (rrWidenToLevel — (c).2's no-widen assert stays
+    // armed for everything else) and CRT-extends the bottom window's w residues across it.
+    // The classic pair below cannot express either half: `grow` to a prefix is not an RR
+    // level, and broadcastLimb0 assumes a SINGLE-limb bottom where RR has a w-limb window.
+    if (cc.isRR()) {
+        ctxt.c0.rrModRaise();
+    } else {
     ctxt.c0.grow(cc.L - (cc.rescaleTechnique == FLEXIBLEAUTOEXT));
     //   std::cout << "Broadcast" << std::endl;
     if constexpr (PRINT) {
@@ -807,6 +943,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         ctxt.c0.compositeModRaise();
     else
         ctxt.c0.broadcastLimb0();
+    }
     if constexpr (PRINT) {
         CudaCheckErrorMod;
         std::cout << "Adjustment ";
@@ -842,6 +979,14 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         std::cout << std::endl;
     }
     //  std::cout << "Grow" << std::endl;
+    // RATIONAL RESCALING (RR_PLAN Phase 2): rrModRaise IS the grow + raise. It widens the
+    // level-0 window onto the TOP window (rrWidenToLevel — (c).2's no-widen assert stays
+    // armed for everything else) and CRT-extends the bottom window's w residues across it.
+    // The classic pair below cannot express either half: `grow` to a prefix is not an RR
+    // level, and broadcastLimb0 assumes a SINGLE-limb bottom where RR has a w-limb window.
+    if (cc.isRR()) {
+        ctxt.c1.rrModRaise();
+    } else {
     ctxt.c1.grow(cc.L - (cc.rescaleTechnique == FLEXIBLEAUTOEXT));
     //  std::cout << "Broadcast" << std::endl;
     if constexpr (PRINT) {
@@ -858,6 +1003,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         ctxt.c1.compositeModRaise();
     else
         ctxt.c1.broadcastLimb0();
+    }
     if constexpr (PRINT) {
         std::cout << "Adjustment c1";
         for (auto& j : ctxt.c1.GPU) {

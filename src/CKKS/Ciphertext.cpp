@@ -515,6 +515,22 @@ void Ciphertext::rescale() {
 	}
 	op_count[OPS::RESCALE]++;
 
+	// RATIONAL RESCALING: the level move is rrRescale, and the scale divides by
+	// F(level) = prod(dropped)/prod(added) — a RATIO, because an RR rescale adds primes back
+	// at the low edge as well as dropping them at the top, so modReduceProduct cannot express
+	// it (and is keyed by top limb, which does not identify an RR level anyway).
+	if (cc.isRR()) {
+		const int r = c0.getLevel();
+		if (r < 1)
+			throw std::runtime_error("RR rescale: ciphertext is already at level 0 (the bottom window) — "
+									 "there is nothing below it");
+		c0.rrRescale();
+		c1.rrRescale();
+		NoiseFactor /= cc.rrRescaleFactor(r);
+		NoiseLevel -= 1;
+		return;
+	}
+
 	if constexpr (RESCALE_DOUBLE) {
 		c0.rescaleDouble(c1);
 	} else {
@@ -1201,10 +1217,17 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 	constexpr bool PRINT = false;
 	assert(indexes.size() == results.size());
 
-	bool grow_full = true;
+	// RATIONAL RESCALING: the grow-to-the-whole-chain-then-drop-back idiom is a classic-chain
+	// allocation trick (take the full prefix once, discard the top for free). Under RR neither
+	// half is available — `cc.L` is a LIMB index and not a level at all (windowSize(47) reads
+	// past the 27-level window table), and the drop back down is the very move an RR chain
+	// does not have. Allocate straight at the target level instead, which is (c).2's rule:
+	// storage is created at the poly's level and only rrRescale may move it.
+	bool grow_full = !cc.isRR();
 	for (auto& i : results) {
 		i->growToLevel(grow_full ? cc.L : this->c0.getLevel());
-		i->dropToLevel(this->c0.getLevel());
+		if (grow_full)
+			i->dropToLevel(this->c0.getLevel());
 		if (ext)
 			i->c0.generateSpecialLimbs(false, false);
 		if (ext)

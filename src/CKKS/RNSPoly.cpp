@@ -922,7 +922,13 @@ void RNSPoly::copyShallow(const RNSPoly& poly) {
 void RNSPoly::dropToLevel(int level) {
     // RR: dropping a level is not free — a window's LOW edge moves too, and the residues
     // change. The only legal transition is rrRescale.
-    if (cc.isRR() && level < this->level)
+    //
+    // level < 0 is the ONE exception, and it is not a level move: it is "this polynomial
+    // holds nothing", which every Ciphertext constructor issues on the auxiliary polys it
+    // takes from the pool (Ciphertext::Ciphertext(Context&)). Emptying discards residues
+    // rather than reinterpreting them on a prime set the schedule does not contain, so the
+    // reason the guard exists does not apply. Anything else stays refused.
+    if (cc.isRR() && level >= 0 && level < this->level)
         throw std::runtime_error("RR: dropToLevel(" + std::to_string(level) + ") from level " +
                                  std::to_string(this->level) + " — RR levels only move via rrRescale");
 
@@ -1000,24 +1006,58 @@ void RNSPoly::load(const std::vector<std::vector<uint64_t>>& data, const std::ve
 }
 
 void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const std::vector<uint64_t>& moduli) {
+    // RATIONAL RESCALING: the classifier below identifies a limb by `moduli[i] == prime[i].p`
+    // — a PREFIX test. An RR window's moduli are prime[lo + i], so on any window with lo > 0
+    // it counts ZERO Q-limbs, grows the polynomial to level -1, and leaves a plaintext whose
+    // limb pointers are all null; the LT's batched dot product then reads address 0 (found by
+    // compute-sanitizer inside EvalCoeffsToSlots). A window's identity comes from its low
+    // modulus and its size, exactly as for a ciphertext — ContextData::rrLevelOfWindow.
+    //
+    // The tail IS genuinely special limbs, not a shape mistake: OpenFHE's RRStageParams
+    // builds each CtS/StC stage over `window ++ P`, so a stage plaintext arrives with
+    // windowSize + sizeP moduli (10 + 13 = 23 at level 5 on our schedule). Only the
+    // classification and the Q-limb slot indexing are window-dependent — the P tail below is
+    // already keyed by modulus and needs nothing.
+    const int rrLo = cc.isRR() ? cc.rrPrimeIndex(moduli.at(0)) : 0;
+
     int limbsize = 0;
     int Slimbsize = 0;
     for (int i = 0; i < (int)data.size(); ++i) {
-        if (i <= cc.L && moduli[i] == cc.prime.at(i).p) {
+        const bool isQ = cc.isRR() ? (rrLo + i < (int)cc.prime.size() && moduli[i] == cc.prime.at(rrLo + i).p)
+                                   : (i <= cc.L && moduli[i] == cc.prime.at(i).p);
+        if (isQ) {
             limbsize++;
         } else {
             Slimbsize++;
         }
     }
 
-    assert(limbsize <= cc.L + 1);
-    if (level < limbsize - 1) {
-        grow(limbsize - 1, false, true);
+    if (cc.isRR()) {
+        const int r = cc.rrLevelOfWindow(moduli.at(0), limbsize);
+        // FIDESLIB_RR_LOAD_DEBUG: the level MAP of every imported constant. An RR level is a
+        // window, so "which level did this plaintext arrive at" is the first question when a
+        // ct*pt kernel indexes past one of them, and it is not visible from either side alone.
+        if (std::getenv("FIDESLIB_RR_LOAD_DEBUG"))
+            std::fprintf(stderr, "[rr_load] pt: %d Q-limbs + %d special -> RR level %d (window [%d,%d])\n", limbsize,
+                         Slimbsize, r, cc.windowLo(r), cc.windowHi(r));
+        if (level != r)
+            grow(r, false, true);
     } else {
-        dropToLevel(limbsize - 1);
+        assert(limbsize <= cc.L + 1);
+        if (level < limbsize - 1) {
+            grow(limbsize - 1, false, true);
+        } else {
+            dropToLevel(limbsize - 1);
+        }
+        assert(level == limbsize - 1);
     }
-    assert(level == limbsize - 1);
     for (int i = 0; i < limbsize; ++i) {
+        if (cc.isRR()) {
+            assert(moduli[i] == cc.prime.at(rrLo + i).p);
+            cudaSetDevice(GPU[0].device);
+            SWITCH(GPU[0].limb[i], load_convert(data[i]));
+            continue;
+        }
         assert(moduli[i] == cc.prime.at(i).p);
         cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
         SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y], load_convert(data[i]));
@@ -1046,25 +1086,53 @@ void RNSPoly::loadConstant(const std::vector<std::vector<uint64_t>>& data, const
         loadConstant(data, moduli);
         return;
     }
+    // RATIONAL RESCALING: the classifier below identifies a limb by `moduli[i] == prime[i].p`
+    // — a PREFIX test. An RR window's moduli are prime[lo + i], so on any window with lo > 0
+    // it counts ZERO Q-limbs, grows the polynomial to level -1, and leaves a plaintext whose
+    // limb pointers are all null; the LT's batched dot product then reads address 0 (found by
+    // compute-sanitizer inside EvalCoeffsToSlots). Same treatment as the plain overload
+    // above, including the `window ++ P` shape OpenFHE's RRStageParams gives a stage
+    // plaintext: only the classification and the Q-limb slot indexing are window-dependent.
+    const int rrLo = cc.isRR() ? cc.rrPrimeIndex(moduli.at(0)) : 0;
 
     int limbsize = 0;
     int Slimbsize = 0;
     for (int i = 0; i < (int)data.size(); ++i) {
-        if (i <= cc.L && moduli[i] == cc.prime.at(i).p) {
+        const bool isQ = cc.isRR() ? (rrLo + i < (int)cc.prime.size() && moduli[i] == cc.prime.at(rrLo + i).p)
+                                   : (i <= cc.L && moduli[i] == cc.prime.at(i).p);
+        if (isQ) {
             limbsize++;
         } else {
             Slimbsize++;
         }
     }
 
-    assert(limbsize <= cc.L + 1);
-    if (level < limbsize - 1) {
-        grow(limbsize - 1, false, true);
+    if (cc.isRR()) {
+        const int r = cc.rrLevelOfWindow(moduli.at(0), limbsize);
+        // FIDESLIB_RR_LOAD_DEBUG: the level MAP of every imported constant. An RR level is a
+        // window, so "which level did this plaintext arrive at" is the first question when a
+        // ct*pt kernel indexes past one of them, and it is not visible from either side alone.
+        if (std::getenv("FIDESLIB_RR_LOAD_DEBUG"))
+            std::fprintf(stderr, "[rr_load] pt: %d Q-limbs + %d special -> RR level %d (window [%d,%d])\n", limbsize,
+                         Slimbsize, r, cc.windowLo(r), cc.windowHi(r));
+        if (level != r)
+            grow(r, false, true);
     } else {
-        dropToLevel(limbsize - 1);
+        assert(limbsize <= cc.L + 1);
+        if (level < limbsize - 1) {
+            grow(limbsize - 1, false, true);
+        } else {
+            dropToLevel(limbsize - 1);
+        }
+        assert(level == limbsize - 1);
     }
-    assert(level == limbsize - 1);
     for (int i = 0; i < limbsize; ++i) {
+        if (cc.isRR()) {
+            assert(moduli[i] == cc.prime.at(rrLo + i).p);
+            cudaSetDevice(GPU[0].device);
+            SWITCH(GPU[0].limb[i], load_convert_with_stream(data[i], stream_override));
+            continue;
+        }
         assert(moduli[i] == cc.prime.at(i).p);
         cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
         SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y], load_convert_with_stream(data[i], stream_override));

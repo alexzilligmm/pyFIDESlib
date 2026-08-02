@@ -75,6 +75,15 @@ void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, c
     ContextData& cc = ctxt.cc;
     uint32_t gStep = ceil(static_cast<double>(rowSize) / bStep);
 
+    // FIDESLIB_RR_LOAD_DEBUG: the ct-vs-plaintext LEVEL PAIR at every linear transform. Under
+    // RR both sides are windows, and the ct*pt kernels index the plaintext by the CIPHERTEXT's
+    // slot count — so a level mismatch is an out-of-bounds read rather than a wrong result,
+    // and neither side's level is visible from the other.
+    if (cc.isRR() && std::getenv("FIDESLIB_RR_LOAD_DEBUG"))
+        std::fprintf(stderr, "[rr_lt] ct level %d (%d limbs, deg %d) vs pt[0] level %d (%d limbs) — %zu pts\n",
+                     ctxt.getLevel(), cc.windowSize(ctxt.getLevel()), ctxt.NoiseLevel, pts.at(0)->c0.getLevel(),
+                     cc.windowSize(pts.at(0)->c0.getLevel()), pts.size());
+
     if (ctxt.NoiseLevel == 2)
         ctxt.rescale();
 

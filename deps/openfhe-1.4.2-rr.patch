@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 1/8] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 1/9] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 2/8] Rational-rescaling chain (Cheddar 25-30): explicit prime
+Subject: [PATCH 2/9] Rational-rescaling chain (Cheddar 25-30): explicit prime
  schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 3/8] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 3/9] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 4/8] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 4/9] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 5/8] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 5/9] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 6/8] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 6/9] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 7/8] RR: route the HYBRID keyswitch through RRChain (rotations
+Subject: [PATCH 7/9] RR: route the HYBRID keyswitch through RRChain (rotations
  reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 8/8] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 8/9] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -1997,6 +1997,94 @@ index b9ab40dc..d6463116 100644
              }
              cTilda0.SetElementAtIndex(i, cTilda0.GetElementAtIndex(i) + *digitTower * bv[part].GetElementAtIndex(row));
              cTilda1.SetElementAtIndex(i, cTilda1.GetElementAtIndex(i) + *digitTower * av[part].GetElementAtIndex(row));
+-- 
+2.43.0
+
+
+From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 02:16:11 +0200
+Subject: [PATCH 9/9] RR bootstrap: the CtS/StC stage levels were reading `L`
+ as a level
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+`L` is not a level in either precompute. In the classic arm it is the number of
+towers that REMAIN, and the stage level falls out of it:
+
+    towersToDrop = totalTowers - L - d*levelBudget
+    level0(CtS)  = towersToDrop + d*(levelBudget-1) = totalTowers - L - d
+    level0(StC)  = towersToDrop                     = totalTowers - L - d*levelBudget
+
+The RR arm added in 3c2e65cd used `L + levelBudget - 1` (CtS) and `L` (StC),
+i.e. read the remaining-count as an OpenFHE level. Measured consequence, with
+the GPU-side diagnostic FIDESLIB_RR_LOAD_DEBUG=1:
+
+  [rr_load] pt: 10 Q-limbs + 13 special -> RR level 5 (window [12,21])
+  [rr_lt]   ct level 25 (46 limbs, deg 1) vs pt[0] level 5 (10 limbs) - 15 pts
+
+The CtS plaintexts sat near the chain BOTTOM while the ciphertext arrives from
+ModRaise at the TOP, and the ct*pt kernel indexes the plaintext by the
+CIPHERTEXT's slot count — so this was an out-of-bounds read, not a wrong result
+(compute-sanitizer: "Invalid __global__ read ... at dotProductLtBatchedPt3___,
+Access to 0x6000 is out of bounds", blockIdx.y = 11 against a 10-limb plaintext).
+
+The RR analogue is the same expression with towers replaced by LEVELS, since an
+RR level is one rescale and the top level index is RRNumLevels()-1. After the fix
+the two sides line up level for level and CoeffsToSlots runs to completion:
+
+  [rr_lt] ct level 25 (46 limbs, deg 1) vs pt[0] level 25 (46 limbs)
+  [rr_lt] ct level 25 (46 limbs, deg 2) vs pt[0] level 24 (44 limbs)
+  [rr_lt] ct level 24 (44 limbs, deg 2) vs pt[0] level 23 (42 limbs)
+  [rr_lt] ct level 23 (42 limbs, deg 2) vs pt[0] level 22 (40 limbs)
+
+Classic is untouched: both edits are inside the existing `if (rrChain)` arm.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index ae635d3c..7dcf96d0 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -2439,10 +2439,18 @@ std::vector<std::vector<ReadOnlyPlaintext>> FHECKKSRNS::EvalCoeffsToSlotsPrecomp
+     uint32_t towersToDrop = 0;
+     uint32_t level0       = 0;
+     if (rrChain) {
+-        // `L` is the OpenFHE level the transform's LAST stage lands on; the FIRST stage sits
+-        // levelBudget-1 levels above it, and stage s sits at level0 - s (see the call sites,
+-        // which use level0 - compositeDegree*s with compositeDegree == 1 under RR).
+-        level0 = L + levelBudget - 1;
++        // CORRECTED (measured, 2026-08-02): `L` is not a level. In the classic arm it is the
++        // number of towers that REMAIN, and level0 falls out as
++        //   level0 = totalTowers - L - compositeDegree
++        // (substitute towersToDrop). Reading it as a level put the CtS plaintexts near the
++        // chain BOTTOM — FIDESlib levels 5/4/3/2 — while the ciphertext arrives from ModRaise
++        // at the TOP, level 25 (seen with FIDESLIB_RR_LOAD_DEBUG=1: `[rr_lt] ct level 25
++        // (46 limbs) vs pt[0] level 5 (10 limbs)`), and the ct*pt kernel indexed the plaintext
++        // by the CIPHERTEXT's slot count, i.e. out of bounds.
++        // The RR analogue is the same expression with towers replaced by LEVELS: the chain has
++        // RRNumLevels() windows, so the top level index is RRNumLevels()-1 and one level is one
++        // rescale (compositeDegree == 1 under RR).
++        level0 = (cryptoParams->RRNumLevels() - 1) - L - 1;
+     }
+     else {
+         towersToDrop = (L == 0) ? 0 : elementParams.GetParams().size() - L - compositeDegree * levelBudget;
+@@ -2632,7 +2640,9 @@ std::vector<std::vector<ReadOnlyPlaintext>> FHECKKSRNS::EvalSlotsToCoeffsPrecomp
+     uint32_t towersToDrop = 0;
+     uint32_t level0       = 0;
+     if (rrChain) {
+-        level0 = L;
++        // Same correction as the CtS twin: `L` is a REMAINING count, and the classic arm's
++        // level0 is towersToDrop = totalTowers - L - compositeDegree*levelBudget. In levels:
++        level0 = (cryptoParams->RRNumLevels() - 1) - L - levelBudget;
+     }
+     else {
+         towersToDrop = (L == 0) ? 0 : elementParams.GetParams().size() - L - compositeDegree * levelBudget;
 -- 
 2.43.0
 

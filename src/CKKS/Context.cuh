@@ -280,10 +280,38 @@ class ContextData {
      *  does not identify one. The low edge names the window and the size disambiguates it, so
      *  the pair is unique. Throws naming both if no window matches. */
     int rrLevelOfWindow(uint64_t firstModulus, int nLimbs) const;
+    /** Global layout index of a Q prime, by value. The window's low edge, recovered from the
+     *  first modulus of an imported limb array. Throws naming the modulus if it is not a Q
+     *  prime of this chain. */
+    int rrPrimeIndex(uint64_t modulus) const;
     /** Specials at the head of every DIGIT list (single-GPU: K). */
     int rrNumSpecialInDigit() const;
+    /** F(level) = prod(dropped) / prod(added) for the rescale level -> level-1: the factor a
+     *  ciphertext's SCALE is divided by. The RR analogue of modReduceProduct, and not
+     *  expressible by it — an RR rescale adds primes back as well as dropping them, so the
+     *  factor is a ratio, and it is keyed by LEVEL rather than by top limb. */
+    double rrRescaleFactor(int level) const;
     /** Top level: the whole chain. `L` on a classic chain, the last RR level otherwise. */
     int topLevel() const { return isRR() ? rrNumLevels() - 1 : L; }
+    /** The BOTTOM modulus the bootstrap raises from, as a double. Classic: q0. Composite: the
+     *  product of the first `compositeDegree` primes. RR: the product of LEVEL 0's WINDOW —
+     *  Cheddar's L0 = {q0, 2 tau}, a ~2^78 three-limb modulus on our schedule, and it is NOT
+     *  a prefix of the layout (its window is [14, 16]), which is why this cannot be written
+     *  as a loop over prime[0..d). */
+    double bottomModulus() const {
+        double q = 1.0;
+        if (isRR())
+            for (int i = windowLo(0); i <= windowHi(0); ++i)
+                q *= (double)prime.at(i).p;
+        else
+            for (int i = 0; i < compositeDegree(); ++i)
+                q *= (double)prime.at(i).p;
+        return q;
+    }
+    /** Scaling factor at the TOP of the chain — the level a bootstrap raises to. Indexed by
+     *  limb on a classic chain and by LEVEL on an RR one (see sfAtLevel for why the two
+     *  cannot share an accessor). */
+    double sfAtTop() const { return isRR() ? sfAtLevel(topLevel()) : sfAtLimb(L); }
 
     /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
     int compositeDegree() const { return param.compositeDegree; }

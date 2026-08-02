@@ -1031,7 +1031,15 @@ void LimbPartition::multElement(const LimbPartition& partition1, const LimbParti
 
 void LimbPartition::rescale() {
     const int limbsize = getLimbSize(*level);
-    assert(!cc.isRR() && "RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
+    // THROW, not assert: this tree builds Release (-DNDEBUG), where an assert is compiled
+    // out and a prefix drop on an RR window then executes SILENTLY — it drops the top limb
+    // and divides, but never adds the low-edge primes back, so the ciphertext lands on a
+    // prime set that is not any RR level. That is exactly what happened on the first GPU RR
+    // bootstrap probe: the ciphertext walked 26 -> 25 with no complaint and the error only
+    // surfaced one call later, at an unrelated guard. (RUNBOOK: prefer throwing so the guard
+    // survives a Release build.)
+    if (cc.isRR())
+        throw std::runtime_error("RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
     assert(cc.GPUid.size() > 1 || limbsize > 1);
     if (limbsize == 0)
         return;
@@ -1121,7 +1129,15 @@ void LimbPartition::rescale() {
 // top primeids (multi-GPU interleaving), or aux-less (constant) limbs.
 bool LimbPartition::rescale2() {
     const int limbsize = getLimbSize(*level);
-    assert(!cc.isRR() && "RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
+    // THROW, not assert: this tree builds Release (-DNDEBUG), where an assert is compiled
+    // out and a prefix drop on an RR window then executes SILENTLY — it drops the top limb
+    // and divides, but never adds the low-edge primes back, so the ciphertext lands on a
+    // prime set that is not any RR level. That is exactly what happened on the first GPU RR
+    // bootstrap probe: the ciphertext walked 26 -> 25 with no complaint and the error only
+    // surfaced one call later, at an unrelated guard. (RUNBOOK: prefer throwing so the guard
+    // survives a Release build.)
+    if (cc.isRR())
+        throw std::runtime_error("RR chains rescale through RNSPoly::rrRescale, not the prefix drop");
     if (limbsize < 3)
         return false;
     LimbImpl& top = limb.at(limbsize - 1);

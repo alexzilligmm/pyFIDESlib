@@ -205,6 +205,32 @@ void ContextData::rrRescaleSets(const int level, std::vector<int>& drop, std::ve
         add.push_back(i);
 }
 
+double ContextData::rrRescaleFactor(const int level) const {
+    if (!isRR()) {
+        std::fprintf(stderr, "FIDESlib: rrRescaleFactor(%d) called on a classic chain — use modReduceProduct\n", level);
+        std::abort();
+    }
+    if (level < 1 || level >= rrNumLevels()) {
+        std::fprintf(stderr, "FIDESlib: rrRescaleFactor(%d) out of range [1, %d)\n", level, rrNumLevels());
+        std::abort();
+    }
+    std::vector<int> drop, add;
+    rrRescaleSets(level, drop, add);
+    double f = 1.0;
+    for (const int i : drop)
+        f *= (double)prime.at(i).p;
+    for (const int i : add)
+        f /= (double)prime.at(i).p;
+    return f;
+}
+
+int ContextData::rrPrimeIndex(const uint64_t modulus) const {
+    for (int i = 0; i < (int)prime.size(); ++i)
+        if (prime.at(i).p == modulus)
+            return i;
+    throw std::runtime_error("RR: modulus " + std::to_string(modulus) + " is not a Q prime of this chain");
+}
+
 int ContextData::rrLevelOfWindow(const uint64_t firstModulus, const int nLimbs) const {
     assert(isRR() && "rrLevelOfWindow is only meaningful on an RR chain");
     for (int r = 0; r < rrNumLevels(); ++r)
@@ -501,7 +527,16 @@ std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double opera
             return it->second;
     }
 
-    uint32_t numTowers = level + 1;
+    // RATIONAL RESCALING: the returned array is consumed by the batched elementwise kernels,
+    // which resolve their entry as `b[primeid]` — a GLOBAL primeid, `PB(slot) = pbase + slot`.
+    // On a prefix chain slot and primeid coincide, so a level+1-long array is exactly right;
+    // on an RR window they do not, and a level-shaped array is read past its end at every
+    // window whose low edge is above 0 (found by compute-sanitizer inside ModRaise's
+    // multScalar at level 0, window [14,16]). So under RR the array stays FULL-CHAIN-shaped
+    // and only the window's entries are ever read. The extra residues cost one memoized
+    // bigint reduction each.
+    const bool rr = isRR();
+    uint32_t numTowers = rr ? (uint32_t)prime.size() : level + 1;
     std::vector<lbcrypto::DCRTPoly::Integer> moduli(numTowers);
     for (usint i = 0; i < numTowers; i++) {
         moduli[i] = prime[i].p;
@@ -510,7 +545,14 @@ std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double opera
     const int cd = param.compositeDegree;
     double scFactor;
     if (level_in == -1 || level_in == level) {
-        scFactor = sfAtLimb(level);
+        scFactor = rr ? sfAtLevel(level) : sfAtLimb(level);
+    } else if (rr) {
+        // Scale-change form, RR: one level down is level-1 (not level-cd), and the rescale
+        // divides by F(level) = prod(dropped)/prod(added). The composite canary below is
+        // limb-indexed and does not transfer; sfAtLevel's own range/sentinel guards apply.
+        const double scFactorIn  = sfAtLevel(level_in);
+        const double scFactorOut = sfAtLevel(level - 1);
+        scFactor                 = scFactorOut * rrRescaleFactor(level) / scFactorIn;
     } else {
         /** Lets handle scale changes more efficiently!*/
         assert(level >= cd);
