@@ -87,6 +87,26 @@ void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, c
     if (ctxt.NoiseLevel == 2)
         ctxt.rescale();
 
+    // RR: a ciphertext ABOVE the plaintexts is a fatal mismatch, not something to fix up here.
+    //
+    // The ct*pt kernels index the plaintext by the CIPHERTEXT's limb count, so this reads past
+    // the plaintext -- and because the fault is async, its only visible symptom is a NOISE
+    // output several stages later. That is what it looked like for a whole session.
+    //
+    // Descending the ciphertext to meet the plaintexts was tried and is WRONG: reaching them
+    // costs bare rescales across the bootstrap->payload region boundary, where sf' = sf^2/F is
+    // unstable above its fixed point, and the output blew up to ~1e73. The real cause is always
+    // upstream -- the OpenFHE precompute and FIDESlib disagreeing about WHICH EvalMod is being
+    // approximated (measured: context left at UNIFORM_TERNARY while BOOT_CONFIG said SPARSE put
+    // the ciphertext four levels high). So throw, and name both levels.
+    if (cc.isRR() && ctxt.getLevel() > pts.at(0)->c0.getLevel())
+        throw std::runtime_error(
+            "RR LinearTransform: ciphertext at level " + std::to_string(ctxt.getLevel()) + " is ABOVE the "
+            "plaintexts at level " + std::to_string(pts.at(0)->c0.getLevel()) +
+            " — the ct*pt kernels would read past the plaintext. The OpenFHE precompute and FIDESlib's "
+            "BOOT_CONFIG must approximate the same EvalMod; check the context's SecretKeyDist against "
+            "RR_BTS_BOOT_CONF.");
+
     {
         std::vector<Ciphertext> fastRotation;
         fastRotation.reserve(bStep);
