@@ -1,7 +1,7 @@
 From 7dd338388970d873a9086c5b44254e32485237ad Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 12:16:39 +0200
-Subject: [PATCH 01/10] NATIVEINT=32: correct arithmetic for moduli up to 2^31
+Subject: [PATCH 01/11] NATIVEINT=32: correct arithmetic for moduli up to 2^31
  (rational-rescaling prime sizes)
 
 MAX_MODULUS_SIZE 28 -> 31. The 28-bit cap existed because the Dhem-Barrett
@@ -133,7 +133,7 @@ index 31a55412..2d5f403b 100644
 From 4ae6972c4ad0dcf1ffd863f245807bd2fa70bfee Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:14:07 +0200
-Subject: [PATCH 02/10] Rational-rescaling chain (Cheddar 25-30): explicit
+Subject: [PATCH 02/11] Rational-rescaling chain (Cheddar 25-30): explicit
  prime schedule, windowed levels, drop-k+add-back rescale
 
 - CCParams::SetRRPrimeChain/SetRRWindows/SetRRNumSmalls: explicit prime
@@ -730,7 +730,7 @@ index 00000000..6771543d
 From 7274de01f73cbe0fd8429d485c36e7ab23461c60 Mon Sep 17 00:00:00 2001
 From: dev <dev@behemoth>
 Date: Sat, 1 Aug 2026 13:20:30 +0200
-Subject: [PATCH 03/10] RR keyswitch: single evk at P*Qmax truncated per level
+Subject: [PATCH 03/11] RR keyswitch: single evk at P*Qmax truncated per level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -974,7 +974,7 @@ index 6771543d..88faec26 100644
 From 3c2e65cdc38df560b7231562ce32368193af2fb1 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:13:58 +0200
-Subject: [PATCH 04/10] RR bootstrap setup: window-addressed CtS/StC params, RR
+Subject: [PATCH 04/11] RR bootstrap setup: window-addressed CtS/StC params, RR
  drop factor, and the diagnostics that name the real blocker
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1266,7 +1266,7 @@ index 02f3df74..b498192a 100644
 From a145a097ee3f1697cbc5bb2cb546a8fa855cc46a Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:31:34 +0200
-Subject: [PATCH 05/10] RR bootstrap: replace the level = totalLimbs -
+Subject: [PATCH 05/11] RR bootstrap: replace the level = totalLimbs -
  currentLimbs identity
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1539,7 +1539,7 @@ index b498192a..ae635d3c 100644
 From c3d8258fc8743eeede2e360cd0fdf7fb67fb12f4 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:39:38 +0200
-Subject: [PATCH 06/10] RR: route ModReduce and EvalMult through RRChain
+Subject: [PATCH 06/11] RR: route ModReduce and EvalMult through RRChain
  (milestone (b) deferred item)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1769,7 +1769,7 @@ index 88faec26..c3a81c9a 100644
 From b3309a5067af88c036bea7c48c9119afea0dc2b3 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:47:06 +0200
-Subject: [PATCH 07/10] RR: route the HYBRID keyswitch through RRChain
+Subject: [PATCH 07/11] RR: route the HYBRID keyswitch through RRChain
  (rotations reach it); evk-shape guard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -1924,7 +1924,7 @@ index c3a81c9a..b9ab40dc 100644
 From b092d2f7614309502e8d8b3d29b4b8b9b915b68c Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione@di.uniroma1.it>
 Date: Sun, 2 Aug 2026 00:55:31 +0200
-Subject: [PATCH 08/10] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
+Subject: [PATCH 08/11] =?UTF-8?q?RR:=20diagnose=20the=20rotation-keyswitch?=
  =?UTF-8?q?=20failure=20=E2=80=94=20the=20KEY=20is=20fine,=20the=20CPU=20M?=
  =?UTF-8?q?odRaise=20is=20not?=
 MIME-Version: 1.0
@@ -2004,7 +2004,7 @@ index b9ab40dc..d6463116 100644
 From 88b64912d6fbc6a186cb8a7073832a74057199a8 Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 02:16:11 +0200
-Subject: [PATCH 09/10] RR bootstrap: the CtS/StC stage levels were reading `L`
+Subject: [PATCH 09/11] RR bootstrap: the CtS/StC stage levels were reading `L`
  as a level
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2092,7 +2092,7 @@ index ae635d3c..7dcf96d0 100644
 From f82b46e666fc53b87b759fccc9d49d0813fc8ecf Mon Sep 17 00:00:00 2001
 From: t <t@t>
 Date: Sun, 2 Aug 2026 09:35:06 +0200
-Subject: [PATCH 10/10] RR CPU bootstrap: the ModRaise, and the hoisted
+Subject: [PATCH 10/11] RR CPU bootstrap: the ModRaise, and the hoisted
  keyswitch family
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -2736,6 +2736,330 @@ index d6463116..cc0b1b7a 100644
  }
  
  Ciphertext<DCRTPoly> RRChain::EvalMultRelin(ConstCiphertext<DCRTPoly>& ct1, ConstCiphertext<DCRTPoly>& ct2) const {
+-- 
+2.43.0
+
+
+From 6cc6e3fa21c2fa338554c61c23ee50f2f43c3552 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Sun, 2 Aug 2026 09:49:27 +0200
+Subject: [PATCH 11/11] RR CPU bootstrap RUNS: level alignment, and the shared
+ root cause of the bad values
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+THE LEVEL ALIGNMENT. The RR EvalMult override called EvalMultRelin directly,
+skipping the alignment the generic base does first, so its equal-level
+precondition fired inside the Chebyshev evaluator. The classic aligner turned
+out to carry over almost unchanged, because it is expressed in ModReduce (routed
+already), LevelReduce, and scale accessors. So:
+
+  - RRChain::CanDropTo / DropToLevelInPlace — the LevelReduce analogue. A drop is
+    exact exactly when the target window is a SUBSET, which is a property of the
+    schedule: nested throughout the bootstrap region, never in the payload
+    region. Throws naming both windows otherwise.
+  - LevelReduceInternalInPlace gets that as its RR arm.
+  - The four GetModReduceFactor reads in AdjustLevelsAndDepthInPlace become
+    RRRescaleFactorAtLevel — F = prod(dropped)/prod(added), a ratio keyed by
+    level, which a limb-indexed factor cannot express.
+  - EvalMult aligns on clones via AdjustForMultInPlace, as the base does.
+
+Result: the CPU RR bootstrap RUNS, and — tested the way that actually proves
+something, from a LOW level rather than the top — it gives levels back:
+
+  low-level input: RR level 1 (4 limbs)
+  EvalBootstrap:   RR level 5 (10 limbs) — levels GAINED 4, consumed 21
+
+21 consumed is exactly what the GPU measured independently, so the two sides now
+agree on the level accounting.
+
+THE SHARED ROOT CAUSE OF THE WRONG VALUES: GetBigModulus. It returns the product
+of the first compositeDegree primes, i.e. params[0] (~2^25) under RR, where the
+bootstrap's q0 is the product of LEVEL 0's WINDOW (~2^78) — and that window is
+not a prefix, it is [14,16]. This value sets pre, scaleEnc, scaleDec and deg,
+so it mis-scaled the CtS/StC PLAINTEXTS by ~2^53. Those plaintexts are computed
+here and IMPORTED by the GPU, which is why both sides produced the same wrong
+answer with the same output scale (2^100 where the level's table says 2^40) and
+the same failed decode. It is the CPU twin of ContextData::bottomModulus, fixed
+GPU-side earlier.
+
+With the true q0 the CPU then reproduced the GPU's other finding exactly —
+deg = 53 against a correction factor of 11 — so the same decision is applied on
+both sides: correction = 0 under RR, loudly, with the precision cost stated.
+Keeping the two identical is what lets the CPU serve as the GPU's oracle.
+
+Output is now a CONSTANT across slots rather than garbage, at a scale still 2^60
+above the level's table value: the remaining bug is in the bootstrap's scale
+constants (pre/post/scaleDec) under a chain whose bottom is ~2^23 wider than its
+scale. Not yet correct, and said plainly.
+
+THE CLASSIC CONTROL IS FIXED AND MEANINGFUL AGAIN. It died with "double free or
+corruption" because depth 17 cannot hold its own bootstrap: approxModDepth +
+levelBudgetEnc + levelBudgetDec is ~21 CKKS levels for UNIFORM_TERNARY's
+degree-88 Chebyshev, before any payload. Now 29 (RR_CLASSIC_DEPTH overrides),
+and the prefix path bootstraps at 14.0-14.2 bits — which is also the evidence
+that none of the RR branches disturb it.
+
+Gates: rr_cpu_gate PASS (16.46-16.99 bits); classic control PASS; GPU RR gates
+unaffected.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012CioZybBn4CVXK46MgRWfL
+---
+ src/pke/include/scheme/ckksrns/ckksrns-rr.h   |  9 +++
+ src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp    | 44 +++++++++++-
+ .../lib/scheme/ckksrns/ckksrns-leveledshe.cpp | 67 ++++++++++++++-----
+ src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp     | 33 +++++++++
+ 4 files changed, 132 insertions(+), 21 deletions(-)
+
+diff --git a/src/pke/include/scheme/ckksrns/ckksrns-rr.h b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+index 712df527..6683e0b7 100644
+--- a/src/pke/include/scheme/ckksrns/ckksrns-rr.h
++++ b/src/pke/include/scheme/ckksrns/ckksrns-rr.h
+@@ -87,6 +87,15 @@ public:
+     // restrict a full-chain element (sk/pk rows) to level r's window
+     DCRTPoly Restrict(const DCRTPoly& full, uint32_t r) const;
+ 
++    /** Level DROP, the analogue of LevelReduce. Exact exactly when the target window is a
++     *  SUBSET of the source's: discarding the primes outside it is a reduction modulo a divisor
++     *  of the current modulus, so the surviving residues AND the scale are untouched. That is a
++     *  property of the SCHEDULE — the bootstrap region's windows are nested (both edges move
++     *  inward), the payload region's are not (smalls enter at the low edge) — so this throws
++     *  naming both windows rather than pretending, and the caller rescales instead. */
++    bool CanDropTo(uint32_t rFrom, uint32_t rTo) const;
++    void DropToLevelInPlace(Ciphertext<DCRTPoly>& ct, uint32_t rTo) const;
++
+     // RR rescale from the ciphertext's level to the one below
+     void RescaleInPlace(Ciphertext<DCRTPoly>& ct) const;
+     DCRTPoly RescaleElement(const DCRTPoly& e, uint32_t rHi) const;
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+index e76d89b8..ac608d31 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-fhe.cpp
+@@ -69,6 +69,20 @@ namespace {
+ double GetBigModulus(const std::shared_ptr<lbcrypto::CryptoParametersCKKSRNS> cryptoParams) {
+     double qDouble           = 1.0;
+     uint32_t compositeDegree = cryptoParams->GetCompositeDegree();
++    // RR: the bootstrap's q0 is the product of LEVEL 0's WINDOW — Cheddar's L0 = {q0, 2 tau},
++    // ~2^78 on our schedule — and that window is NOT a prefix of the layout (it is [14,16]).
++    // Taking params[0] gives ~2^25 instead, and since this value sets `pre`, `scaleEnc`,
++    // `scaleDec` and `deg`, it mis-scales the CtS/StC PLAINTEXTS by ~2^53. Those plaintexts are
++    // precomputed here and IMPORTED by the GPU, so this one line made both sides produce the
++    // same wrong answer — same output scale (2^100 where the level's table says 2^40), same
++    // failed decode. It is the CPU twin of ContextData::bottomModulus on the FIDESlib side.
++    if (cryptoParams->IsRRChain()) {
++        const auto win     = cryptoParams->RRWindowAtLevel(cryptoParams->RRNumLevels() - 1);
++        const auto& paramsQ = cryptoParams->GetElementParams()->GetParams();
++        for (uint32_t i = win.first; i <= win.second; ++i)
++            qDouble *= paramsQ[i]->GetModulus().ConvertToDouble();
++        return qDouble;
++    }
+     for (uint32_t j = 0; j < compositeDegree; ++j) {
+         qDouble *= cryptoParams->GetElementParams()->GetParams()[j]->GetModulus().ConvertToDouble();
+     }
+@@ -1679,17 +1693,41 @@ Ciphertext<DCRTPoly> FHECKKSRNS::EvalBootstrap(ConstCiphertext<DCRTPoly>& cipher
+     double qDouble = GetBigModulus(cryptoParams);
+     double powP    = std::pow(2, cryptoParams->GetPlaintextModulus());
+     int32_t deg    = std::round(std::log2(qDouble / powP));
++    // RR: deg is structurally LARGE and the guard's premise inverts. The RR bottom is
++    // L0 = {q0, 2 tau} (~2^78 here) against a plaintext modulus of ~2^25 and a scale of ~2^55,
++    // so deg ~53 where a uniform chain has ~2. The correction factor exists to make the message
++    // SMALLER relative to q0; an RR chain needs the opposite sign, which `uint32_t correction`
++    // and the `1 << correction` recovery cannot express. Set it to ZERO and say so, exactly as
++    // the GPU side does (FIDESlib Bootstrap.cu) — the cost is PRECISION (that much of q0's
++    // range goes unused), not correctness, and keeping both sides identical is what lets the
++    // CPU serve as the GPU's oracle. See docs/RR_BTS_RUNLOG.md.
++    const bool rrDegOverflow = cryptoParams->IsRRChain() && deg > static_cast<int32_t>(m_correctionFactor);
++    if (rrDegOverflow) {
++        static bool warned = false;
++        if (!warned) {
++            warned = true;
++            std::cerr << "[rr_bts] correction disabled: deg=" << deg << " > correctionFactor=" << m_correctionFactor
++                      << " — the RR bottom window is " << (deg - (int32_t)m_correctionFactor)
++                      << " bits wider than the correction machinery can absorb; that much of q0's range goes"
++                         " unused (a precision cost)\n";
++        }
++    }
+ #if NATIVEINT != 128
+-    if (deg > static_cast<int32_t>(m_correctionFactor) && st != COMPOSITESCALINGAUTO && st != COMPOSITESCALINGMANUAL) {
++    if (!rrDegOverflow && deg > static_cast<int32_t>(m_correctionFactor) && st != COMPOSITESCALINGAUTO &&
++        st != COMPOSITESCALINGMANUAL) {
+         OPENFHE_THROW("Degree [" + std::to_string(deg) + "] must be less than or equal to the correction factor [" +
+                       std::to_string(m_correctionFactor) + "].");
+     }
+ #endif
+-    uint32_t correction = m_correctionFactor - deg;
++    uint32_t correction = rrDegOverflow ? 0 : m_correctionFactor - deg;
+     double post         = std::pow(2, static_cast<double>(deg));
+ 
+     // TODO: YSP Can be extended to FLEXIBLE* scaling techniques as well as the closeness of 2^p to moduli is no longer needed
+-    double pre      = (compositeDegree > 1) ? cryptoParams->GetScalingFactorReal(0) / qDouble : 1. / post;
++    // RR uses the mixed-chain normalization (sf/q0), same as COMPOSITESCALING: the uniform
++    // identity sf[0] ~ 2^p * 2^deg does not hold when the bottom is a multi-limb window.
++    double pre      = (compositeDegree > 1 || cryptoParams->IsRRChain())
++                          ? cryptoParams->GetScalingFactorReal(0) / qDouble
++                          : 1. / post;
+     uint64_t scalar = std::llround(post);
+ 
+     // Mixed-size chain: the uniform identity sf[0] ~ 2^p * 2^deg does not hold, so
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+index 4a4462f4..c53ba025 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-leveledshe.cpp
+@@ -169,8 +169,18 @@ Ciphertext<DCRTPoly> LeveledSHECKKSRNS::EvalMult(ConstCiphertext<DCRTPoly>& ciph
+                                                  ConstCiphertext<DCRTPoly>& ciphertext2,
+                                                  const EvalKey<DCRTPoly> evalKey) const {
+     const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ciphertext1->GetCryptoParameters());
+-    if (cryptoParams->IsRRChain())
+-        return GetRRChain(ciphertext1->GetCryptoContext()).EvalMultRelin(ciphertext1, ciphertext2);
++    if (cryptoParams->IsRRChain()) {
++        // The generic base aligns levels and depth before multiplying; routing straight to
++        // EvalMultRelin skipped that, and its equal-level precondition then fired inside the
++        // Chebyshev evaluator. Align on CLONES (the operands are const) exactly as the base
++        // does, then multiply.
++        Ciphertext<DCRTPoly> c1 = ciphertext1->Clone();
++        Ciphertext<DCRTPoly> c2 = ciphertext2->Clone();
++        AdjustForMultInPlace(c1, c2);
++        ConstCiphertext<DCRTPoly> cc1 = c1;
++        ConstCiphertext<DCRTPoly> cc2 = c2;
++        return GetRRChain(ciphertext1->GetCryptoContext()).EvalMultRelin(cc1, cc2);
++    }
+     return LeveledSHEBase<DCRTPoly>::EvalMult(ciphertext1, ciphertext2, evalKey);
+ }
+ 
+@@ -224,6 +234,16 @@ void LeveledSHECKKSRNS::ModReduceInternalInPlace(Ciphertext<DCRTPoly>& ciphertex
+ /////////////////////////////////////
+ 
+ void LeveledSHECKKSRNS::LevelReduceInternalInPlace(Ciphertext<DCRTPoly>& ciphertext, size_t levels) const {
++    // RR: `DropLastElements` is the prefix free drop. Under RR a level owns a WINDOW, so the
++    // drop is "discard the primes outside the target window" — exact whenever that window is
++    // CONTAINED, which is true throughout the bootstrap region and false throughout the
++    // payload region. RRChain::DropToLevelInPlace throws naming both windows otherwise.
++    const auto cryptoParams = std::dynamic_pointer_cast<CryptoParametersCKKSRNS>(ciphertext->GetCryptoParameters());
++    if (cryptoParams->IsRRChain()) {
++        const RRChain& rr = GetRRChain(ciphertext->GetCryptoContext());
++        rr.DropToLevelInPlace(ciphertext, rr.NumLevels() - 1 - (ciphertext->GetLevel() + levels));
++        return;
++    }
+     for (auto& element : ciphertext->GetElements())
+         element.DropLastElements(levels);
+     ciphertext->SetLevel(ciphertext->GetLevel() + levels);
+@@ -671,10 +691,15 @@ void LeveledSHECKKSRNS::AdjustLevelsAndDepthInPlace(Ciphertext<DCRTPoly>& cipher
+                 double scf1 = ciphertext1->GetScalingFactor();
+                 double scf2 = ciphertext2->GetScalingFactor();
+                 double scf  = cryptoParams->GetScalingFactorReal(c1lvl);
+-                double q1   = cryptoParams->GetModReduceFactor(sizeQl1 - 1);
+-                for (uint32_t j = 1; j < compositeDegree; j++) {
+-                    q1 *= cryptoParams->GetModReduceFactor(sizeQl1 - j - 1);
+-                }
++                // RR: the factor a rescale divides the scale by is F = prod(dropped)/prod(added)
++                // for THIS level — a ratio, keyed by level, which GetModReduceFactor (indexed by
++                // limb) cannot express.
++                double q1 = cryptoParams->IsRRChain() ? cryptoParams->RRRescaleFactorAtLevel(c1lvl)
++                                                      : cryptoParams->GetModReduceFactor(sizeQl1 - 1);
++                if (!cryptoParams->IsRRChain())
++                    for (uint32_t j = 1; j < compositeDegree; j++) {
++                        q1 *= cryptoParams->GetModReduceFactor(sizeQl1 - j - 1);
++                    }
+                 EvalMultCoreInPlace(ciphertext1, scf2 / scf1 * q1 / scf);
+                 ModReduceInternalInPlace(ciphertext1, compositeDegree);
+                 if (c1lvl + compositeDegree < c2lvl) {
+@@ -690,10 +715,12 @@ void LeveledSHECKKSRNS::AdjustLevelsAndDepthInPlace(Ciphertext<DCRTPoly>& cipher
+                     double scf1 = ciphertext1->GetScalingFactor();
+                     double scf2 = cryptoParams->GetScalingFactorRealBig(c2lvl - compositeDegree);
+                     double scf  = cryptoParams->GetScalingFactorReal(c1lvl);
+-                    double q1   = cryptoParams->GetModReduceFactor(sizeQl1 - 1);
+-                    for (uint32_t j = 1; j < compositeDegree; j++) {
+-                        q1 *= cryptoParams->GetModReduceFactor(sizeQl1 - j - 1);
+-                    }
++                    double q1 = cryptoParams->IsRRChain() ? cryptoParams->RRRescaleFactorAtLevel(c1lvl)
++                                                          : cryptoParams->GetModReduceFactor(sizeQl1 - 1);
++                    if (!cryptoParams->IsRRChain())
++                        for (uint32_t j = 1; j < compositeDegree; j++) {
++                            q1 *= cryptoParams->GetModReduceFactor(sizeQl1 - j - 1);
++                        }
+                     EvalMultCoreInPlace(ciphertext1, scf2 / scf1 * q1 / scf);
+                     ModReduceInternalInPlace(ciphertext1, compositeDegree);
+                     if (c1lvl + 2 * compositeDegree < c2lvl) {
+@@ -732,10 +759,12 @@ void LeveledSHECKKSRNS::AdjustLevelsAndDepthInPlace(Ciphertext<DCRTPoly>& cipher
+                 double scf2 = ciphertext2->GetScalingFactor();
+                 double scf1 = ciphertext1->GetScalingFactor();
+                 double scf  = cryptoParams->GetScalingFactorReal(c2lvl);
+-                double q2   = cryptoParams->GetModReduceFactor(sizeQl2 - 1);
+-                for (uint32_t j = 1; j < compositeDegree; j++) {
+-                    q2 *= cryptoParams->GetModReduceFactor(sizeQl2 - j - 1);
+-                }
++                double q2 = cryptoParams->IsRRChain() ? cryptoParams->RRRescaleFactorAtLevel(c2lvl)
++                                                      : cryptoParams->GetModReduceFactor(sizeQl2 - 1);
++                if (!cryptoParams->IsRRChain())
++                    for (uint32_t j = 1; j < compositeDegree; j++) {
++                        q2 *= cryptoParams->GetModReduceFactor(sizeQl2 - j - 1);
++                    }
+                 EvalMultCoreInPlace(ciphertext2, scf1 / scf2 * q2 / scf);
+                 ModReduceInternalInPlace(ciphertext2, compositeDegree);
+                 if (c2lvl + compositeDegree < c1lvl) {
+@@ -751,10 +780,12 @@ void LeveledSHECKKSRNS::AdjustLevelsAndDepthInPlace(Ciphertext<DCRTPoly>& cipher
+                     double scf2 = ciphertext2->GetScalingFactor();
+                     double scf1 = cryptoParams->GetScalingFactorRealBig(c1lvl - compositeDegree);
+                     double scf  = cryptoParams->GetScalingFactorReal(c2lvl);
+-                    double q2   = cryptoParams->GetModReduceFactor(sizeQl2 - 1);
+-                    for (uint32_t j = 1; j < compositeDegree; j++) {
+-                        q2 *= cryptoParams->GetModReduceFactor(sizeQl2 - j - 1);
+-                    }
++                    double q2 = cryptoParams->IsRRChain() ? cryptoParams->RRRescaleFactorAtLevel(c2lvl)
++                                                          : cryptoParams->GetModReduceFactor(sizeQl2 - 1);
++                    if (!cryptoParams->IsRRChain())
++                        for (uint32_t j = 1; j < compositeDegree; j++) {
++                            q2 *= cryptoParams->GetModReduceFactor(sizeQl2 - j - 1);
++                        }
+                     EvalMultCoreInPlace(ciphertext2, scf1 / scf2 * q2 / scf);
+                     ModReduceInternalInPlace(ciphertext2, compositeDegree);
+                     if (c2lvl + 2 * compositeDegree < c1lvl) {
+diff --git a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+index cc0b1b7a..94239f00 100644
+--- a/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
++++ b/src/pke/lib/scheme/ckksrns/ckksrns-rr.cpp
+@@ -141,6 +141,39 @@ RRChain::RRChain(const CryptoContext<DCRTPoly>& cc) : m_cc(cc) {
+     }
+ }
+ 
++bool RRChain::CanDropTo(uint32_t rFrom, uint32_t rTo) const {
++    const auto& a = Level(rFrom);
++    const auto& b = Level(rTo);
++    return a.lo <= b.lo && b.hi <= a.hi;
++}
++
++void RRChain::DropToLevelInPlace(Ciphertext<DCRTPoly>& ct, uint32_t rTo) const {
++    const uint32_t rFrom = NumLevels() - 1 - ct->GetLevel();
++    if (rFrom == rTo)
++        return;
++    if (rTo > rFrom)
++        OPENFHE_THROW("RRChain::DropToLevelInPlace: cannot move UP (" + std::to_string(rFrom) + " -> " +
++                      std::to_string(rTo) + ")");
++    const auto& from = Level(rFrom);
++    const auto& to   = Level(rTo);
++    if (!CanDropTo(rFrom, rTo))
++        OPENFHE_THROW("RRChain::DropToLevelInPlace: window [" + std::to_string(to.lo) + "," +
++                      std::to_string(to.hi) + "] is NOT contained in [" + std::to_string(from.lo) + "," +
++                      std::to_string(from.hi) + "], so no set of primes can be discarded to reach it — "
++                      "descend by rescaling instead");
++
++    std::vector<DCRTPoly> out;
++    out.reserve(ct->GetElements().size());
++    for (const auto& e : ct->GetElements()) {
++        DCRTPoly r(to.params, e.GetFormat(), true);
++        for (uint32_t i = to.lo; i <= to.hi; ++i)
++            r.SetElementAtIndex(i - to.lo, e.GetElementAtIndex(i - from.lo));
++        out.push_back(std::move(r));
++    }
++    ct->SetElements(std::move(out));
++    ct->SetLevel(NumLevels() - 1 - rTo);  // the SCALE is unchanged: a drop is not a rescale
++}
++
+ DCRTPoly RRChain::Restrict(const DCRTPoly& full, uint32_t r) const {
+     const auto& lvl = Level(r);
+     DCRTPoly out(lvl.params, full.GetFormat(), true);
 -- 
 2.43.0
 
