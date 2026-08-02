@@ -96,6 +96,18 @@ static void applyArcsineCorrection(Ciphertext& y) {
 	(void)logged;
 }
 
+namespace FIDESlib::CKKS {
+void btsStashPush(const char* stage, Ciphertext& ctxt);   // Bootstrap.cu
+}  // namespace FIDESlib::CKKS
+
+namespace {
+// EvalMod checkpoints: the bootstrap's stash only BRACKETS EvalMod, so a blow-up inside it is
+// invisible. Zero cost when no stash is installed.
+inline void amProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
+    FIDESlib::CKKS::btsStashPush(stage, ctxt);
+}
+}  // namespace
+
 void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEncI, const KeySwitchingKey& keySwitchingKey, uint64_t post) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
 
@@ -108,7 +120,9 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 
 	if constexpr (COMPLEX)
 		evalChebyshevSeries(ctxtEncI, cc.GetCoeffsChebyshev(), -1.0, 1.0);
+	amProbe("am-in", ctxtEnc);
 	evalChebyshevSeries(ctxtEnc, cc.GetCoeffsChebyshev(), -1.0, 1.0);
+	amProbe("am-cheby", ctxtEnc);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc res " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -126,6 +140,7 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	}
 
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
+	amProbe("am-doubleangle", ctxtEnc);
 	if constexpr (COMPLEX)
 		applyDoubleAngleIterations(ctxtEncI, cc.GetDoubleAngleIts(), keySwitchingKey);
 	if (!sparseArcsineMode() && arcsineEnabled()) {
@@ -172,12 +187,16 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	}
 }
 
+
+
+
 void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post) {
 	CudaNvtxRange r(std::string{ sc::current().function_name() });
 	ContextData& cc = ctxtEnc.cc;
 
 	KeySwitchingKey& keySwitchingKey = cc.GetEvalKey(ctxtEnc.keyID);
 
+	amProbe("am-in", ctxtEnc);
 	const double S = 1.0 - sparseBtsBias();
 	if (S != 1.0) {
 		const int r	   = cc.GetDoubleAngleIts();
@@ -204,7 +223,9 @@ void FIDESlib::CKKS::approxModReductionSparse(Ciphertext& ctxtEnc, uint64_t post
 		}
 		std::cout << std::endl;
 	}
+	amProbe("am-cheby", ctxtEnc);
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey, S);
+	amProbe("am-doubleangle", ctxtEnc);
 	// dual-slots mode: this precomp carries the +3 reservation — the
 	// correction MUST run unconditionally (reserve-without-consume is fatal)
 	if (sparseArcsineMode() || arcsineEnabled())

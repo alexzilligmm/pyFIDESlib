@@ -184,8 +184,8 @@ bool Plaintext::adjustPlaintextToCiphertext(const Plaintext& p, const Ciphertext
                 if (c2depth == 2) {
                     double scf1 = NoiseFactor;
                     double scf2 = c.NoiseFactor;
-                    double scf = cc.sfAtLimb(c1lvl);  //cryptoParams->GetScalingFactorReal(c1lvl);
-                    double q1 = cc.modReduceProduct(c1lvl);  // composite: product of the d dropped primes
+                    double scf = (cc.isRR() ? cc.sfAtLevel(c1lvl) : cc.sfAtLimb(c1lvl));  //cryptoParams->GetScalingFactorReal(c1lvl);
+                    double q1 = (cc.isRR() ? cc.rrRescaleFactor(c1lvl) : cc.modReduceProduct(c1lvl));  // composite: product of the d dropped primes
                     multScalar(scf2 / scf1 * q1 / scf, false);
                     rescale();
                     if (c1lvl - cc.compositeDegree() > c2lvl) {
@@ -201,9 +201,9 @@ bool Plaintext::adjustPlaintextToCiphertext(const Plaintext& p, const Ciphertext
                     } else {
                         double scf1 = NoiseFactor;
                         double scf2 =
-                            cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()];  // composite: one LEVEL below target
-                        double scf = cc.sfAtLimb(c1lvl);  //cryptoParams->GetScalingFactorReal(c1lvl);
-                        double q1 = cc.modReduceProduct(c1lvl);  // composite: product of the d dropped primes
+                            (cc.isRR() ? cc.sfAtLevel(c2lvl + 1) : cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]);  // composite: one LEVEL below target
+                        double scf = (cc.isRR() ? cc.sfAtLevel(c1lvl) : cc.sfAtLimb(c1lvl));  //cryptoParams->GetScalingFactorReal(c1lvl);
+                        double q1 = (cc.isRR() ? cc.rrRescaleFactor(c1lvl) : cc.modReduceProduct(c1lvl));  // composite: product of the d dropped primes
                         multScalar(scf2 / scf1 * q1 / scf, false);
                         rescale();
                         if (c1lvl - 2 * cc.compositeDegree() > c2lvl) {
@@ -219,7 +219,7 @@ bool Plaintext::adjustPlaintextToCiphertext(const Plaintext& p, const Ciphertext
                 if (c2depth == 2) {
                     double scf1 = NoiseFactor;
                     double scf2 = c.NoiseFactor;
-                    double scf = cc.sfAtLimb(c1lvl);  // cryptoParams->GetScalingFactorReal(c1lvl);
+                    double scf = (cc.isRR() ? cc.sfAtLevel(c1lvl) : cc.sfAtLimb(c1lvl));  // cryptoParams->GetScalingFactorReal(c1lvl);
                     multScalar(scf2 / scf1 / scf, false);
                     this->c0.dropToLevel(c2lvl);
                     //LevelReduceInternalInPlace(ciphertext1, c2lvl - c1lvl);
@@ -229,8 +229,8 @@ bool Plaintext::adjustPlaintextToCiphertext(const Plaintext& p, const Ciphertext
                         std::cout << "Adjusting plaintext with noiseDegree 1" << std::endl;
                     double scf1 = NoiseFactor;
                     double scf2 =
-                        cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()];  // composite: one LEVEL below target
-                    double scf = cc.sfAtLimb(c1lvl);  //cryptoParams->GetScalingFactorReal(c1lvl);
+                        (cc.isRR() ? cc.sfAtLevel(c2lvl + 1) : cc.param.ScalingFactorRealBig[c2lvl + cc.compositeDegree()]);  // composite: one LEVEL below target
+                    double scf = (cc.isRR() ? cc.sfAtLevel(c1lvl) : cc.sfAtLimb(c1lvl));  //cryptoParams->GetScalingFactorReal(c1lvl);
                     if constexpr (PRINT)
                         std::cout << "Scale adjustment: " << scf << std::endl;
 
@@ -381,6 +381,17 @@ void Plaintext::rescale() {
     }
     std::cout << std::endl;
 */
+    // RR: a level is a WINDOW, so the prefix drop is not the rescale (LimbPartition::rescale
+    // throws on an RR chain); rrRescale is, and the scale divides by F(level) rather than by a
+    // product of dropped primes.
+    if (cc.isRR()) {
+        const int lvlBefore = c0.getLevel();
+        c0.rrRescale();
+        NoiseFactor /= cc.rrRescaleFactor(lvlBefore);
+        NoiseLevel -= 1;
+        return;
+    }
+
     c0.rescale();
 
     // Manage metadata

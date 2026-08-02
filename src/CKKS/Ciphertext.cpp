@@ -931,9 +931,14 @@ void Ciphertext::rotate(const int index_, const bool moddown) {
 	// Correctness first: this gives up the fused kernel's speed, and the hoisted path (one modup
 	// shared across many dots) is where that actually matters. Optimise after it is right.
 	if (cc.isRR()) {
+		// ORDER MATTERS and it is keySwitch FIRST, then automorph BOTH components -- the same
+		// order OpenFHE's EvalAutomorphism uses (KeySwitch, then AutomorphismTransform on rcv[0]
+		// and rcv[1]). Doing the automorphism first and keyswitching after is a different
+		// (wrong) composition: measured -83.9 bits on a single rotation of a known message,
+		// against 22-25 bits for import/add/multPt on the same ciphertext.
+		keySwitch(kskRot);
 		c0.automorph(index, 1, nullptr);
 		c1.automorph(index, 1, nullptr);
-		keySwitch(kskRot);
 		return;
 	}
 
@@ -1109,6 +1114,20 @@ void Ciphertext::conjugate(const Ciphertext& c) {
 	CKKS::SetCurrentContext(cc_);
 	cc.advanceKsAuxSlot();  // dual-slot workspace pool: see Context.cuh
 	op_count[OPS::CONJUGATE]++;
+
+	// RATIONAL RESCALING: same story as rotate() -- the fused path below is a batched modup+dot
+	// that indexes the key by ciphertext TOWER (the prefix assumption). The conjugation is just
+	// the automorphism at index 2N-1, so compose it the same way: keySwitch with the conjugate
+	// key FIRST, then automorph both components. Measured before this: post-CtS decoded fine at
+	// 1.95e-2 while the very next checkpoint (after the conjugate) was all NaN.
+	if (cc.isRR()) {
+		this->copy(c);
+		const int index = 2 * (int)cc.N - 1;
+		keySwitch(cc.GetRotationKey(index, c.keyID, slots));
+		c0.automorph(index, 1, nullptr);
+		c1.automorph(index, 1, nullptr);
+		return;
+	}
 
 	if (0 && cc.GPUid.size() == 1) {
 		if constexpr (0) {

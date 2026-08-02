@@ -62,6 +62,120 @@ void DotProductPtInternal(std::vector<std::shared_ptr<Ciphertext>>& result, cons
         }
     }
 }
+namespace {
+// ---------------------------------------------------------------------------------------------
+// RATIONAL RESCALING: a SEPARATE linear transform, not a branch inside the batched one.
+//
+// The fast path fuses the baby-step rotations into one hoisted modup and feeds the results to
+// batched dot-product kernels that index plaintext limbs, key rows and per-prime tables by the
+// ciphertext's SLOT. That is the prefix assumption, and making those kernels window-aware means
+// either a branch in the innermost loop or a second template instantiation of each. Under RR the
+// transform is instead composed out of primitives that are already RR-correct and gated:
+//   - Ciphertext::rotate  -> automorph + RRKeySwitchCore (this file's sibling fix)
+//   - Ciphertext::multPt  -> RNSPoly::multElement, the op test_rr_evalmult gates bit-exactly
+//   - Ciphertext::add     -> elementwise, window-shaped on both sides
+//
+// Same mathematics as the fast path, written out:
+//   fastRotation[i] = rot(ct, i*stride)                        i = 0 .. bStep-1
+//   inner_j         = SUM_i fastRotation[i] * pts[j*bStep + i]  (skipping j*bStep+i >= rowSize)
+//   acc             = inner_{g-1};  then for j = g-2 .. 0:  acc = rot(acc, bStep*stride) + inner_j
+//   result          = rot(acc, offset)
+// which is the same Horner-style giant-step accumulation the batched path performs, minus the
+// extended-basis deferral (there is no KeySwitchDown to defer to here: every rotation already
+// moddowns). Slower by one modup per rotation; correct, which is what is wanted first.
+void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vector<Plaintext*>& pts, int stride,
+                       int offset) {
+    Context& cc_    = ctxt.cc_;
+    ContextData& cc = ctxt.cc;
+    const int gStep = (int)ceil(static_cast<double>(rowSize) / bStep);
+
+    // multPt is RR-correct only when ct and pt sit at the SAME level: slot i is global prime
+    // pbase+i on BOTH sides, so the pairing is positional and an off-level plaintext multiplies
+    // the wrong primes together. Off-level also falls into adjustPlaintextToCiphertext, which
+    // under RR either throws from the prefix rescale or -- if the plaintext is BELOW -- silently
+    // skips the multiply in a Release build.
+    //
+    // The plaintexts routinely sit ONE level ABOVE the ciphertext here (FIDESlib's EvalMod does
+    // not consume the same depth the OpenFHE precompute assumed, which is expected and predates
+    // RR). Bring them down: inside the bootstrap region an RR level's window is CONTAINED in the
+    // one above, so the drop is exact -- surviving residues untouched, value and scale unchanged
+    // -- which is the same argument rrDropToLevel rests on. A plaintext BELOW the ciphertext has
+    // no such repair and is a real error.
+    const int ctLvl = ctxt.getLevel();
+    std::vector<Plaintext> ptOwned;
+    std::vector<Plaintext*> ptUse(pts.begin(), pts.end());
+    ptOwned.reserve(rowSize);
+    for (int i = 0; i < rowSize; ++i) {
+        if (!pts[i])
+            continue;
+        const int pl = pts[i]->c0.getLevel();
+        if (pl == ctLvl)
+            continue;
+        if (pl < ctLvl)
+            throw std::runtime_error("RR LinearTransform: plaintext " + std::to_string(i) + " at level " +
+                                     std::to_string(pl) + " is BELOW the ciphertext at level " +
+                                     std::to_string(ctLvl) + " — cannot be raised.");
+        ptOwned.emplace_back(cc_);
+        ptOwned.back().copy(*pts[i]);
+        ptOwned.back().c0.dropToLevel(ctLvl);
+        ptUse[i] = &ptOwned.back();
+    }
+
+    // baby steps: bStep rotations of the input, index 0 being the identity
+    std::vector<Ciphertext> fr;
+    fr.reserve(bStep);
+    for (int i = 0; i < bStep; ++i) {
+        fr.emplace_back(cc_);
+        fr.back().growToLevel(ctxt.getLevel());
+        fr.back().copy(ctxt);
+        if (ctxt.normalyzeIndex(i * stride) != 0)
+            fr.back().rotate(i * stride, true);
+    }
+
+    Ciphertext acc(cc_), inner(cc_), term(cc_);
+    bool haveAcc = false;
+    for (int j = gStep - 1; j >= 0; --j) {
+        bool haveInner = false;
+        for (int i = 0; i < bStep; ++i) {
+            const int idx = j * bStep + i;
+            if (idx >= rowSize)
+                continue;
+            term.growToLevel(fr[i].getLevel());
+            term.copy(fr[i]);
+            term.multPt(*ptUse[idx], false);
+            if (!haveInner) {
+                inner.growToLevel(term.getLevel());
+                inner.copy(term);
+                haveInner = true;
+            }
+            else {
+                inner.add(term);
+            }
+        }
+        if (!haveInner)
+            continue;
+
+        if (!haveAcc) {
+            acc.growToLevel(inner.getLevel());
+            acc.copy(inner);
+            haveAcc = true;
+        }
+        else {
+            acc.add(inner);
+        }
+
+        // giant step: shift the accumulator before folding in the next (lower) block
+        if (j > 0 && ctxt.normalyzeIndex(bStep * stride) != 0)
+            acc.rotate(bStep * stride, true);
+    }
+
+    if (ctxt.normalyzeIndex(offset) != 0)
+        acc.rotate(offset, true);
+
+    ctxt.copy(acc);
+}
+}  // namespace
+
 }  // namespace FIDESlib::CKKS
 
 void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, const std::vector<Plaintext*>& pts,
@@ -99,6 +213,11 @@ void FIDESlib::CKKS::LinearTransform(Ciphertext& ctxt, int rowSize, int bStep, c
     // upstream -- the OpenFHE precompute and FIDESlib disagreeing about WHICH EvalMod is being
     // approximated (measured: context left at UNIFORM_TERNARY while BOOT_CONFIG said SPARSE put
     // the ciphertext four levels high). So throw, and name both levels.
+    if (cc.isRR()) {
+        LinearTransformRR(ctxt, rowSize, bStep, pts, stride, offset);
+        return;
+    }
+
     if (cc.isRR() && ctxt.getLevel() > pts.at(0)->c0.getLevel())
         throw std::runtime_error(
             "RR LinearTransform: ciphertext at level " + std::to_string(ctxt.getLevel()) + " is ABOVE the "

@@ -65,6 +65,22 @@ static bool btsSfDebugOn() {
     return v;
 }
 
+// Exported shim so translation units that cannot include Bootstrap.cuh can still drop a
+// checkpoint. (Bootstrap.cuh pulls openfhe.h, whose debug.h defines a function-like duration(a)
+// macro; CUDA's <chrono> parsed afterwards then fails to compile -- see docs/RR_BTS_RUNLOG.md.)
+namespace FIDESlib::CKKS {
+void btsStashPush(const char* stage, Ciphertext& ctxt) {
+    if (!g_btsStageStash)
+        return;
+    cudaDeviceSynchronize();
+    BtsStageCheckpoint cp;
+    cp.stage = stage;
+    cp.level = ctxt.getLevel();
+    ctxt.store(cp.raw);
+    g_btsStageStash->emplace_back(std::move(cp));
+}
+}  // namespace FIDESlib::CKKS
+
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
