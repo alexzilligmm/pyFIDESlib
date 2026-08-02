@@ -1160,7 +1160,13 @@ void FIDESlib::CKKS::AddBootstrapKeys(const lbcrypto::PublicKey<lbcrypto::DCRTPo
     if (GPUcc.param.raw->sparse_encaps) {
         auto& evalKeys = cc->GetEvalAutomorphismKeyMap(publicKey->GetKeyTag());
 
-        if (GPUcc.compositeDegree() > 1) {
+        // RR takes the same route as composite, and the CONSUMER in Bootstrap.cu now agrees:
+        // keygen already builds these in the MAIN context for RR (createContextSwitchingKeys,
+        // `srcCompositeDegree > 1 || srcIsRR`), so leaving this gate at `> 1` left the pointers
+        // null while the consumer reached for the helper context instead -- the illegal access
+        // that killed both sparse routes. The helper context is single-tower by construction
+        // and an RR bottom level is a three-limb WINDOW, so it could never host the ciphertext.
+        if (GPUcc.compositeDegree() > 1 || GPUcc.isRR()) {
             // COMPOSITESCALING: both secret-switching keys are MAIN-context standard hybrid
             // keys (see BootstrapPrecomputation::sparse_atob) — no helper GPU context at all.
             result.sparse_atob = std::make_unique<FIDESlib::CKKS::KeySwitchingKey>(GPUcc_);
