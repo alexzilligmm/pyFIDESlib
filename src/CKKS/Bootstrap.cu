@@ -25,10 +25,9 @@ constexpr bool PRINT = false;
 // folded into the last double-angle iteration, so the end-of-bootstrap integer
 // scale-back must be skipped.
 // Stage-divergence harness (default off): when a caller installs a stash vector, every
-// btsStageProbe checkpoint (pre-CtS / post-CtS / pre-StC / post-StC / end) also deposits a
-// full ciphertext clone the caller can download+decrypt offline. Zero cost when null.
-std::vector<std::pair<std::string, std::shared_ptr<FIDESlib::CKKS::Ciphertext>>>*
-    FIDESlib::CKKS::g_btsStageStash = nullptr;
+// btsStageProbe checkpoint (pre-CtS / post-CtS / pre-StC / post-StC / end) also deposits the
+// HOST-side RawCipherText the caller can wrap and decrypt offline. Zero cost when null.
+std::vector<FIDESlib::CKKS::BtsStageCheckpoint>* FIDESlib::CKKS::g_btsStageStash = nullptr;
 
 
 // Effective correction factor for this bootstrap call: the ContextData override (armed by
@@ -69,35 +68,15 @@ static bool btsSfDebugOn() {
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
-        // RR: the stage stash is NOT yet usable, and it must not crash the run.
-        //
-        // `Ciphertext(cc)+copy` reaches the source level via RNSPoly::copy's dropToLevel+grow --
-        // prefix moves an RR WINDOW does not support, guarded only by asserts, so a Release build
-        // walks off the end (measured: enabling the stash alone was an illegal memory access).
-        // A store/load round trip does not work either: `store` is RR-aware but the RawCipherText
-        // does not carry the window identity that `Ciphertext::load` needs to place it back, so
-        // load range-checks on an empty modulus list.
-        //
-        // The real fix is an RR-aware clone that allocates the destination AT the source's window
-        // (LimbPartition::generateLimbToLevel is the primitive; it asserts limb.empty(), which a
-        // freshly constructed poly satisfies) and then copies limbs without any level move. Until
-        // that exists, skip the stash and say so -- a silent no-op would look like "the bootstrap
-        // has no checkpoints" to the next probe.
-        if (ctxt.cc.isRR()) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                std::fprintf(stderr,
-                             "[rr_bts] stage stash SKIPPED on RR: cloning a windowed ciphertext needs an "
-                             "RR-aware copy (see btsStageProbe). RR_BTS_STAGE_DECRYPT will report 0 "
-                             "checkpoints -- that is this gap, not an empty bootstrap.\n");
-            }
-        }
-        else {
-            auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
-            c->copy(ctxt);
-            FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
-        }
+        // Store to the HOST rather than cloning on the device: `store()` handles the RR window
+        // (slot k -> global primeid windowLo+k) and the conversion that consumes it is verified
+        // by the probe's round-trip check. A device clone is not available for RR -- see the
+        // struct comment in Bootstrap.cuh.
+        FIDESlib::CKKS::BtsStageCheckpoint cp;
+        cp.stage = stage;
+        cp.level = ctxt.getLevel();
+        ctxt.store(cp.raw);
+        FIDESlib::CKKS::g_btsStageStash->emplace_back(std::move(cp));
     }
     if (!btsSfDebugOn())
         return;
@@ -915,6 +894,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const int32_t c
         // RationalRescale.cu:203) -- the ciphertext is mid-adjustment at this point. It belongs
         // either before the level moves in this branch, or in the caller that prescales.
         ctxt.NoiseFactor = targetSF;
+        btsStageProbe("post-adjust", ctxt);
     } else {  // THIS is only for FIXEDAUTO/FIXEDMANUAL (AdjustCiphertext)
               // Scaling down the message by a correction factor to emulate using a larger q0.
               // This step is needed so we could use a scaling factor of up to 2^59 with q9 ~= 2^60.
