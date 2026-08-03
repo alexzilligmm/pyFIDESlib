@@ -37,6 +37,16 @@ constexpr bool RESCALE_DOUBLE = true;
  *  FLEXIBLEAUTO work or is a foldable no-op re-traversal. Dumped to stderr at process exit
  *  as "[adjust_trace]" lines. Analysis-only — never fold work this histogram shows firing. */
 namespace {
+// RR_KS_TEMP_POOL gate (see Ciphertext::keySwitch / rotate_hoisted RR arms): scratch-pool
+// the keyswitch digit temporaries instead of constructing/destroying them per call.
+bool rrKsTempPool() {
+	static const bool v = [] {
+		const char* e = getenv("RR_KS_TEMP_POOL");
+		return !e || atoi(e) != 0;
+	}();
+	return v;
+}
+
 struct AdjustWorkCounters {
 	long rescale = 0, scalar = 0, drop = 0;
 };
@@ -1302,6 +1312,81 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 	// independent rotations, which are RR-correct via automorph+keySwitch above. Costs one modup
 	// per rotation instead of one per stage; a windowed hoisted keyswitch is the optimisation.
 	if (cc.isRR()) {
+		// HOISTED RR ARM (RR_HOISTED_ROT, default ON — the windowed hoisted keyswitch the old
+		// comment promised): every rotation keyswitches THE SAME c1, so modup ONCE via a
+		// dedicated clone (RRKeySwitchCore consumes its input) and run only the positional evk
+		// dot per index (reuse_modup=true). This is exactly the classic hoisted structure and
+		// deletes (n-1) modups per call; it also serializes each rotation's dot on ONE stream
+		// with the core's own waits, which removes the fallback's cross-stream ambiguity at the
+		// raise->CtS boundary (the RR_SYNC_AT race lived in this window).
+		static const bool hoistRR = [] {
+			const char* e = std::getenv("RR_HOISTED_ROT");
+			return e == nullptr || std::atoi(e) != 0;
+		}();
+		if (hoistRR) {
+			const int lvl = this->c0.getLevel();
+			Ciphertext ksin(cc_);
+			bool modupDone = false;
+			for (size_t i = 0; i < indexes.size(); ++i) {
+				results[i]->growToLevel(lvl);
+				const int nidx = normalyzeIndex(indexes_[i]);
+				if (nidx == 0) {
+					results[i]->copy(*this);
+				} else {
+					if (!modupDone) {
+						cc.advanceKsAuxSlot();
+						ksin.growToLevel(lvl);
+						ksin.c1.copy(c1);
+					}
+					// RR_KS_TEMP_POOL: same buffer-churn hazard as Ciphertext::keySwitch —
+					// pooled slots 4/5 never free, so the dot can never scribble a reused
+					// allocation. (keySwitch is not called inside this arm; no slot clash.)
+					std::optional<RNSPoly> d0own, d1own;
+					RNSPoly* d0p;
+					RNSPoly* d1p;
+					if (rrKsTempPool()) {
+						d0p = &cc.getRRScratch(lvl, 4);
+						d1p = &cc.getRRScratch(lvl, 5);
+					} else {
+						d0own.emplace(cc, lvl);
+						d1own.emplace(cc, lvl);
+						d0p = &*d0own;
+						d1p = &*d1own;
+					}
+					RNSPoly& d0 = *d0p;
+					RNSPoly& d1 = *d1p;
+					RRKeySwitchCore(ksin.c1, cc.GetRotationKey(nidx, keyID, slots), d0, d1, nullptr,
+					                /*do_moddown=*/true, /*reuse_modup=*/modupDone);
+					modupDone = true;
+					// rotated ct = (psi(c0 + d0), psi(d1)) — keySwitch first, then automorph
+					// both, the same composition Ciphertext::rotate's RR arm uses. d0/d1 are
+					// consumed via the src-automorph so no extra copies are paid.
+					// bisection: RR_SYNC_AT & 8 = fence after EACH baby rotation completes
+					static const int syncFine = [] {
+						const char* e = std::getenv("RR_SYNC_AT");
+						return e ? std::atoi(e) : 0;
+					}();
+					d0.add(c0);
+					// LimbPartition::add launches on d0's PER-LIMB streams and does not join
+					// them back into the partition stream — but the src-form automorph below
+					// waits ONLY d0's partition stream. Join here or it reads a half-added d0
+					// (the in-place composition never hits this: same limb streams throughout).
+					for (auto& g : d0.GPU)
+						for (int b = 0; b < g.getLimbSize(lvl); b += cc.batch)
+							g.s.wait(STREAM(g.limb[b]));
+					results[i]->c0.automorph(nidx, 1, &d0);
+					results[i]->c1.automorph(nidx, 1, &d1);
+					results[i]->copyMetadata(*this);
+					if (syncFine & 8)
+						cudaDeviceSynchronize();
+				}
+				if (ext) {
+					results[i]->c0.generateSpecialLimbs(false, false);
+					results[i]->c1.generateSpecialLimbs(false, false);
+				}
+			}
+			return;
+		}
 		for (size_t i = 0; i < indexes.size(); ++i) {
 			// indexes_ (the ORIGINAL), not indexes: those were already normalyzed at the top of
 			// this function and rotate() normalyzes again -- applying it twice lands on an index
@@ -1757,6 +1842,22 @@ void Ciphertext::keySwitch(const KeySwitchingKey& ksk) {
 		const int lvl = c1.getLevel();
 		if (std::getenv("RR_KS_DBG"))
 			std::fprintf(stderr, "[rr_ks] Ciphertext::keySwitch RR arm at level %d\n", lvl);
+		// RR_KS_TEMP_POOL (default ON): the switched-digit temporaries live in the context
+		// scratch pool instead of dying here. The keyswitch dot writes EVERY d0/d1 limb from
+		// ONE kernel on the core's stream; a function-local temp then frees those buffers on
+		// their (idle) limb streams, and the custom allocator hands them to the next borrower
+		// while the dot may still be in flight — the logN 16 pre-CtS corruption class. A
+		// context-lifetime slot never frees, so the hazard cannot exist; the WAR between
+		// consecutive borrows is carried by the core's own partition-stream joins. (=0
+		// restores the local temps to reproduce.)
+		if (rrKsTempPool()) {
+			RNSPoly& d0 = cc.getRRScratch(lvl, 4);
+			RNSPoly& d1 = cc.getRRScratch(lvl, 5);
+			RRKeySwitchCore(c1, ksk, d0, d1);
+			c0.add(d0);
+			c1.copy(d1);
+			return;
+		}
 		RNSPoly d0(cc, lvl), d1(cc, lvl);
 		RRKeySwitchCore(c1, ksk, d0, d1);
 		c0.add(d0);

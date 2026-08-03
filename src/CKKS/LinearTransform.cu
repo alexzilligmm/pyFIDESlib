@@ -109,6 +109,16 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
     std::vector<Plaintext> ptOwned;
     std::vector<Plaintext*> ptUse(pts.begin(), pts.end());
     ptOwned.reserve(rowSize);
+    // RR_LT_PT_DROP_INPLACE (default ON): drop the SHARED precomp plaintext in place instead
+    // of copying it down every bootstrap. The drop is exact by the same containment argument
+    // the copy path rests on (bootstrap-region windows nest), the plaintext is consumed only
+    // by this stage at this level, and the operation is idempotent — the second bootstrap
+    // finds pl == ctLvl and does nothing. This deletes ~2 device copies per plaintext per
+    // bootstrap (the dominant copy_bytes_ population under RR). =0 restores the copy.
+    static const bool ptDropInPlace = [] {
+        const char* e = std::getenv("RR_LT_PT_DROP_INPLACE");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
     for (int i = 0; i < rowSize; ++i) {
         if (!pts[i])
             continue;
@@ -119,6 +129,10 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
             throw std::runtime_error("RR LinearTransform: plaintext " + std::to_string(i) + " at level " +
                                      std::to_string(pl) + " is BELOW the ciphertext at level " +
                                      std::to_string(ctLvl) + " — cannot be raised.");
+        if (ptDropInPlace) {
+            pts[i]->c0.dropToLevel(ctLvl);
+            continue;
+        }
         ptOwned.emplace_back(cc_);
         ptOwned.back().copy(*pts[i]);
         ptOwned.back().c0.dropToLevel(ctLvl);
@@ -154,15 +168,29 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
             cudaDeviceSynchronize();
         if (std::getenv("RR_LT_EXT_CHK"))
             btsStashPush("lt-in", ctxt);
+        // MODUP HOISTING (RR_LT_HOIST, default ON — the fast-transform first half): every
+        // non-identity baby keyswitches THE SAME polynomial (ctxt.c1), so its digit
+        // decomposition is identical across rotations. Modup once into the context keyswitch
+        // workspace via a single dedicated clone (the core consumes its input), then each
+        // rotation runs only the evk dot (RRKeySwitchCore reuse_modup=true). This deletes
+        // (bStep-1) modups per stage — the classic hoisted transform's structural half —
+        // while the noise story is unchanged (the dot and the one-ModDown-per-inner-sum
+        // accumulation are exactly as before).
+        static const bool hoistModup = [] {
+            const char* e = std::getenv("RR_LT_HOIST");
+            return e == nullptr || std::atoi(e) != 0;
+        }();
+        Ciphertext ksin(cc_);
+        bool modupDone = false;
         std::vector<Ciphertext> fr;
         fr.reserve(bStep);
         for (int i = 0; i < bStep; ++i) {
             fr.emplace_back(cc_);
             Ciphertext& f  = fr.back();
             f.growToLevel(lvl);
-            f.copy(ctxt);
             const int nidx = ctxt.normalyzeIndex(i * stride);
             if (nidx == 0) {
+                f.copy(ctxt);
                 // identity baby, lifted to the extended basis: specials of x*P are ZERO
                 f.c0.generateSpecialLimbs(true, false);
                 f.c0.scaleByP();
@@ -173,10 +201,25 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
                 // order, kept in the P*Q basis. advanceKsAuxSlot: every library entry point
                 // that keyswitches rotates the dual-slot aux pool; calling the core directly
                 // without it makes back-to-back baby keyswitches share one aux slot.
-                cc.advanceKsAuxSlot();
-                RNSPoly d0(cc, lvl), d1(cc, lvl);
-                RRKeySwitchCore(f.c1, cc.GetRotationKey(nidx, ctxt.keyID, ctxt.slots), d0, d1, nullptr,
-                                /*do_moddown=*/false);
+                // f.c1 is overwritten by the switched d1 below, so only c0 is copied; the
+                // keyswitch input is the dedicated clone `ksin.c1` (hoisted) or a fresh
+                // per-baby copy (RR_LT_HOIST=0, the original shape).
+                f.c0.copy(ctxt.c0);
+                f.copyMetadata(ctxt);
+                if (!hoistModup || !modupDone) {
+                    cc.advanceKsAuxSlot();
+                    ksin.growToLevel(lvl);
+                    ksin.c1.copy(ctxt.c1);
+                }
+                // RR_KS_TEMP_POOL twin of the rotate_hoisted arm — pooled slots 6/7 (4/5 are
+                // the keySwitch/rotate slots and giant-step rotations run between stages).
+                // These stay EXTENDED (no moddown); the consuming add/copy runs before the
+                // next borrow's dot, ordered through the core's partition-stream joins.
+                RNSPoly& d0 = cc.getRRScratch(lvl, 6);
+                RNSPoly& d1 = cc.getRRScratch(lvl, 7);
+                RRKeySwitchCore(ksin.c1, cc.GetRotationKey(nidx, ctxt.keyID, ctxt.slots), d0, d1, nullptr,
+                                /*do_moddown=*/false, /*reuse_modup=*/hoistModup && modupDone);
+                modupDone = true;
                 if (extSync)
                     cudaDeviceSynchronize();
                 // RR_LT_EXT_DBG2: rebuild THIS baby from copies, moddown it, and stash next to a

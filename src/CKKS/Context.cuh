@@ -122,8 +122,17 @@ class ContextData {
      *  NOT thread-safe: one table per context, so two threads keyswitching on the same context
      *  would race on it. That is why the classic paths allocate per call. RR is single-threaded
      *  today (RRKeySwitchCore asserts single-GPU); give this a slot pool before that changes. */
-    void*** rr_digits_dev = nullptr;
-    void** rr_digits_host = nullptr;
+     /* 2026-08-03: it was not async-safe SINGLE-threaded either, and this was THE logN 16
+     *  bootstrap corruption (RUNLOG [logN16-root]): call i+1's host std::copy overwrote the
+     *  pinned table while call i's H2D was pending, and its H2D overwrote the DEVICE table
+     *  while call i's dot kernel was still reading it — wrong-but-valid pointers, so
+     *  initcheck saw nothing and only fences BETWEEN core calls masked it. Now a RING of
+     *  slots with per-slot completion events: reuse waits (in practice never blocks). */
+    static constexpr int RR_DIGITS_RING = 8;
+    void*** rr_digits_dev = nullptr;   // ring base: RR_DIGITS_RING * dnum*6 entries
+    void** rr_digits_host = nullptr;   // pinned ring base, same layout
+    cudaEvent_t rr_digits_ev[RR_DIGITS_RING] = {};
+    int rr_digits_slot = 0;
 
     /** RR keyswitch DIGIT workspace (RR_PLAN (c).4): one context-lifetime poly whose
      *  DECOMP/DIGIT arrays are allocated once, instead of every ciphertext growing its own.

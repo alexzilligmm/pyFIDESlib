@@ -258,7 +258,7 @@ const uint32_t* rrRegenSeed(const LimbPartition& ka, const int block_x, int* sha
 }  // namespace
 
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
-                     double* phase_ms, bool do_moddown) {
+                     double* phase_ms, bool do_moddown, bool reuse_modup) {
     // phase_ms, when given, is [modup, dot, moddown] in ms — each fenced by a device sync.
     // It exists to PRICE the remaining fusion before building it: the *ModupDotKSK path this
     // would fold into is also the classic shipping path's, so the prize has to justify the risk.
@@ -269,6 +269,13 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         phase_ms[i] = std::chrono::duration<double, std::milli>(t1 - t0).count();
         return t1;
     };
+    // Bisection (RR_SYNC_AT & 32): fence the core's three internal phase boundaries
+    // (post-modup, post-dot, post-moddown) — the shared machinery every RR rotation and
+    // keyswitch funnels through. Diagnostic only.
+    static const bool coreFence = [] {
+        const char* e = std::getenv("RR_SYNC_AT");
+        return e && (std::atoi(e) & 32);
+    }();
     if (phase_ms) cudaDeviceSynchronize();
     auto tmark = std::chrono::steady_clock::now();
     ContextData& cc = *key.cc;  // Context is a shared_ptr<ContextData>
@@ -312,6 +319,10 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     // which is what a fresh ciphertext per level was otherwise re-allocating (~dnum*(K+L) limbs,
     // ~0.7 ms/level at logN 16 and scaling with dnum). See ContextData::rr_ks_workspace.
     RNSPoly& wsPoly = cc.getRRKeySwitchWorkspace();
+    if (reuse_modup && wsPoly.getLevel() != level)
+        throw std::runtime_error("RRKeySwitchCore(reuse_modup): workspace level " +
+                                 std::to_string(wsPoly.getLevel()) + " != input level " + std::to_string(level) +
+                                 " — no prior modup of this input to reuse");
     wsPoly.setLevel(level);
     LimbPartition& ws = wsPoly.GPU.at(0);
     // TO-TRY §2.10b': HOST ISSUE cost per sub-phase. Distinct from `phase_ms` above, which
@@ -323,7 +334,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         if (rr_ks_host_ms) rr_ks_host_ms[i] += std::chrono::duration<double, std::milli>(n - hmark).count();
         hmark = n;
     };
-    ws.adoptLimbPtrsFrom(src, cc.windowSize(level));
+    if (!reuse_modup)
+        ws.adoptLimbPtrsFrom(src, cc.windowSize(level));
 
     RNSPoly& aux = cc.getKeySwitchAux2();
     hph(0);  // prep: workspace adopt
@@ -351,7 +363,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     out0.generateSpecialLimbs(false, false);
     out1.generateSpecialLimbs(false, false);
     hph(1);  // special-limb allocation for the two outputs
-    if (fused_ks) {
+    if (fused_ks && !reuse_modup) {
         static const bool once = [] {  // run marker: an A/B whose arms are the same arm is a lie
             std::cerr << "[rr_ks] active: FUSED modup+dot (FIDESLIB_RR_FUSED_KS=0 for the reference)\n";
             return true;
@@ -371,7 +383,10 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     }
 
     // --- unfused reference: modup, then the standalone dot ---
-    ws.modup(aux.GPU.at(0));
+    if (!reuse_modup)
+        ws.modup(aux.GPU.at(0));
+    if (coreFence)
+        cudaDeviceSynchronize();
     hph(2);  // modup
 
     tmark = tick(0, tmark);
@@ -412,13 +427,25 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         h_digits[d + 4 * cc.dnum] = ka.limbptr.data;    // key limbs: full-chain, primeid-indexed
         h_digits[d + 5 * cc.dnum] = kb.limbptr.data;
     }
+    // RING staging (see Context.cuh rr_digits_*): each call gets its own host+device table
+    // slot; the slot is reused only after its previous consumer (H2D + the dot kernel,
+    // event recorded after the launch) has completed. This is the fix for the logN 16
+    // corruption — the single shared table was rewritten under in-flight consumers.
+    constexpr int RING = ContextData::RR_DIGITS_RING;
+    const size_t tblN = (size_t)cc.dnum * 6;
     if (cc.rr_digits_dev == nullptr) {
-        cudaMalloc(&cc.rr_digits_dev, cc.dnum * 6 * sizeof(void**));
-        cudaMallocHost(&cc.rr_digits_host, cc.dnum * 6 * sizeof(void**));
+        cudaMalloc(&cc.rr_digits_dev, RING * tblN * sizeof(void**));
+        cudaMallocHost(&cc.rr_digits_host, RING * tblN * sizeof(void**));
+        for (int k = 0; k < RING; ++k)
+            cudaEventCreateWithFlags(&cc.rr_digits_ev[k], cudaEventDisableTiming);
     }
-    std::copy(h_digits.begin(), h_digits.end(), (void***)cc.rr_digits_host);
-    void*** dDigits = cc.rr_digits_dev;
-    cudaMemcpyAsync(dDigits, cc.rr_digits_host, cc.dnum * 6 * sizeof(void**), cudaMemcpyHostToDevice, s.ptr());
+    const int slot = cc.rr_digits_slot;
+    cc.rr_digits_slot = (slot + 1) % RING;
+    cudaEventSynchronize(cc.rr_digits_ev[slot]);  // never-recorded/complete slots return instantly
+    void** hostSlot = cc.rr_digits_host + slot * tblN;
+    void*** dDigits = cc.rr_digits_dev + slot * tblN;
+    std::copy(h_digits.begin(), h_digits.end(), (void***)hostSlot);
+    cudaMemcpyAsync(dDigits, hostSlot, tblN * sizeof(void**), cudaMemcpyHostToDevice, s.ptr());
     // Argument order: the launcher's out1 collects the `a`-key product and out2 the `b`-key
     // product, whereas RRChain::KeySwitchCore returns (b-part, a-part) — so out1/out0 here.
     // Packed keys and in-kernel regen both work at RR levels (milestone (c).4a): packing is
@@ -433,6 +460,7 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
                         nSpecial, 0, ka.key_pack_bits, regenSeed, (uint32_t)cc.N >> 4, regenShape,
                         /*qbase=*/src.pbase, /*dbase=*/dBase);
     CudaCheckErrorModNoSync;  // pinned staging + a context-lifetime table: no sync, no per-call malloc
+    cudaEventRecord(cc.rr_digits_ev[slot], s.ptr());  // slot reusable once H2D + dot complete
 
     o0.getS().wait(s);
     o1.getS().wait(s);
@@ -442,6 +470,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
     tmark = tick(1, tmark);
 
     // --- moddown back to the window basis ---
+    if (coreFence)
+        cudaDeviceSynchronize();
     hph(3);  // dot, including the digit-table build + upload
     out0.SetModUp(true);
     out1.SetModUp(true);
@@ -449,6 +479,8 @@ void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSP
         out0.moddown(true, !keep_specials, 0);
         out1.moddown(true, !keep_specials, 1);
     }
+    if (coreFence)
+        cudaDeviceSynchronize();
     hph(4);  // moddown, including the special-limb FREE
     tick(2, tmark);
 }

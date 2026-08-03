@@ -67,11 +67,20 @@ class KeySwitchingKey;
  */
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
                      double* phase_ms = nullptr,  //!< optional [modup, dot, moddown] breakdown
-                     bool do_moddown = true);     //!< false: leave (out0, out1) in the EXTENDED
+                     bool do_moddown = true,      //!< false: leave (out0, out1) in the EXTENDED
                                                   //!< P*Q basis (ModUp set, specials populated) so a
                                                   //!< caller can accumulate several switched terms and
                                                   //!< pay ONE ModDown rounding for the whole sum — the
                                                   //!< hoisted linear transform's noise trick.
+                     bool reuse_modup = false);   //!< true: the context keyswitch workspace already
+                                                  //!< holds the digits of THIS `c` at THIS level (a
+                                                  //!< previous call moduped it) — skip adopt+modup and
+                                                  //!< run only the dot. This is modup HOISTING across
+                                                  //!< the baby rotations of a linear transform: the
+                                                  //!< input polynomial is identical for every rotation,
+                                                  //!< so its digit decomposition is too. Caller
+                                                  //!< contract: same `c`, same level, and nothing else
+                                                  //!< touched the workspace in between.
 
 /**
  * Milestone (c).2 harness: the same rescale step driven through the WINDOWED poly
