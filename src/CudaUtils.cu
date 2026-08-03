@@ -28,7 +28,23 @@ nvtx3::domain const& D = nvtx3::domain::get<my_domain>();
 
 std::map<std::string, std::pair<std::unique_ptr<nvtx3::unique_range_in<my_domain>>, int>> lifetimes_map;
 
+/* FIDESLIB_NVTX (default 0): every library op constructs a source_location string and
+ * pushes an NVTX range — profiler attached or not. Fine on the classic path (GPU-bound),
+ * but the RR bootstrap is ~100 % host-ISSUE-bound and pays this on every one of ~5-10k
+ * op calls per bootstrap. Ranges are a PROFILING aid: opt in with FIDESLIB_NVTX=1 for
+ * nsys runs; the call-site string construction itself remains (cheap next to the NVTX
+ * push + attribute build + lifetime-map traffic this skips). */
+bool cudaNvtxEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_NVTX");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
 void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
+    if (!cudaNvtxEnabled())
+        return;
 
     if (cat == FUNCTION) {
         using namespace nvtx3;
@@ -61,6 +77,8 @@ void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
 }
 
 void CudaNvtxStop(const std::string msg, NVTX_CATEGORIES cat) {
+    if (!cudaNvtxEnabled())
+        return;
     if (cat == FUNCTION) {
         nvtxDomainRangePop(D);
     } else if (cat == LIFETIME) {

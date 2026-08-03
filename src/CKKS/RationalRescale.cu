@@ -9,7 +9,12 @@
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <optional>
+#include <tuple>
+
+#include "CKKS/Ciphertext.cuh"
 
 #include "CKKS/Context.cuh"
 #include "CKKS/ElemenwiseBatchKernels.cuh"
@@ -540,8 +545,6 @@ std::vector<std::vector<uint32_t>> RRPolyRescaleStepHost(ContextData& cc,
     return out;
 }
 
-namespace {
-
 /* TO-TRY §2.10f: borrow level-keyed scratch from the context, or own it privately.
  *
  * The ablation is the point. `FIDESLIB_RR_SCRATCH_POOL=0` puts every borrower back to
@@ -549,6 +552,33 @@ namespace {
  * construction measured 0.107 ms/level — so the pool's prize is an env flip, not a rebuild.
  *
  * Only scratch that KEEPS its level may be pooled; see ContextData::rr_scratch. */
+bool rrCtPool() {
+    static const bool v = [] {
+        const char* e = std::getenv("RR_CT_POOL");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+Ciphertext& rrPooledCiphertext(Context& cc_, int level, int slot) {
+    using Key = std::tuple<ContextData*, int, int>;
+    // Leaked on purpose (see the header comment): entries hold RNSPolys whose destructors
+    // need a live context; a static map's exit-time destruction would run after teardown.
+    static auto* pool = new std::map<Key, std::unique_ptr<Ciphertext>>();
+    auto& p = (*pool)[Key{cc_.get(), level, slot}];
+    if (!p) {
+        p = std::make_unique<Ciphertext>(cc_);
+        p->growToLevel(level);
+    }
+    if (p->getLevel() != level)
+        throw std::runtime_error("rrPooledCiphertext slot " + std::to_string(slot) + " left at level " +
+                                 std::to_string(p->getLevel()) + ", not " + std::to_string(level) +
+                                 " — pooled cts must not be rescaled (level IS the key)");
+    return *p;
+}
+
+namespace {
+
 bool rrScratchPooled() {
     static const bool pooled = [] {
         const char* e = std::getenv("FIDESLIB_RR_SCRATCH_POOL");

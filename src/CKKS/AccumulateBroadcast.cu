@@ -5,6 +5,7 @@
 #include "CKKS/AccumulateBroadcast.cuh"
 
 #include "CKKS/Context.cuh"
+#include "CKKS/RationalRescale.cuh"
 std::vector<int> FIDESlib::CKKS::GetAccumulateRotationIndices(const int bStep, const int stride, const int size) {
     std::vector<int> indices;
     int logbStep = std::bit_width((uint32_t)bStep) - 1;
@@ -41,10 +42,20 @@ std::vector<int> FIDESlib::CKKS::GetbroadcastRotationIndices(const int bStep, co
 void FIDESlib::CKKS::Accumulate(Ciphertext& ctxt, const int bStep, const int stride, const int size) {
     Context& cc_ = ctxt.cc_;
     ContextData& cc = ctxt.cc;
-    std::vector<Ciphertext> aux;
-
-    for (int i = 0; i < bStep - 1; ++i) {
-        aux.emplace_back(cc_);
+    // RR_CT_POOL: the rotation targets borrow pooled cts (slots 160+i at the ct's level) —
+    // (bStep-1) window constructions per bootstrap were host-issue cost. Contents are fully
+    // overwritten by rotate_hoisted (copy / keyswitch-dot + automorph) each round.
+    std::vector<Ciphertext> auxOwn;
+    std::vector<Ciphertext*> aux(bStep - 1, nullptr);
+    if (cc.isRR() && rrCtPool()) {
+        for (int i = 0; i < bStep - 1; ++i)
+            aux[i] = &rrPooledCiphertext(cc_, ctxt.getLevel(), 160 + i);
+    } else {
+        auxOwn.reserve(bStep - 1);
+        for (int i = 0; i < bStep - 1; ++i) {
+            auxOwn.emplace_back(cc_);
+            aux[i] = &auxOwn.back();
+        }
     }
 
     int logbStep = std::bit_width((uint32_t)bStep) - 1;
@@ -54,7 +65,7 @@ void FIDESlib::CKKS::Accumulate(Ciphertext& ctxt, const int bStep, const int str
         for (int idx = stride * s; idx < stride * size && idx < bStep * stride * s; idx += stride * s) {
             // std::cout << idx << std::endl;
             indexes.push_back(idx);
-            auxptr.emplace_back(&aux[idx / stride / s - 1]);
+            auxptr.emplace_back(aux[idx / stride / s - 1]);
         }
         // RATIONAL RESCALING: the ext=true / extend / modDown trio defers the hoisted keyswitch's
         // ModDown so the adds happen once in the extended P*Q basis — a classic-path optimisation.

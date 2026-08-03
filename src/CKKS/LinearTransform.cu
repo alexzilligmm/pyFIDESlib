@@ -2,6 +2,8 @@
 // Created by carlosad on 7/05/25.
 //
 
+#include <optional>
+
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/LinearTransform.cuh"
@@ -180,14 +182,33 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
             const char* e = std::getenv("RR_LT_HOIST");
             return e == nullptr || std::atoi(e) != 0;
         }();
-        Ciphertext ksin(cc_);
+        // RR_CT_POOL (default ON, see rrPooledCiphertext): the babies, the keyswitch-input
+        // clone and the inner/acc accumulators borrow context-lifetime pooled Ciphertexts
+        // instead of constructing ~2·bStep RNSPolys per stage — the bootstrap is ~100 %
+        // host-ISSUE-bound and per-call window construction is its dominant mass. Pool
+        // hygiene: freeSpecialLimbs() at borrow wherever a previous use can leave STALE
+        // special limbs (generateSpecialLimbs no-ops on existing storage, so the identity
+        // baby's zero_out request would otherwise silently skip the memset).
+        std::optional<Ciphertext> ksinOwn;
+        if (!rrCtPool())
+            ksinOwn.emplace(cc_);
+        Ciphertext& ksin = rrCtPool() ? rrPooledCiphertext(cc_, lvl, 171) : *ksinOwn;
         bool modupDone = false;
-        std::vector<Ciphertext> fr;
-        fr.reserve(bStep);
+        std::vector<Ciphertext> frOwn;
+        std::vector<Ciphertext*> fr(bStep, nullptr);
+        if (!rrCtPool())
+            frOwn.reserve(bStep);
         for (int i = 0; i < bStep; ++i) {
-            fr.emplace_back(cc_);
-            Ciphertext& f  = fr.back();
+            if (rrCtPool()) {
+                fr[i] = &rrPooledCiphertext(cc_, lvl, 100 + i);
+            } else {
+                frOwn.emplace_back(cc_);
+                fr[i] = &frOwn.back();
+            }
+            Ciphertext& f  = *fr[i];
             f.growToLevel(lvl);
+            f.c0.freeSpecialLimbs();
+            f.c1.freeSpecialLimbs();
             const int nidx = ctxt.normalyzeIndex(i * stride);
             if (nidx == 0) {
                 f.copy(ctxt);
@@ -261,10 +282,10 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
         // wrong". Destroys the run downstream; debug only.
         if (std::getenv("RR_LT_EXT_DBG")) {
             for (int i = 0; i < std::min(bStep, 2); ++i) {
-                fr[i].modDown(false);
+                fr[i]->modDown(false);
                 char lbl[24];
                 std::snprintf(lbl, sizeof lbl, "ext-fr%d", i);
-                btsStashPush(lbl, fr[i]);
+                btsStashPush(lbl, *fr[i]);
             }
             if (bStep > 1 && ctxt.normalyzeIndex(stride) != 0) {
                 Ciphertext ref(cc_);
@@ -275,7 +296,17 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
             }
         }
 
-        Ciphertext acc(cc_), inner(cc_);
+        std::optional<Ciphertext> accOwn, innerOwn;
+        if (!rrCtPool()) {
+            accOwn.emplace(cc_);
+            innerOwn.emplace(cc_);
+        }
+        Ciphertext& acc   = rrCtPool() ? rrPooledCiphertext(cc_, lvl, 150) : *accOwn;
+        Ciphertext& inner = rrCtPool() ? rrPooledCiphertext(cc_, lvl, 151) : *innerOwn;
+        if (rrCtPool()) {
+            acc.c0.freeSpecialLimbs();
+            acc.c1.freeSpecialLimbs();
+        }
         bool haveAcc = false;
         for (int j = gStep - 1; j >= 0; --j) {
             std::vector<Ciphertext*> cts;
@@ -284,7 +315,7 @@ void LinearTransformRR(Ciphertext& ctxt, int rowSize, int bStep, const std::vect
                 const int idx = j * bStep + i;
                 if (idx >= rowSize || !ptUse[idx])
                     continue;
-                cts.push_back(&fr[i]);
+                cts.push_back(fr[i]);
                 ps.push_back(ptUse[idx]);
             }
             if (cts.empty())

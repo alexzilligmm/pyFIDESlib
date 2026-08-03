@@ -3,6 +3,7 @@
 //
 
 #include "CKKS/Ciphertext.cuh"
+#include <optional>
 #include "CKKS/RationalRescale.cuh"
 #include "CKKS/Context.cuh"
 #include "CKKS/KeySwitchingKey.cuh"
@@ -1325,7 +1326,13 @@ void Ciphertext::rotate_hoisted(const std::vector<int>& indexes_, std::vector<Ci
 		}();
 		if (hoistRR) {
 			const int lvl = this->c0.getLevel();
-			Ciphertext ksin(cc_);
+			// RR_CT_POOL: the keyswitch-input clone borrows a pooled ct (slot 170) — the
+			// ladder calls this 3-4x per bootstrap and the clone's window construction was
+			// pure host-issue cost. Contents fully overwritten by the c1 copy below.
+			std::optional<Ciphertext> ksinOwn;
+			if (!rrCtPool())
+				ksinOwn.emplace(cc_);
+			Ciphertext& ksin = rrCtPool() ? rrPooledCiphertext(cc_, lvl, 170) : *ksinOwn;
 			bool modupDone = false;
 			for (size_t i = 0; i < indexes.size(); ++i) {
 				results[i]->growToLevel(lvl);

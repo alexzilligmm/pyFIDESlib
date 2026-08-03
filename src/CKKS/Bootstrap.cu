@@ -2,6 +2,7 @@
 // Created by carlosad on 4/12/24.
 //
 
+#include <chrono>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/ApproxModEval.cuh"
 #include "CKKS/Bootstrap.cuh"
@@ -82,6 +83,23 @@ void btsStashPush(const char* stage, Ciphertext& ctxt) {
 }  // namespace FIDESlib::CKKS
 
 static void btsStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
+    // RR_BTS_PHASE_TIMES=1: host-ISSUE time between consecutive probe points (no device
+    // syncs — this is enqueue-order attribution for the host-bound RR bootstrap), plus the
+    // same span re-measured wall-side once at "end" via one final sync. Prints per call.
+    static const bool phaseTimes = [] {
+        const char* e = std::getenv("RR_BTS_PHASE_TIMES");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    if (phaseTimes) {
+        static std::chrono::steady_clock::time_point last{};
+        static bool have_last = false;
+        const auto now = std::chrono::steady_clock::now();
+        if (have_last)
+            printf("[bts_phase] ->%-12s host-issue %.2f ms\n", stage,
+                   std::chrono::duration<double, std::milli>(now - last).count());
+        last = now;
+        have_last = true;
+    }
     if (FIDESlib::CKKS::g_btsStageStash) {
         cudaDeviceSynchronize();
         // Store to the HOST rather than cloning on the device: `store()` handles the RR window

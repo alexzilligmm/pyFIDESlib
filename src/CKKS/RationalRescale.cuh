@@ -21,6 +21,8 @@
 #include <vector>
 #include "CKKS/Limb.cuh"
 
+#include "CKKS/forwardDefs.cuh"
+
 namespace FIDESlib::CKKS {
 
 class ContextData;
@@ -65,6 +67,22 @@ class KeySwitchingKey;
  * already sit at the same RR level and receive the (b, a) contributions ModDown'ed back to
  * the window basis — i.e. exactly RRChain::KeySwitchCore's return value.
  */
+/** TO-TRY §2.10b' probe sink (defined in RationalRescale.cu): when non-null, RRKeySwitchCore
+ *  accumulates its HOST ISSUE cost into [prep, specials, modup, dot, moddown]. */
+extern double* rr_ks_host_ms;
+
+/** RR host-issue lever (2026-08-03): context-lifetime pooled Ciphertexts for the transform
+ *  temporaries (LT babies, ladder aux, keyswitch-input clones). The bootstrap is ~100 %
+ *  host-ISSUE-bound (52.8 of 53.0 ms measured) and per-call RNSPoly construction is the
+ *  dominant mass — an RR poly's storage IS its window, so every borrow at a new (level,
+ *  slot) constructs once and lives for the process (the map is intentionally leaked: its
+ *  entries reference the context and must not run destructors after it dies). Borrowers
+ *  must fully overwrite contents; call freeSpecialLimbs() at borrow when the previous
+ *  use may have left STALE special limbs (generateSpecialLimbs no-ops on existing storage,
+ *  so a zero_out request would otherwise silently skip). RR_CT_POOL=0 disables. */
+bool rrCtPool();
+Ciphertext& rrPooledCiphertext(Context& cc_, int level, int slot);
+
 void RRKeySwitchCore(RNSPoly& c, const KeySwitchingKey& key, RNSPoly& out0, RNSPoly& out1,
                      double* phase_ms = nullptr,  //!< optional [modup, dot, moddown] breakdown
                      bool do_moddown = true,      //!< false: leave (out0, out1) in the EXTENDED
