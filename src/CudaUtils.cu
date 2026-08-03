@@ -28,7 +28,23 @@ nvtx3::domain const& D = nvtx3::domain::get<my_domain>();
 
 std::map<std::string, std::pair<std::unique_ptr<nvtx3::unique_range_in<my_domain>>, int>> lifetimes_map;
 
+/* FIDESLIB_NVTX (default 0): NVTX ranges are a profiling aid, but they were also the last
+ * un-audited SHARED-STATE writer on the two-ct path — the LIFETIME category mutates the
+ * unguarded `lifetimes_map` std::map on every Ciphertext construction/destruction, so two
+ * host threads corrupt the map (S7/FAILURE 2.33 class). Gated off by default; opt in with
+ * FIDESLIB_NVTX=1 for single-threaded nsys runs. (Ported from rational32, where the same
+ * gate measured wall-NEUTRAL — this is a correctness/hygiene gate, not a perf lever.) */
+bool cudaNvtxEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_NVTX");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
 void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
+    if (!cudaNvtxEnabled())
+        return;
 
     if (cat == FUNCTION) {
         using namespace nvtx3;
@@ -61,6 +77,8 @@ void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
 }
 
 void CudaNvtxStop(const std::string msg, NVTX_CATEGORIES cat) {
+    if (!cudaNvtxEnabled())
+        return;
     if (cat == FUNCTION) {
         nvtxDomainRangePop(D);
     } else if (cat == LIFETIME) {
