@@ -278,6 +278,9 @@ class LimbPartition {
      *  (call after grow()). qhatinv[k] = (Q0/q_k)^{-1} mod q_k; qhat is the flattened
      *  (Q0/q_k) mod q_i table with stride = current limb count. Single-GPU only. */
     void compositeModRaise(int d, const std::vector<uint64_t>& qhatinv, const std::vector<uint64_t>& qhat);
+    // Centred-aggregate CRT lift for coeff plaintexts (d==2); see coeffLiftCentered2_.
+    void coeffLiftCentered(uint64_t q0, uint64_t q1, uint64_t q0inv_mod_q1, uint64_t Qhalf,
+                           const std::vector<uint64_t>& Q0_mod_qi);
     void evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights);
     void rotateModupDotKSK(LimbPartition& c1, LimbPartition& c0, const LimbPartition& ksk_a,
                            const LimbPartition& ksk_b);

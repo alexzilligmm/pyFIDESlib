@@ -177,6 +177,16 @@ class ContextData {
     int getCorrectionFactorOverride() const;
     int correctionFactorOverride = -1;
 
+    /** Bootstrap input pre-scale (armed per call by the wrapper, same discipline as the
+     *  correction-factor override): the next Bootstrap multiplies its input by this
+     *  factor for FREE — it rides constantEvalMult, an arbitrary double the input is
+     *  multiplied by anyway (TO-TRY B15: the PRE side of the range-normalising bootstrap
+     *  is free; any restore is the caller's business). 1.0 = neutral. Runtime-only, no
+     *  precomputation depends on it. OUT-OF-LINE ACCESSORS ONLY (see above). */
+    void setBtsPreScale(double f);
+    double getBtsPreScale() const;
+    double btsPreScale = 1.0;
+
     /** COMPOSITESCALING support (d = primes per CKKS level; 1 on classic chains). */
     int compositeDegree() const { return param.compositeDegree; }
     /** Scaling factor read at a LIMB index. On composite chains OpenFHE stores a SENTINEL

@@ -191,6 +191,11 @@ class Ciphertext {
 
     /** @brief Async D2H of c0,c1 into a pinned arena slot `base`; fills `m` (except moduli). No sync. */
     void storeStaged(uint8_t* base, StagedCtMeta& m, cudaStream_t stream);
+    /// storeStaged with producer ordering: bridges the partition stream (where the ops
+    /// that produced this value ran) into `stream` via an event before copying — the
+    /// async-capture snapshot primitive (no device-wide sync, unlike store()).
+    /// max_limbs > 0 snapshots only the first max_limbs towers (magnitude probes).
+    void storeStagedOrdered(uint8_t* base, StagedCtMeta& m, cudaStream_t stream, int max_limbs = -1);
 
     /** @brief Async H2D reconstruction of c0,c1 from a pinned arena slot `base` per `m`. No sync. */
     void loadStaged(const uint8_t* base, const StagedCtMeta& m, cudaStream_t stream);

@@ -163,6 +163,33 @@ void Limb<T>::load_with_stream(const std::vector<Q>& dat_, cudaStream_t stream_o
     cudaMemcpyAsync(v.data, dat.data(), dat.size() * sizeof(T), cudaMemcpyHostToDevice, stream_override);
 }
 
+namespace {
+// Narrow the staging arena's u64-per-coefficient payload into a u32 limb. Residues are < 2^32 by
+// construction (the limb's prime fits the word), so the cast is exact.
+__global__ void narrow_u64_to_u32_(uint32_t* __restrict__ dst, const uint64_t* __restrict__ src,
+                                   const size_t n) {
+    const size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = (uint32_t)src[i];
+}
+}  // namespace
+
+template <typename T>
+void Limb<T>::load_async_ptr_u64src(const void* src, size_t coeffs, cudaStream_t stream) {
+    if constexpr (sizeof(T) == sizeof(uint64_t)) {
+        cudaMemcpyAsync(v.data, src, coeffs * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+    } else {
+        // u32 limb: upload the wide payload to scratch, then narrow on device. Keeps the H2D
+        // async; the scratch is stream-ordered so it frees behind the kernel.
+        uint64_t* scratch = nullptr;
+        cudaMallocAsync(&scratch, coeffs * sizeof(uint64_t), stream);
+        cudaMemcpyAsync(scratch, src, coeffs * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+        constexpr int kThreads = 256;
+        narrow_u64_to_u32_<<<(unsigned)((coeffs + kThreads - 1) / kThreads), kThreads, 0, stream>>>(
+            reinterpret_cast<uint32_t*>(v.data), scratch, coeffs);
+        cudaFreeAsync(scratch, stream);
+    }
+}
+
 template <typename T>
 void Limb<T>::load_async_ptr(const void* src, size_t bytes, cudaStream_t stream) {
     // src must be pinned (cudaMallocHost arena) for this to be a genuinely asynchronous H2D.

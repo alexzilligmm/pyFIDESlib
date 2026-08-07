@@ -422,6 +422,27 @@ void Ciphertext::storeStaged(uint8_t* base, StagedCtMeta& m, cudaStream_t stream
     m.slots       = slots;
 }
 
+void Ciphertext::storeStagedOrdered(uint8_t* base, StagedCtMeta& m, cudaStream_t stream, int max_limbs) {
+    CKKS::SetCurrentContext(cc_);
+    // order the snapshot AFTER the producing ops (partition stream), then copy on the
+    // caller's stream — main thread never waits on the device.
+    cudaEvent_t ready = nullptr;
+    cudaEventCreateWithFlags(&ready, cudaEventDisableTiming);
+    cudaEventRecord(ready, c0.GPU.at(0).s.ptr());
+    cudaStreamWaitEvent(stream, ready, 0);
+    cudaEventDestroy(ready);
+    m.numRes = (max_limbs > 0) ? std::min(max_limbs, c0.getLevel() + 1) : (c0.getLevel() + 1);
+    m.N      = cc.N;
+    size_t cursor = 0;
+    c0.storeStaged(base, cursor, m.off0, m.len0, stream, max_limbs);
+    c1.storeStaged(base, cursor, m.off1, m.len1, stream, max_limbs);
+    m.total_bytes = cursor;
+    m.NoiseLevel  = NoiseLevel;
+    m.Noise       = NoiseFactor;
+    m.keyid       = keyID;
+    m.slots       = slots;
+}
+
 void Ciphertext::loadStaged(const uint8_t* base, const StagedCtMeta& m, cudaStream_t stream) {
     CKKS::SetCurrentContext(cc_);
     keyID = m.keyid;

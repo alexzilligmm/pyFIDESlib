@@ -185,6 +185,14 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	DecryptResult Decrypt(Ciphertext<DCRTPoly>& ct, const PrivateKey<DCRTPoly>& sk, Plaintext* pt);
 	DecryptResult Decrypt(const PrivateKey<DCRTPoly>& sk, Ciphertext<DCRTPoly>& ct, Plaintext* pt);
 
+	/// @brief Deferred-decryption pair (graph-capture magnitude probes). StoreRaw does
+	/// the D2H download NOW (the value at this instant) and nothing else — the cheap,
+	/// main-thread half. DecryptStoredRaw is pure CPU (container from a per-limb-count
+	/// prototype cache + OpenFHE decrypt) and is safe to call from worker threads
+	/// concurrently with GPU compute. The handle is an opaque RawCipherText.
+	std::shared_ptr<void> StoreRaw(const Ciphertext<DCRTPoly>& ct);
+	void DecryptStoredRaw(const std::shared_ptr<void>& raw, const PrivateKey<DCRTPoly>& sk, Plaintext* pt);
+
 	// ---- Operations ----
 
 	Ciphertext<DCRTPoly> EvalNegate(const Ciphertext<DCRTPoly>& ct);

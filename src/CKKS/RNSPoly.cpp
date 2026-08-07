@@ -2,6 +2,8 @@
 // Created by carlosad on 25/04/24.
 //
 #include <errno.h>
+#include <cstdio>    // [copy_probe] bisection
+#include <cstdlib>   // [copy_probe] bisection
 
 #include "CKKS/Context.cuh"
 #include "CKKS/KeySwitchingKey.cuh"
@@ -884,8 +886,26 @@ void RNSPoly::copy(const RNSPoly& poly) {
     }
 #endif
     //std::cout << "Copy level: " << poly.level << std::endl;
-    this->dropToLevel(poly.level);
-    this->grow(poly.level);
+    // COMPOSITE TAIL-BUG BISECTION (2026-08-04, FIDESLIB_COPY_PROBE=1). The 'invalid argument'
+    // seen on the n32 lm_head is a STICKY error first reported by copyLimb's opening
+    // Stream::wait, so it originates upstream. These probes consume the error at known points:
+    // whichever tag prints, the fault is before it.
+    if (const char* _p = std::getenv("FIDESLIB_COPY_PROBE"); _p && *_p != '0') {
+        auto tag = [&](const char* where) {
+            cudaError_t e = cudaGetLastError();
+            if (e != cudaSuccess)
+                std::fprintf(stderr, "[copy_probe] %s: %s (this=%d poly=%d)\n", where,
+                             cudaGetErrorString(e), (int)this->level, (int)poly.level);
+        };
+        tag("entry");
+        this->dropToLevel(poly.level);
+        tag("after dropToLevel");
+        this->grow(poly.level);
+        tag("after grow");
+    } else {
+        this->dropToLevel(poly.level);
+        this->grow(poly.level);
+    }
 #pragma omp parallel for num_threads(cc.GPUid.size())
     for (size_t i = 0; i < cc.GPUid.size(); ++i) {
         assert(omp_get_num_threads() == (int)cc.GPUid.size());
@@ -1081,15 +1101,25 @@ void RNSPoly::loadConstantStaged(const uint8_t* arena_base, const std::vector<si
     for (int i = 0; i < limbsize; ++i) {
         assert(moduli[i] == cc.prime.at(i).p);
         cudaSetDevice(GPU[cc.limbGPUid[i].x].device);
-        SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
-               load_async_ptr(arena_base + byte_off[i], byte_len[i], stream));
+        // Arena entries are NATIVE-width when the modulus fits 32 bits (stage_into
+        // narrows on u32 chains — entry length 4N) and u64 otherwise (8N). The 4N form
+        // matches the limb word exactly, so the raw async copy suffices; the 8N form
+        // narrows on device. Discriminate by length: coefficients per limb == cc.N.
+        if (byte_len[i] == (size_t)cc.N * sizeof(uint32_t)) {
+            SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
+                   load_async_ptr(arena_base + byte_off[i], byte_len[i], stream));
+        } else {
+            SWITCH(GPU[cc.limbGPUid[i].x].limb[cc.limbGPUid[i].y],
+                   load_async_ptr_u64src(arena_base + byte_off[i],
+                                         byte_len[i] / sizeof(uint64_t), stream));
+        }
     }
 }
 
 void RNSPoly::storeStaged(uint8_t* base, size_t& cursor, std::vector<size_t>& off,
-                          std::vector<size_t>& len, cudaStream_t stream) {
+                          std::vector<size_t>& len, cudaStream_t stream, int max_limbs) {
     assert(cc.GPUid.size() == 1);
-    const int n = level + 1;
+    const int n = (max_limbs > 0) ? std::min(max_limbs, level + 1) : (level + 1);
     off.resize(n);
     len.resize(n);
     for (int i = 0; i < n; ++i) {
@@ -1133,17 +1163,29 @@ void RNSPoly::loadStaged(const uint8_t* base, const std::vector<size_t>& off,
     }
 }
 
-void RNSPoly::loadCoeffExpand(const uint8_t* src, size_t len, int target_limbs, cudaStream_t stream) {
-    // See RNSPoly.cuh. Mirrors ModRaise's raise mechanic (INTT → grow → broadcastLimb0 → NTT),
-    // sourcing limb 0 from the pinned arena instead of an existing ciphertext limb.
+void RNSPoly::loadCoeffExpand(const uint8_t* arena, const std::vector<size_t>& off,
+                              const std::vector<size_t>& len, int src_limbs, int target_limbs,
+                              cudaStream_t stream) {
+    // See RNSPoly.cuh. Mirrors ModRaise's raise mechanic (INTT → grow → raise → NTT), sourcing
+    // the first `src_limbs` limbs from the pinned arena instead of an existing ciphertext.
+    //
+    // src_limbs == 1  : centred SwitchModulus from q0 (the classic d=1 path, unchanged).
+    // src_limbs == d  : Garner CRT via compositeModRaise — the ONLY usable form on a composite
+    //                   chain, because one 28-bit prime cannot represent a 2^54-scaled
+    //                   coefficient (see torchfhe KNOWLEDGE §11b).
     assert(cc.GPUid.size() == 1);
     assert(level == -1 && "loadCoeffExpand expects a freshly constructed poly");
     assert(target_limbs >= 1 && target_limbs - 1 <= cc.L);
-    assert(len == sizeof(uint64_t) * static_cast<size_t>(cc.N));
+    assert(src_limbs >= 1 && src_limbs <= target_limbs);
+    assert(src_limbs == 1 || src_limbs == cc.compositeDegree());
+    assert((int)off.size() >= src_limbs && (int)len.size() >= src_limbs);
 
-    grow(0, false, /*constant=*/false);   // limb 0 (q0) WITH aux — NTT/INTT need the scratch
-    cudaSetDevice(GPU[cc.limbGPUid[0].x].device);
-    SWITCH(GPU[cc.limbGPUid[0].x].limb[cc.limbGPUid[0].y], load_async_ptr(src, len, stream));
+    grow(src_limbs - 1, false, /*constant=*/false);   // limbs 0..src_limbs-1 WITH aux
+    for (int k = 0; k < src_limbs; ++k) {
+        cudaSetDevice(GPU[cc.limbGPUid[k].x].device);
+        SWITCH(GPU[cc.limbGPUid[k].x].limb[cc.limbGPUid[k].y],
+               load_async_ptr_u64src(arena + off[k], len[k] / sizeof(uint64_t), stream));
+    }
 
     // The limb kernels below run on the partition stream — bridge the upload once.
     cudaStream_t ps = GPU.at(0).s.ptr();
@@ -1155,10 +1197,13 @@ void RNSPoly::loadCoeffExpand(const uint8_t* src, size_t len, int target_limbs, 
         cudaEventDestroy(ev);   // deferred by the driver until the wait completes
     }
 
-    INTT(cc.batch, true);                             // EVAL@q0 → coefficient form
-    if (target_limbs > 1) {
+    INTT(cc.batch, true);                             // EVAL@sources → coefficient form
+    if (target_limbs > src_limbs) {
         grow(target_limbs - 1, false, /*constant=*/false);
-        broadcastLimb0();                             // centered SwitchModulus q0 → q_i
+        if (src_limbs == 1)
+            broadcastLimb0();                         // centered SwitchModulus q0 → q_i
+        else
+            coeffLiftCentered();                      // Garner + AGGREGATE centring vs Q0/2
     }
     NTT(cc.batch, true);                              // all limbs back to EVAL
 }
@@ -1222,6 +1267,27 @@ void RNSPoly::compositeModRaise() {
     for (size_t i = 0; i < cc.GPUid.size(); ++i) {
         GPU.at(i).compositeModRaise(d, qhatinv, qhat);
     }
+}
+void RNSPoly::coeffLiftCentered() {
+    const int d = cc.compositeDegree();
+    if (d != 2)
+        throw std::runtime_error("coeffLiftCentered: only composite degree 2 is implemented "
+                                 "(d=" + std::to_string(d) + "); a wider lift needs a "
+                                 "multi-word aggregate, not a u64 one");
+    assert(cc.GPUid.size() == 1 && "centred coeff lift is single-GPU only");
+
+    const int limbsize = level + 1;
+    const uint64_t q0 = cc.prime[0].p, q1 = cc.prime[1].p;
+    // q0^{-1} mod q1 by Fermat (q1 prime); Q0 = q0*q1 fits u64 for NATIVEINT<=32 primes.
+    const uint64_t q0inv = host_powmod(q0 % q1, q1 - 2, q1);
+    const __uint128_t Q0 = (__uint128_t)q0 * q1;
+    const uint64_t Qhalf = (uint64_t)(Q0 >> 1);
+    std::vector<uint64_t> Q0_mod_qi(limbsize);
+    for (int i = 0; i < limbsize; ++i)
+        Q0_mod_qi[i] = (uint64_t)(Q0 % (__uint128_t)cc.prime[i].p);
+
+    for (size_t i = 0; i < cc.GPUid.size(); ++i)
+        GPU.at(i).coeffLiftCentered(q0, q1, q0inv, Qhalf, Q0_mod_qi);
 }
 void RNSPoly::evalLinearWSum(uint32_t n, std::vector<const RNSPoly*>& vec, std::vector<uint64_t>& elem) {
 #pragma omp parallel for num_threads(cc.GPUid.size())

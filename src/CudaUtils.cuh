@@ -5,6 +5,8 @@
 #ifndef FIDESLIB_CUDAUTILS_CUH
 #define FIDESLIB_CUDAUTILS_CUH
 
+#include <cstdlib>   // _Exit
+
 //#define NCCL
 
 #include <cuda_runtime.h>
@@ -50,6 +52,15 @@ int getNumDevices();
 void CudaHostSync();
 inline void breakpoint() {}
 
+/* FATAL CUDA ERROR EXIT (2026-08-04). These three macros used `exit(0)`, which was wrong twice
+ * over: (1) it reports SUCCESS for a fatal CUDA error — the reason CLAUDE.md has to say "exit
+ * codes are NOT evidence" and gate on a PASS marker instead; and (2) exit() runs atexit hooks
+ * and static destructors, which deadlock against a CUDA context that has just died, leaving the
+ * process ALIVE and holding its whole device allocation (~40 GB of rotation keys here) until
+ * killed by PID. On a one-GPU box that silently blocks the next run.
+ * `_Exit(1)` skips all of that: the kernel reclaims the device memory immediately, and the
+ * status is finally nonzero. Diagnostics are unaffected — the backtrace and message are already
+ * printed above. */
 #define CudaCheckErrorMod                                                                    \
     do {                                                                                     \
         cudaDeviceSynchronize();                                                             \
@@ -58,7 +69,7 @@ inline void breakpoint() {}
                                                                                              \
             printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
-            exit(0);                                                                         \
+            _Exit(1); /* NOT exit(0): see note above */                                                                         \
         }                                                                                    \
     } while (0)
 
@@ -69,7 +80,7 @@ inline void breakpoint() {}
         if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled) {                    \
             printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
-            exit(0);                                                                         \
+            _Exit(1); /* NOT exit(0): see note above */                                                                         \
         }                                                                                    \
     } while (0)
 
@@ -84,7 +95,7 @@ inline void breakpoint() {}
             backtrace_symbols_fd(array, size, STDERR_FILENO);                                                     \
             printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e));                      \
             FIDESlib::breakpoint();                                                                               \
-            exit(0);                                                                                              \
+            _Exit(1); /* NOT exit(0): see note above */                                                                                              \
         }                                                                                                         \
     } while (0)
 

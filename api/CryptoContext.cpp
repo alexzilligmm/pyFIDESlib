@@ -429,11 +429,21 @@ void stage_arena_begin() {
 // arena/off/len set; on overflow/no-arena it falls back (sub_0 kept, arena=null) → pageable upload.
 // Thread-safe: the plaintext's total bytes are reserved with ONE atomic fetch_add, so an OMP team
 // can stage a block's plaintexts concurrently; the memcpys run lock-free into disjoint ranges.
-StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw) {
+StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw, bool narrow_ok = true) {
+	// NATIVE-WIDTH staging (B12-plan step 1): a limb whose modulus fits 32 bits holds
+	// residues < 2^32, so on u32 chains the arena stores 4 bytes/coefficient instead of
+	// the historical 8 — half the pinned footprint and half the H2D bytes. The loader
+	// discriminates by entry length (4N vs 8N). Chain-agnostic: on n64 every modulus is
+	// > 2^32 and the layout is byte-identical to before. `narrow_ok=false` keeps the
+	// 8-byte slot for COEFF-staged entries, whose GPU lift reads u64 lanes by contract.
 	StagedEntry e;
-	size_t		total = 0;
-	for (const auto& limb : raw.sub_0)
-		total += limb.size() * sizeof(uint64_t);
+	auto limb_bytes = [&](size_t i) {
+		const bool narrow = narrow_ok && i < raw.moduli.size() && raw.moduli[i] < (1ull << 32);
+		return raw.sub_0[i].size() * (narrow ? sizeof(uint32_t) : sizeof(uint64_t));
+	};
+	size_t total = 0;
+	for (size_t i = 0; i < raw.sub_0.size(); ++i)
+		total += limb_bytes(i);
 	bool ok = (a.base != nullptr) && total > 0;
 	if (ok) {
 		const size_t base_off = a.used.fetch_add(total, std::memory_order_relaxed);
@@ -444,9 +454,16 @@ StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw) {
 			e.off.reserve(raw.sub_0.size());
 			e.len.reserve(raw.sub_0.size());
 			size_t cur = base_off;
-			for (auto& limb : raw.sub_0) {
-				const size_t bytes = limb.size() * sizeof(uint64_t);
-				std::memcpy(a.base + cur, limb.data(), bytes);
+			for (size_t i = 0; i < raw.sub_0.size(); ++i) {
+				auto& limb		   = raw.sub_0[i];
+				const size_t bytes = limb_bytes(i);
+				if (bytes == limb.size() * sizeof(uint32_t)) {
+					auto* dst = reinterpret_cast<uint32_t*>(a.base + cur);
+					for (size_t k = 0; k < limb.size(); ++k)
+						dst[k] = (uint32_t)limb[k];
+				} else {
+					std::memcpy(a.base + cur, limb.data(), bytes);
+				}
 				e.off.push_back(cur);
 				e.len.push_back(bytes);
 				cur += bytes;
@@ -595,10 +612,34 @@ double CryptoContextImpl<DCRTPoly>::ScalingFactorReal(uint32_t level) const {
 	return cp->GetScalingFactorReal(level);
 }
 
+// Total q-limbs (PRIMES) in this context. `multiplicative_depth` counts CKKS LEVELS, and a
+// composite-scaling chain carries `d` primes per level, so `multiplicative_depth + 1` is the
+// prime count ONLY at d == 1. A coeff-staged plaintext's target_limbs is a PRIME count and
+// must therefore be derived from the element params, which are unit-correct on any chain.
+// Mixing the two made target_limbs go NEGATIVE on d=2 (26 + 1 - 34).
+// Composite degree of this context (1 on classic chains). The coeff lift stages exactly this
+// many source limbs — see MarkCoeffStaged.
+static uint32_t composite_degree_of(const std::any& cpu_ctx) {
+	const auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(cpu_ctx);
+	const auto cp = std::dynamic_pointer_cast<lbcrypto::CryptoParametersCKKSRNS>(context->GetCryptoParameters());
+	return (cp && cp->GetCompositeDegree() > 0) ? cp->GetCompositeDegree() : 1u;
+}
+static size_t total_q_limbs(const std::any& cpu_ctx) {
+	const auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(cpu_ctx);
+	return context->GetCryptoParameters()->GetElementParams()->GetParams().size();
+}
+
 void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale) {
 	auto& ptImpl = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
-	if (ptImpl->GetElement<lbcrypto::DCRTPoly>().GetAllElements().size() != 1)
-		OPENFHE_THROW("MarkCoeffStaged: expected a 1-limb (q0) host encode");
+	// The coeff lift reconstructs from the first `d` primes (Garner), so the host encode must
+	// leave exactly d limbs — one on a classic chain, the whole first-mod group on a composite
+	// one. A single 28-bit prime cannot carry a 2^54-scaled coefficient, so d=1 on a composite
+	// chain is not merely suboptimal, it is unrepresentable.
+	const uint32_t _d = composite_degree_of(this->cpu);
+	if (ptImpl->GetElement<lbcrypto::DCRTPoly>().GetAllElements().size() != _d)
+		OPENFHE_THROW("MarkCoeffStaged: expected a " + std::to_string(_d) +
+		              "-limb host encode (composite degree), got " +
+		              std::to_string(ptImpl->GetElement<lbcrypto::DCRTPoly>().GetAllElements().size()));
 	ptImpl->SetLevel(target_level);
 	ptImpl->SetScalingFactor(target_scale);
 	pt->coeff_staged = true;
@@ -724,11 +765,12 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 				if (e->arena == nullptr)
 					OPENFHE_THROW("LoadPlaintext: coeff-staged plaintext overflowed the persistent arena");
 				e->coeff		= true;
-				e->target_limbs = static_cast<int>(this->multiplicative_depth + 1 - pt->GetLevel());
+				e->target_limbs = static_cast<int>(total_q_limbs(this->cpu) - pt->GetLevel());
 			}
 		}
 		if (e->coeff) {
-			gpu_pt->loadCoeffExpand(e->meta, e->arena + e->off[0], e->len[0], e->target_limbs, load_stream);
+			gpu_pt->loadCoeffExpand(e->meta, e->arena, e->off, e->len,
+			                        (int)composite_degree_of(this->cpu), e->target_limbs, load_stream);
 		} else if (e->arena != nullptr) {
 			gpu_pt->loadStaged(e->meta, e->arena, e->off, e->len, load_stream);
 		} else if (load_stream != nullptr) {
@@ -766,13 +808,13 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 	}
 
 	if (have_staged && staged.coeff) {
-		gpu_pt->loadCoeffExpand(staged.meta, staged.arena + staged.off[0], staged.len[0],
-								staged.target_limbs, load_stream);
+		gpu_pt->loadCoeffExpand(staged.meta, staged.arena, staged.off, staged.len,
+								(int)composite_degree_of(this->cpu), staged.target_limbs, load_stream);
 	} else if (have_staged && staged.arena != nullptr) {
 		gpu_pt->loadStaged(staged.meta, staged.arena, staged.off, staged.len, load_stream);
 	} else {
-		// A coeff-marked plaintext carries only its q0 limb — it MUST come through the staged
-		// path (a plain 1-limb upload at a claimed deeper level would be silently wrong).
+		// A coeff-marked plaintext carries only its first d limbs — it MUST come through the
+		// staged path (a plain short upload at a claimed deeper level would be silently wrong).
 		if (pt->coeff_staged)
 			OPENFHE_THROW("LoadPlaintext: coeff-staged plaintext has no staged entry (consumed "
 						  "twice, or staged before the arena was armed) — this is a bug");
@@ -824,12 +866,15 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 	auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& ptImpl = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
-	if (pt->coeff_staged && raw.numRes != 1)
-		OPENFHE_THROW("ExtractRawPlaintext: coeff-staged plaintext must carry exactly one (q0) limb");
+	if (pt->coeff_staged && raw.numRes != (int)composite_degree_of(this->cpu))
+		OPENFHE_THROW("ExtractRawPlaintext: coeff-staged plaintext must carry exactly composite_degree limbs");
 	// Stage into the pinned arena (host memcpy on this worker — overlapped, no CUDA call) when
-	// FHE_PIN_STAGE; else stash the raw for a pageable upload.
-	std::any entry = fhe_pin_stage() ? std::any(stage_raw(std::move(raw)))
-									 : std::any(std::move(raw));
+	// FHE_PIN_STAGE; else stash the raw for a pageable upload. Coeff-staged entries keep the
+	// 8-byte slot (their GPU lift reads u64 lanes by contract — see stage_into narrow_ok).
+	const bool narrow_ok = !pt->coeff_staged;
+	std::any entry = fhe_pin_stage()
+		? std::any(stage_into(g_stage_arena[g_stage_cur], std::move(raw), narrow_ok))
+		: std::any(std::move(raw));
 	if (pt->coeff_staged) {
 		if (entry.type() != typeid(StagedEntry) || std::any_cast<const StagedEntry&>(entry).arena == nullptr)
 			OPENFHE_THROW("ExtractRawPlaintext: coeff-staged plaintext requires the pinned arena "
@@ -837,7 +882,7 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 		StagedEntry& se = std::any_cast<StagedEntry&>(entry);
 		se.coeff		= true;
 		// pt->GetLevel() reports the TARGET level (MarkCoeffStaged); limbs = depth+1 - level.
-		se.target_limbs = static_cast<int>(this->multiplicative_depth + 1 - pt->GetLevel());
+		se.target_limbs = static_cast<int>(total_q_limbs(this->cpu) - pt->GetLevel());
 	}
 	// FHE_STAGE_RELEASE_CPU: once the limbs live in the pinned arena, the OpenFHE-side DCRTPoly is
 	// redundant (~4-6 MB/pt; a ViT block is ~65 GB) — drop it so staged blocks don't double-hold
@@ -1469,6 +1514,160 @@ DecryptResult CryptoContextImpl<DCRTPoly>::Decrypt(const PrivateKey<DCRTPoly>& s
 	return Decrypt(ct, sk, pt);
 }
 
+namespace {
+// Pinned snapshot ring for async magnitude capture. Ciphertext::store() drains the
+// whole DEVICE twice per call (~11 ms/node measured — THE capture wall); storeStaged
+// is a genuinely async D2H into pinned memory. Fixed-size slots + freelist; the
+// producer only enqueues copies and records an event, the decrypt worker waits the
+// event and reconstructs the RawCipherText host-side.
+struct MagSnap {
+	FIDESlib::CKKS::StagedCtMeta meta;
+	size_t		slot_off = 0;
+	int			slot_idx = -1;
+	cudaEvent_t ev		 = nullptr;
+	bool		cpu_only = false;
+	FIDESlib::CKKS::RawCipherText cpu_raw;   // fallback for non-GPU cts
+};
+struct MagRing {
+	uint8_t*		 base = nullptr;
+	size_t			 slot_bytes = 0;
+	int				 nslots		= 0;
+	std::vector<int> freelist;
+	std::mutex		 mtx;
+	std::condition_variable cv;
+	cudaStream_t	 stream = nullptr;
+	void init(size_t slot_bytes_) {
+		if (base) return;
+		const char* e  = std::getenv("FHE_MAG_RING_GB");
+		const size_t gb = (e && *e && std::atoi(e) > 0) ? (size_t)std::atoi(e) : 6;
+		slot_bytes		= slot_bytes_;
+		nslots			= (int)std::max<size_t>(4, (gb << 30) / slot_bytes);
+		cudaMallocHost(&base, (size_t)nslots * slot_bytes);
+		for (int i = nslots - 1; i >= 0; --i)
+			freelist.push_back(i);
+		cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+	}
+	int acquire() {
+		std::unique_lock<std::mutex> lk(mtx);
+		cv.wait(lk, [&] { return !freelist.empty(); });
+		int s = freelist.back();
+		freelist.pop_back();
+		return s;
+	}
+	void release(int s) {
+		{
+			std::lock_guard<std::mutex> lk(mtx);
+			freelist.push_back(s);
+		}
+		cv.notify_one();
+	}
+};
+MagRing g_mag_ring;
+}	// namespace
+
+std::shared_ptr<void> CryptoContextImpl<DCRTPoly>::StoreRaw(const Ciphertext<DCRTPoly>& ct) {
+	auto snap = std::shared_ptr<MagSnap>(new MagSnap(), [](MagSnap* s) {
+		if (s->ev) cudaEventDestroy(s->ev);
+		if (s->slot_idx >= 0) g_mag_ring.release(s->slot_idx);
+		delete s;
+	});
+	if (ct->loaded) {
+		auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+		// FHE_MAG_TRUNC=1 (EXPERIMENTAL, currently REFUTED): snapshot only 2·d·deg
+		// towers. Measured 2026-08-05: 11% of nodes disagree >1% with the full decode
+		// across all op classes (worst: wrap by 1e39) — mechanism not yet understood,
+		// so full snapshots are the default and the cross-check gate stays mandatory
+		// before ever flipping this on.
+		static const bool trunc = [] {
+			const char* e = std::getenv("FHE_MAG_TRUNC");
+			return e && *e && std::atoi(e) != 0;
+		}();
+		const int deg  = std::max(1, ct_gpu->NoiseLevel);
+		const int keep = trunc ? std::max(2, 2 * (int)composite_degree_of(this->cpu) * deg) : -1;
+		const size_t slot_limbs = trunc ? (size_t)std::max(2, 4 * (int)composite_degree_of(this->cpu))
+										: (size_t)(ct_gpu->cc.L + 1 + ct_gpu->cc.K + 1);
+		g_mag_ring.init((size_t)2 * slot_limbs * ct_gpu->cc.N * sizeof(uint64_t));
+		snap->slot_idx = g_mag_ring.acquire();
+		snap->slot_off = (size_t)snap->slot_idx * g_mag_ring.slot_bytes;
+		ct_gpu->storeStagedOrdered(g_mag_ring.base + snap->slot_off, snap->meta, g_mag_ring.stream, keep);
+		cudaEventCreateWithFlags(&snap->ev, cudaEventDisableTiming);
+		cudaEventRecord(snap->ev, g_mag_ring.stream);
+	} else {
+		snap->cpu_only	  = true;
+		snap->cpu_raw.numRes = 0;   // DecryptStoredRaw refuses
+	}
+	return snap;
+}
+
+void CryptoContextImpl<DCRTPoly>::DecryptStoredRaw(const std::shared_ptr<void>& raw_in,
+												   const PrivateKey<DCRTPoly>& sk, Plaintext* pt) {
+	auto snap = std::static_pointer_cast<MagSnap>(raw_in);
+	if (!snap || snap->cpu_only) {
+		OPENFHE_THROW("DecryptStoredRaw: empty snapshot (ct was not GPU-resident at StoreRaw)");
+	}
+	// Wait for the async D2H (worker blocks; the producer never did), then rebuild the
+	// RawCipherText host-side: the staged bytes are each limb's device words verbatim
+	// (native width — widen u32 lanes), the same content Ciphertext::store() emits.
+	cudaEventSynchronize(snap->ev);
+	auto raw	= std::make_shared<FIDESlib::CKKS::RawCipherText>();
+	raw->numRes = snap->meta.numRes;
+	raw->N		= snap->meta.N;
+	raw->Noise	= snap->meta.Noise;
+	raw->NoiseLevel = snap->meta.NoiseLevel;
+	raw->keyid	= snap->meta.keyid;
+	raw->slots	= snap->meta.slots;
+	auto widen = [&](const std::vector<size_t>& off, const std::vector<size_t>& len,
+					 std::vector<std::vector<uint64_t>>& sub) {
+		sub.resize(off.size());
+		for (size_t i = 0; i < off.size(); ++i) {
+			const uint8_t* src = g_mag_ring.base + snap->slot_off + off[i];
+			if (len[i] == (size_t)snap->meta.N * sizeof(uint32_t)) {
+				const auto* s32 = reinterpret_cast<const uint32_t*>(src);
+				sub[i].resize(snap->meta.N);
+				for (int k = 0; k < snap->meta.N; ++k)
+					sub[i][k] = s32[k];
+			} else {
+				sub[i].assign(reinterpret_cast<const uint64_t*>(src),
+							  reinterpret_cast<const uint64_t*>(src) + len[i] / sizeof(uint64_t));
+			}
+		}
+	};
+	widen(snap->meta.off0, snap->meta.len0, raw->sub_0);
+	widen(snap->meta.off1, snap->meta.len1, raw->sub_1);
+
+	// (The magnitude-only tower truncation happens at STORE time, deg-aware — see
+	// StoreRaw. The snapshot already holds exactly the towers to decode.)
+	auto& context = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
+	auto& skImpl  = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(sk->pimpl);
+
+	// Container prototypes per limb count (GetOpenFHECipherText truncates raw to the
+	// container size). Encrypt once per distinct count, Clone per call — all CPU.
+	static std::mutex proto_mtx;
+	static std::map<int, lbcrypto::Ciphertext<lbcrypto::DCRTPoly>> protos;
+	lbcrypto::Ciphertext<lbcrypto::DCRTPoly> holder;
+	{
+		std::lock_guard<std::mutex> lk(proto_mtx);
+		auto it = protos.find(raw->numRes);
+		if (it == protos.end()) {
+			std::vector<double> dummy(1, 0.0);
+			// OpenFHE's encode `level` counts primes dropped: total - numRes.
+			const int total = (int)context->GetCryptoParameters()->GetElementParams()->GetParams().size();
+			auto pt_dummy = context->MakeCKKSPackedPlaintext(dummy, 1, std::max(0, total - (int)raw->numRes));
+			it = protos.emplace(raw->numRes, context->Encrypt(skImpl, pt_dummy)).first;
+		}
+		holder = it->second->Clone();
+	}
+	FIDESlib::CKKS::GetOpenFHECipherText(holder, *raw);
+
+	lbcrypto::Plaintext ptImpl;
+	context->Decrypt(skImpl, holder, &ptImpl);
+
+	*pt			  = std::make_shared<PlaintextImpl>();
+	(*pt)->cpu	  = std::make_any<lbcrypto::Plaintext>(std::move(ptImpl));
+	(*pt)->loaded = false;
+	(*pt)->gpu	  = 0;
+}
+
 // ---- Operations ----
 
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalNegate(const Ciphertext<DCRTPoly>& ct) {
@@ -2004,9 +2203,23 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(const Ciphertext<DCRT
 	}
 
 	// GPU path.
+	// TAIL-BUG BISECTION (2026-08-04, FIDESLIB_COPY_PROBE=1). [copy_probe] proved the sticky
+	// 'invalid argument' is already set by the time MakeGpuResultLike runs, so it comes from one
+	// of the three loads below. Each tag consumes the error, so the FIRST tag that prints owns it.
+	auto _mp = [&](const char* where) {
+		static const bool on = [] { const char* e = std::getenv("FIDESLIB_COPY_PROBE"); return e && *e != '0'; }();
+		if (!on) return;
+		cudaError_t e = cudaGetLastError();
+		if (e != cudaSuccess)
+			std::fprintf(stderr, "[mult_probe] %s: %s\n", where, cudaGetErrorString(e));
+	};
+	_mp("evalmult entry");
 	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct1));
+	_mp("after LoadCiphertext");
 	this->LoadPlaintext(pt);
+	_mp("after LoadPlaintext");
 	this->WaitPlaintextReady(pt->gpu);
+	_mp("after WaitPlaintextReady");
 
 	Ciphertext<DCRTPoly> result = this->MakeGpuResultLike(ct1);
 	auto res_gpu				= std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu));

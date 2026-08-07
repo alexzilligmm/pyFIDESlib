@@ -3058,6 +3058,38 @@ void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& 
                                                                                            dev_qhatinv, dev_qhat);
     cudaFreeAsync(snap, s.ptr());
 }
+void LimbPartition::coeffLiftCentered(const uint64_t q0, const uint64_t q1,
+                                      const uint64_t q0inv_mod_q1, const uint64_t Qhalf,
+                                      const std::vector<uint64_t>& Q0_mod_qi) {
+    const int limbsize = getLimbSize(*level);
+    cudaSetDevice(device);
+    assert(limbsize > 2);
+    assert((int)Q0_mod_qi.size() >= limbsize);
+
+    // Same snapshot discipline as compositeModRaise: the kernel overwrites EVERY limb including
+    // the two sources, so copy them aside first. Slots are 8*N bytes regardless of limb width.
+    const size_t slot = (size_t)cc.N * sizeof(uint64_t);
+    uint8_t* snap;
+    cudaMallocAsync(&snap, 2 * slot + 2 * sizeof(void*) + Q0_mod_qi.size() * sizeof(uint64_t), s.ptr());
+    void** srcptrs = (void**)(snap + 2 * slot);
+    uint64_t* dev_Q0mod = (uint64_t*)(srcptrs + 2);
+
+    std::vector<void*> hostptrs(2);
+    for (int k = 0; k < 2; ++k) {
+        hostptrs[k] = snap + (size_t)k * slot;
+        void* v = nullptr;
+        SWITCH_RET(limb.at(k), v.data, v);
+        const size_t bytes = (size_t)cc.N * (limb.at(k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
+        cudaMemcpyAsync(hostptrs[k], v, bytes, cudaMemcpyDeviceToDevice, s.ptr());
+    }
+    cudaMemcpyAsync(srcptrs, hostptrs.data(), 2 * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_Q0mod, Q0_mod_qi.data(), Q0_mod_qi.size() * sizeof(uint64_t),
+                    cudaMemcpyHostToDevice, s.ptr());
+
+    coeffLiftCentered2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
+        limbptr.data, srcptrs, q0, q1, q0inv_mod_q1, Qhalf, dev_Q0mod);
+    cudaFreeAsync(snap, s.ptr());
+}
 void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights) {
     const int limbsize = getLimbSize(*level);
     cudaSetDevice(device);

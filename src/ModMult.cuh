@@ -223,6 +223,10 @@ __forceinline__ __device__ uint64_t modmult(const uint64_t a, const uint64_t b, 
     return res;
 }
 
+// Forward declaration: the wide-prime guard in modmult() below needs this, and its definition
+// sits with the other reducers further down.
+__forceinline__ __device__ uint32_t modreduce_lazy(const uint64_t a, const int primeid);
+
 template <ALGO algo>
 __device__ uint32_t modmult(const uint32_t a, const uint32_t b, const int primeid, const uint32_t shoup_b) {
     const uint32_t p = C_.primes[primeid];
@@ -232,7 +236,20 @@ __device__ uint32_t modmult(const uint32_t a, const uint32_t b, const int primei
     } else if constexpr (algo == 3) {
         res = Shoup_mult_32(a, b, shoup_b, p);
     } else if constexpr (algo == 4) {
-        res = Neal_mult_32(a, b, C_.prime_better_barret_mu[primeid], p, C_.prime_bits[primeid]);
+        // Same wide-prime guard as modreduce: Neal_mult_32 reduces its own a*b product with the
+        // identical ~2^56-bounded shape, so a 30x30 product (2^60) is out of envelope. Reduce the
+        // exact 64-bit product instead — modreduce_lazy is exact over the whole u64 range.
+        // Prefer SHOUP on wide primes when the caller supplied a precomputed psi (the 4-arg
+        // form: NTT twiddles, key/plaintext constants) — it is two multiplies and needs only
+        // prime < 2^31, so it is both cheaper and in-envelope at 30 bits. It is NOT a blanket
+        // substitute: `shoup_b` DEFAULTS TO 0, and the 3-arg call sites (NTT.cu eot_tw x
+        // eot_step, NTThelper, Rescale's b==1 pure-reduction use) multiply two runtime values
+        // with no psi to precompute — Shoup against a zero psi is silently wrong. Those take
+        // the exact 64-bit-product reduction instead.
+        res = (C_.prime_bits[primeid] > 28)
+                  ? (shoup_b ? Shoup_mult_32(a, b, shoup_b, p)
+                             : modreduce_lazy((uint64_t)a * (uint64_t)b, primeid))
+                  : Neal_mult_32(a, b, C_.prime_better_barret_mu[primeid], p, C_.prime_bits[primeid]);
     } else {
         res = (uint64_t)a * (uint64_t)b % (uint64_t)p;
     }
@@ -309,7 +326,16 @@ __device__ uint32_t modreduce(const uint64_t a, const int primeid) {
     if constexpr (algo >= 0 && algo <= 2) {
         res = a % C_.primes[primeid];
     } else if constexpr (algo == 3 || algo == 4) {
-        res = Neal_reduce_32(a, C_.prime_better_barret_mu[primeid], C_.primes[primeid], C_.prime_bits[primeid]);
+        // WIDE-PRIME GUARD (2026-08-04). Neal_reduce_32's `rx = c >> (qbit-2)` / `rx << (30-qbit)`
+        // shape bounds its INPUT at ~2^56 — exactly one 28x28 product. A chain with primes wider
+        // than 28 bits (FIRST_MOD_BITS=60 on d=2 gives two 30-bit primes) feeds it up to 2^60 and
+        // it returns silent garbage. modreduce_lazy is exact for ANY a < 2^64 and is already the
+        // reducer the lazy-BConv path uses, so route only the wide primes there. The branch is
+        // warp-uniform (primeid is uniform per block) and touches 2 of ~54 primes.
+        res = (C_.prime_bits[primeid] > 28)
+                  ? modreduce_lazy(a, primeid)
+                  : Neal_reduce_32(a, C_.prime_better_barret_mu[primeid], C_.primes[primeid],
+                                   C_.prime_bits[primeid]);
     } else {
         assert("fp64 reduce not implemented" == nullptr);
     }

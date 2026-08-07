@@ -40,6 +40,15 @@ __global__ void broadcastLimb0_mgpu(void** a, const __grid_constant__ int primei
  *  i.e. OpenFHE's ExtendCiphertext CRT recomposition ([a]_{q0q1} = [a*q1^-1]_{q0}*q1 + ...).
  *  src must NOT alias a (the low limbs of a are overwritten) — pass snapshot copies.
  *  qhatinv[k] = (Q0/q_k)^{-1} mod q_k;  qhat[k*limbs+i] = (Q0/q_k) mod q_i. */
+// Centred-aggregate CRT lift for coeff plaintexts (d==2). Unlike compositeModRaise_, which
+// centres each Garner term against its own prime, this centres the RECONSTRUCTED TOTAL
+// against Q0/2 — required when the encoded integer spans the product of the source primes.
+__global__ void coeffLiftCentered2_(void** a, void** src, const __grid_constant__ uint64_t q0,
+                                    const __grid_constant__ uint64_t q1,
+                                    const __grid_constant__ uint64_t q0inv_mod_q1,
+                                    const __grid_constant__ uint64_t Qhalf,
+                                    const uint64_t* Q0_mod_qi);
+
 __global__ void compositeModRaise_(void** a, void** src, const __grid_constant__ int d, const uint64_t* qhatinv,
                                    const uint64_t* qhat);
 __global__ void copy_(void** a, void** b);

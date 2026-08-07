@@ -166,6 +166,9 @@ void FIDESlib::CKKS::BootstrapCPUraise(
         double k = cc.GetBootK();
 
         double constantEvalMult = pre * (1.0 / (k * cc.N));
+        // Free per-call input pre-scale (Context.cuh btsPreScale): rides the arbitrary
+        // double the input is multiplied by anyway. Any restore is the caller's business.
+        constantEvalMult *= cc.getBtsPreScale();
 
         if constexpr (PRINT)
             std::cout << "mult: " << constantEvalMult << std::endl;
@@ -360,6 +363,10 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
             constantEvalMult = pre * (1.0 / (k * cc.N) / 32);
         }
         */
+
+        // Free per-call input pre-scale (Context.cuh btsPreScale): rides the arbitrary
+        // double the input is multiplied by anyway. Any restore is the caller's business.
+        constantEvalMult *= cc.getBtsPreScale();
 
         if constexpr (PRINT)
             std::cout << "mult: " << constantEvalMult << std::endl;
@@ -572,6 +579,25 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         cudaDeviceSynchronize();
         CudaCheckErrorMod;
     }
+    // Entry state, captured BEFORE the pending-rescale drain below: the [bts_sf] line needs
+    // to say what came IN, not what the drain left. deg=2 inputs are the n32 norm (1648 of
+    // 1687 probed values), so "which deg was this bootstrap handed" is the first question.
+    const int entry_noise_level = ctxt.NoiseLevel;
+    const int entry_level = ctxt.getLevel();
+    // FLEXIBLEAUTO's standing invariant is NoiseFactor == sfAtLimb(level). `drift` is how many
+    // BITS it is violated by — and (see the [bts_sf] note below) exactly the power of two the
+    // adjust then scales the message by. Read ScalingFactorReal directly, NOT sfAtLimb(): the
+    // latter aborts on an off-grid level, and off-grid is one of the states we want to SEE.
+    if (std::getenv("BTS_SF_DEBUG")) {
+        const bool grid = ((cc.L - entry_level) % cc.compositeDegree()) == 0;
+        const double sfl = cc.param.ScalingFactorReal[entry_level];
+        fprintf(stderr, "[bts_entry] lvl=%d deg=%d on_grid=%d prescaled=%d log2NF=%.4f "
+                        "log2sf=%.4f drift=%.4f\n",
+                entry_level, entry_noise_level, (int)grid, (int)prescaled,
+                log2(ctxt.NoiseFactor), grid ? log2(sfl) : NAN,
+                grid ? log2(ctxt.NoiseFactor / sfl) : NAN);
+        fflush(stderr);
+    }
     if (ctxt.NoiseLevel == 2)
         ctxt.rescale();
     if constexpr (PRINT) {
@@ -610,11 +636,25 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         adjustmentFactor *= pow;
         if constexpr (PRINT)
             std::cout << adjustmentFactor << std::endl;
-        if (std::getenv("BTS_SF_DEBUG"))
-            printf("[bts_sf] towers=%u log2(targetSF)=%.4f log2(sourceSF)=%.4f "
-                   "log2(modToDrop)=%.4f corr=%u log2(adj)=%.4f\n",
-                   numTowers, log2(targetSF), log2(sourceSF), log2(modToDrop),
-                   correction, log2(adjustmentFactor));
+        if (std::getenv("BTS_SF_DEBUG")) {
+            // encSF is the scale the multScalar below actually encodes `adjustmentFactor` at
+            // (Ciphertext::multScalarNoPrecheck -> cc.ElemForEvalMult(c0.getLevel(), c) and
+            // NoiseFactor *= cc.sfAtLimb(getLevel())). The adjustmentFactor formula divides by
+            // sourceSF TWICE, which is only equivalent to dividing by (sourceSF * encSF) when
+            // the FLEXIBLEAUTO invariant NoiseFactor == sfAtLimb(level) holds at this point.
+            // `skew` is exactly the factor a violated invariant multiplies the message by.
+            const bool on_grid = ((cc.L - ctxt.getLevel()) % cc.compositeDegree()) == 0;
+            const double encSF = on_grid ? cc.sfAtLimb(ctxt.getLevel()) : 0.0;
+            fprintf(stderr,
+                    "[bts_sf] entry_lvl=%d entry_deg=%d lvl=%d towers=%u "
+                    "log2(targetSF)=%.4f log2(sourceSF)=%.4f log2(encSF)=%.4f "
+                    "log2(skew=sourceSF/encSF)=%.4f log2(modToDrop)=%.4f corr=%u log2(adj)=%.4f\n",
+                    entry_level, entry_noise_level, ctxt.getLevel(), numTowers,
+                    log2(targetSF), log2(sourceSF), on_grid ? log2(encSF) : NAN,
+                    on_grid ? log2(sourceSF / encSF) : NAN, log2(modToDrop),
+                    correction, log2(adjustmentFactor));
+            fflush(stderr);
+        }
 
         if (!prescaled) {
             if constexpr (PRINT) {

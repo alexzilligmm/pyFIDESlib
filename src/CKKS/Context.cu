@@ -875,6 +875,14 @@ int ContextData::getCorrectionFactorOverride() const {
     return correctionFactorOverride;
 }
 
+void ContextData::setBtsPreScale(const double f) {
+    btsPreScale = f;
+}
+
+double ContextData::getBtsPreScale() const {
+    return btsPreScale;
+}
+
 double ContextData::sfAtLimb(const int limbTop) const {
     if ((L - limbTop) % param.compositeDegree != 0) {
         std::fprintf(stderr,

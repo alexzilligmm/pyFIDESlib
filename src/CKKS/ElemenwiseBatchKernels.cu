@@ -201,6 +201,45 @@ __global__ void broadcastLimb0_(void** a) {
     broadcastLimb0Body(a[0], a[primeid], idx, primeid);
 }
 
+// CENTRED multi-limb CRT lift for COEFF-encoded plaintexts (d == 2).
+//
+// Why this is NOT compositeModRaise_: that kernel centres each Garner TERM against its own q_k
+// (SwitchModulus's halfQ = source prime >> 1), which is right for ModRaise — whose input really
+// is small relative to q0 — but wrong here. The whole point of a d-limb coeff lift is that the
+// encoded integer m spans the PRODUCT Q0 = q0*q1, so the AGGREGATE must be centred against
+// Q0/2, not each term against its own prime. Getting this wrong is silent: the reconstruction
+// returns a plausible but wrong plaintext.
+//
+// Exact in u64: t1 < q1 and q0 < 2^32 (NATIVEINT bound), so M = r0 + t1*q0 < Q0 <= 2^60.
+// Grid: {N/threads, limbs}; src[k] is a raw snapshot of source limb k.
+__global__ void coeffLiftCentered2_(void** a, void** src, const __grid_constant__ uint64_t q0,
+                                    const __grid_constant__ uint64_t q1,
+                                    const __grid_constant__ uint64_t q0inv_mod_q1,
+                                    const __grid_constant__ uint64_t Qhalf,
+                                    const uint64_t* Q0_mod_qi) {
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const int primeid = blockIdx.y;
+
+    const uint64_t r0 = ISU64(0) ? ((const uint64_t*)src[0])[idx]
+                                 : (uint64_t)((const uint32_t*)src[0])[idx];
+    const uint64_t r1 = ISU64(1) ? ((const uint64_t*)src[1])[idx]
+                                 : (uint64_t)((const uint32_t*)src[1])[idx];
+
+    // Garner: t1 = (r1 - r0) * q0^{-1} mod q1, then M = r0 + t1*q0 in [0, Q0).
+    const uint64_t r0m  = r0 % q1;
+    const uint64_t diff = (r1 >= r0m) ? (r1 - r0m) : (r1 + q1 - r0m);
+    const uint64_t t1   = (uint64_t)(((__uint128_t)diff * q0inv_mod_q1) % q1);
+    const uint64_t M    = r0 + t1 * q0;
+
+    const uint64_t qi = C_.primes[primeid];
+    uint64_t v = M % qi;
+    if (M > Qhalf)                       // negative representative: subtract Q0
+        v = (v + qi - Q0_mod_qi[primeid]) % qi;
+
+    if (ISU64(primeid)) ((uint64_t*)a[primeid])[idx] = v;
+    else                ((uint32_t*)a[primeid])[idx] = (uint32_t)v;
+}
+
 // COMPOSITESCALING ModRaise (see header). Grid: {N/threads, limbs}; src[k] holds a SNAPSHOT
 // of source limb k's coefficients (raw device copy, width of prime k). All arithmetic is
 // width-branched per prime; the accumulator uses the TARGET prime's width.
