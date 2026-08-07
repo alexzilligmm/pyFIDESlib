@@ -1,6 +1,13 @@
 //
 // Created by carlosad on 2/05/24.
 //
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <mutex>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -351,9 +358,20 @@ std::vector<std::vector<int>> ContextData::generateGPUdigits(const int dnum, con
     return res;
 }
 
+/* S7 thread-safety, ported to the paper pin (upstream e3a8f63): the workspace
+ * lazy-init raced make_unique from two host threads -> heap corruption (the
+ * threaded-prefill segfault class). Construction is mutex-guarded with a
+ * double-checked null; the hot path pays only the null check. Upstream's
+ * pool/TLS slot machinery (built for its two-ct experiments) is NOT ported —
+ * structures stay exactly the pin's. */
+static std::mutex ks_aux_init_mtx;
+
 RNSPoly& ContextData::getKeySwitchAux() {
-    if (key_switch_aux == nullptr)
-        key_switch_aux = std::make_unique<RNSPoly>(*this, L, false);
+    if (key_switch_aux == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (key_switch_aux == nullptr)
+            key_switch_aux = std::make_unique<RNSPoly>(*this, L, false);
+    }
 
     key_switch_aux->generateDecompAndDigit(false);
     key_switch_aux->generateSpecialLimbs(false, false);
@@ -361,18 +379,25 @@ RNSPoly& ContextData::getKeySwitchAux() {
 }
 
 RNSPoly& ContextData::getKeySwitchAux2() {
-    if (key_switch_aux2 == nullptr)
-        key_switch_aux2 = std::make_unique<RNSPoly>(*this, L, false);
+    if (key_switch_aux2 == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (key_switch_aux2 == nullptr)
+            key_switch_aux2 = std::make_unique<RNSPoly>(*this, L, false);
+    }
     key_switch_aux2->generateDecompAndDigit(false);
     key_switch_aux2->generateSpecialLimbs(false, false);
     return *key_switch_aux2;
 }
 
 RNSPoly& ContextData::getModdownAux(const int num) {
-    if (moddown_aux[num % moddown_aux.size()] == nullptr)
-        moddown_aux[num % moddown_aux.size()] = std::make_unique<RNSPoly>(*this, L, false);
-    moddown_aux[num % moddown_aux.size()]->generateSpecialLimbs(false, true);
-    return *moddown_aux[num % moddown_aux.size()];
+    auto& p = moddown_aux[num % moddown_aux.size()];
+    if (p == nullptr) {
+        std::lock_guard<std::mutex> g(ks_aux_init_mtx);
+        if (p == nullptr)
+            p = std::make_unique<RNSPoly>(*this, L, false);
+    }
+    p->generateSpecialLimbs(false, true);
+    return *p;
 }
 std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double operand, int level_in) {
 
@@ -919,8 +944,13 @@ bool ContextData::hasAuxilarPoly() const {
     return precom.auxPoly.empty();
 }
 
-RNSPoly ContextData::getAuxilarPoly() {
+// S7 thread-safety: every Ciphertext construction pops this shared pool; two host
+// threads racing the unlocked pop/push double-moved RNSPolys (heap corruption behind
+// the two-ct segfault). Cold path, plain mutex.
+static std::mutex aux_poly_mtx;
 
+RNSPoly ContextData::getAuxilarPoly() {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
     if (precom.auxPoly.empty()) {
         return RNSPoly(*this);
     } else {
@@ -931,6 +961,7 @@ RNSPoly ContextData::getAuxilarPoly() {
 }
 
 void ContextData::returnAuxilarPoly(RNSPoly&& c) {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
     precom.auxPoly.emplace_back(std::move(c));
 }
 

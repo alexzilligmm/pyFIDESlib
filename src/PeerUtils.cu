@@ -8,6 +8,18 @@
 
 #include "CudaUtils.cuh"
 
+// ── CUDA 13 graph-API compatibility ────────────────────────────────────────
+// CUDA 13 promoted the edge-data ("_v2") forms of the graph dependency calls to
+// the base names, so every call here is one argument short. These shims splice
+// in a null edgeData at the right position; pre-13 toolkits compile unchanged.
+#if CUDART_VERSION >= 13000
+#define cudaStreamGetCaptureInfo(s, st, id, g, d, n) cudaStreamGetCaptureInfo(s, st, id, g, d, nullptr, n)
+#define cudaStreamUpdateCaptureDependencies(s, d, n, f) cudaStreamUpdateCaptureDependencies(s, d, nullptr, n, f)
+#define cudaGraphNodeGetDependencies(node, p, n) cudaGraphNodeGetDependencies(node, p, nullptr, n)
+#define cudaGraphNodeGetDependentNodes(node, p, n) cudaGraphNodeGetDependentNodes(node, p, nullptr, n)
+#define cudaGraphAddDependencies(g, from, to, n) cudaGraphAddDependencies(g, from, to, nullptr, n)
+#endif
+
 std::vector<cudaGraphNode_t> get_current_capture_dependencies(cudaStream_t s) {
     cudaStreamCaptureStatus status;
     cudaGraphNode_t* depNodes = nullptr;

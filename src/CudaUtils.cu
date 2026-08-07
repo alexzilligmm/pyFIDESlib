@@ -24,7 +24,23 @@ nvtx3::domain const& D = nvtx3::domain::get<my_domain>();
 
 std::map<std::string, std::pair<std::unique_ptr<nvtx3::unique_range_in<my_domain>>, int>> lifetimes_map;
 
+/* FIDESLIB_NVTX (default 0): NVTX ranges are a profiling aid, but they were also the last
+ * un-audited SHARED-STATE writer on the two-ct path — the LIFETIME category mutates the
+ * unguarded `lifetimes_map` std::map on every Ciphertext construction/destruction, so two
+ * host threads corrupt the map (S7/FAILURE 2.33 class). Gated off by default; opt in with
+ * FIDESLIB_NVTX=1 for single-threaded nsys runs. (Ported from rational32, where the same
+ * gate measured wall-NEUTRAL — this is a correctness/hygiene gate, not a perf lever.) */
+bool cudaNvtxEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_NVTX");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
 void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
+    if (!cudaNvtxEnabled())
+        return;
 
     if (cat == FUNCTION) {
         using namespace nvtx3;
@@ -57,6 +73,8 @@ void CudaNvtxStart(const std::string msg, NVTX_CATEGORIES cat, int val) {
 }
 
 void CudaNvtxStop(const std::string msg, NVTX_CATEGORIES cat) {
+    if (!cudaNvtxEnabled())
+        return;
     if (cat == FUNCTION) {
         nvtxDomainRangePop(D);
     } else if (cat == LIFETIME) {
@@ -332,6 +350,11 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
     }
 
     if (cache && (bytes & (bytes - 1)) == 0) {
+        // S7 thread-safety (2026-08-03): the WHOLE pooled path holds the lock — the map
+        // operator[] (node insert), the empty-check/refill/pop sequence and the shared
+        // per-id event were all racy under concurrent host threads. Cold path; the lock
+        // is nanoseconds against a 28 ms bootstrap.
+        std::lock_guard<std::mutex> guard(mempool_lock[id]);
         std::vector<void*>& free_limb = size_to_memory[id][bytes];
 
         if (s[id].ptr() == nullptr) {
@@ -342,11 +365,9 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
             uint64_t* base;
             cudaMallocAsync(&base, MBs * 1024 * 1024, s[id].ptr());
 
-            mempool_lock[id].lock();
             for (int i = 0; i < MBs * 1024 * 1024; i += bytes) {
                 free_limb.emplace_back(((char*)base) + i);
             }
-            mempool_lock[id].unlock();
         }
         CudaCheckErrorModNoSync;
 
@@ -357,10 +378,8 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
         }
 
         CudaCheckErrorModNoSync;
-        mempool_lock[id].lock();
         ptr = free_limb.back();
         free_limb.pop_back();
-        mempool_lock[id].unlock();
         //ptr = free_limb.front();
         //free_limb.pop_front();
         //std::cout << "get " << ptr << std::endl;
@@ -423,10 +442,12 @@ void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
         MBs = bytes / 1024;
     }
 
-    if (s[id].ptr() == nullptr) {
-        s[id].init();
-    }
     if (cache && (bytes & (bytes - 1)) == 0) {
+        // S7 thread-safety: same full-lock rule as GPUmalloc (map insert + shared event).
+        std::lock_guard<std::mutex> guard(mempool_lock[id]);
+        if (s[id].ptr() == nullptr) {
+            s[id].init();
+        }
         std::vector<void*>& free_limb = size_to_memory[id][bytes];
 
         CudaCheckErrorModNoSync;
@@ -435,11 +456,12 @@ void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
             s[id].wait(stream);
         }
         CudaCheckErrorModNoSync;
-        mempool_lock[id].lock();
         free_limb.emplace_back(ptr);
-        mempool_lock[id].unlock();
         //std::cout << "free " << ptr << std::endl;
         return;
+    }
+    if (s[id].ptr() == nullptr) {
+        s[id].init();
     }
 
     if (0) {
