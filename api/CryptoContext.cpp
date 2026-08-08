@@ -38,6 +38,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <future>
 #include <set>
 #include <unordered_map>
@@ -400,15 +401,34 @@ struct StagedEntry {
 	bool						 coeff		  = false;
 	int							 target_limbs = 0;
 };
-PinnedArena g_stage_arena[2];
-int			g_stage_cur = 0;
-std::mutex	g_stage_mutex;
+PinnedArena		 g_stage_arena[2];
+std::atomic<int> g_stage_cur{0};
+std::mutex		 g_stage_mutex;
+
+// A snapshot of the live staging arena, taken under g_stage_mutex.
+// stage_arena_begin writes g_stage_cur AND can cudaFreeHost/cudaMallocHost the half's base —
+// all under the mutex — while ExtractRawPlaintext used to read `g_stage_arena[g_stage_cur]`
+// with no lock at all. That reader can observe a base pointer the flip has already freed and
+// memcpy several MB through it. Nothing in the block pipeline forces the flip and the staging
+// onto the same thread (diagonal_linear flips on the MAIN thread and stages on the worker;
+// stage_plaintexts fans the same read out to an OMP team), so this is reachable, and its
+// signature is heap corruption surfacing far from here.
+// Snapshotting under the lock is sufficient: a half's base/cap are assigned once (the
+// `cap < kStageArenaBytes` branch) and `used` is atomic, so only the flip itself needs
+// serialising against the read.
+struct StageArenaView {
+	PinnedArena* a	  = nullptr;
+	uint8_t*	 base = nullptr;
+	size_t		 cap  = 0;
+};
+StageArenaView view_of(PinnedArena& a) { return {&a, a.base, a.cap}; }
 
 // Start staging a new block: ping-pong to the other arena, (lazily, once) allocate it, reset bump.
 void stage_arena_begin() {
 	std::lock_guard<std::mutex> g(g_stage_mutex);
-	g_stage_cur	   = (g_stage_cur + 1) & 1;
-	PinnedArena& a = g_stage_arena[g_stage_cur];
+	g_stage_cur.store((g_stage_cur.load(std::memory_order_relaxed) + 1) & 1,
+					  std::memory_order_relaxed);
+	PinnedArena& a = g_stage_arena[g_stage_cur.load(std::memory_order_relaxed)];
 	const uint64_t ov = g_stage_overflow_pts.exchange(0);
 	if (ov > 0 || stage_stats_enabled())
 		std::fprintf(stderr, "[stage] arena flip: resetting used=%.2f GB cap=%.2f GB overflow_pts=%llu%s\n",
@@ -429,7 +449,7 @@ void stage_arena_begin() {
 // arena/off/len set; on overflow/no-arena it falls back (sub_0 kept, arena=null) → pageable upload.
 // Thread-safe: the plaintext's total bytes are reserved with ONE atomic fetch_add, so an OMP team
 // can stage a block's plaintexts concurrently; the memcpys run lock-free into disjoint ranges.
-StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw, bool narrow_ok = true) {
+StagedEntry stage_into(StageArenaView a, FIDESlib::CKKS::RawPlainText&& raw, bool narrow_ok = true) {
 	// NATIVE-WIDTH staging (B12-plan step 1): a limb whose modulus fits 32 bits holds
 	// residues < 2^32, so on u32 chains the arena stores 4 bytes/coefficient instead of
 	// the historical 8 — half the pinned footprint and half the H2D bytes. The loader
@@ -446,7 +466,7 @@ StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw, bool 
 		total += limb_bytes(i);
 	bool ok = (a.base != nullptr) && total > 0;
 	if (ok) {
-		const size_t base_off = a.used.fetch_add(total, std::memory_order_relaxed);
+		const size_t base_off = a.a->used.fetch_add(total, std::memory_order_relaxed);
 		if (base_off + total > a.cap) {
 			ok = false;   // reservation lost until the next flip resets the bump — arena is per block
 			g_stage_overflow_pts.fetch_add(1, std::memory_order_relaxed);
@@ -481,8 +501,10 @@ StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw, bool 
 	e.meta = std::move(raw);
 	return e;
 }
-StagedEntry stage_raw(FIDESlib::CKKS::RawPlainText&& raw) {
-	return stage_into(g_stage_arena[g_stage_cur], std::move(raw));
+// The live staging half, snapshotted under g_stage_mutex — the ONLY sanctioned way to reach it.
+StageArenaView current_stage_arena() {
+	std::lock_guard<std::mutex> g(g_stage_mutex);
+	return view_of(g_stage_arena[g_stage_cur.load(std::memory_order_relaxed)]);
 }
 
 // ---- Persistent staging: for CONSTANT weights reloaded every token (lm_head tiles). Stage each
@@ -497,7 +519,11 @@ constexpr size_t kPersistArenaBytes = size_t(4) << 30;
 PinnedArena		 g_persist_arena;
 auto&		g_persist_staged = *new std::unordered_map<const void*, StagedEntry>();
 auto&		g_persist_mutex	 = *new std::mutex();
-bool										 g_stage_persistent = false;
+// Atomic: written on the MAIN thread (gpt2_lm_head brackets its run_ops with
+// SetPersistentStaging) and read on the residency worker inside ExtractRawPlaintext, which
+// picks a different arena and a different map depending on it. A torn/stale read sends the
+// two threads down different staging paths for the same plaintext.
+std::atomic<bool>							 g_stage_persistent{false};
 
 // Stage `raw` for plaintext `key` persistently (idempotent: no-op if already staged). Returns the
 // stored entry. Caller holds g_persist_mutex.
@@ -512,7 +538,10 @@ StagedEntry& persist_stage_locked(const void* key, FIDESlib::CKKS::RawPlainText&
 		g_persist_arena.cap	 = g_persist_arena.base ? kPersistArenaBytes : 0;
 		g_persist_arena.used = 0;
 	}
-	return g_persist_staged.emplace(key, stage_into(g_persist_arena, std::move(raw))).first->second;
+	// The persist arena is grow-once and never ping-ponged, and every caller holds
+	// g_persist_mutex, so a plain view of it is stable for the duration of the stage.
+	return g_persist_staged.emplace(key, stage_into(view_of(g_persist_arena), std::move(raw)))
+		.first->second;
 }
 
 // ---- Async KV-cache offload arena (pinned, position-keyed, reused) ----
@@ -651,9 +680,19 @@ void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target
 void CryptoContextImpl<DCRTPoly>::ForgetPrefetchedRaw(const void* key) {
 	if (!prefetched_raw_mutex)
 		return;
-	prefetched_raw_mutex->lock();
-	prefetched_raw.erase(key);
-	prefetched_raw_mutex->unlock();
+	// Move the entry out and let it die AFTER the lock. A StagedEntry owns a RawPlainText,
+	// which owns an lbcrypto::Plaintext reference — dropping the last one runs a destructor
+	// that can re-enter this function, and prefetched_raw_mutex is a NON-recursive
+	// shared_mutex. RAII rather than raw lock/unlock so a throw cannot strand it either.
+	std::any dead;
+	{
+		std::unique_lock<std::shared_mutex> lk(*prefetched_raw_mutex);
+		auto it = prefetched_raw.find(key);
+		if (it == prefetched_raw.end())
+			return;
+		dead = std::move(it->second);
+		prefetched_raw.erase(it);
+	}
 }
 
 void CryptoContextImpl<DCRTPoly>::PrewarmKvArena() {
@@ -792,7 +831,9 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 	FIDESlib::CKKS::RawPlainText raw_pt;
 	bool					   from_stash = false;
 	if (prefetched_raw_mutex) {
-		prefetched_raw_mutex->lock();
+		// RAII: the any_casts below can throw (a std::any holding neither type), and the raw
+		// lock/unlock pair this replaces would then have stranded the mutex for the process.
+		std::unique_lock<std::shared_mutex> lk(*prefetched_raw_mutex);
 		auto it = prefetched_raw.find(key);
 		if (it != prefetched_raw.end()) {
 			if (it->second.type() == typeid(StagedEntry)) {
@@ -802,9 +843,8 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 				raw_pt	   = std::move(std::any_cast<FIDESlib::CKKS::RawPlainText&>(it->second));
 				from_stash = true;
 			}
-			prefetched_raw.erase(it);
+			prefetched_raw.erase(it);   // moved-from: nothing non-trivial dies under the lock
 		}
-		prefetched_raw_mutex->unlock();
 	}
 
 	if (have_staged && staged.coeff) {
@@ -857,12 +897,15 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 	}
 
 	{   // idempotent: skip if already extracted (shared lock, no double GetRawPlainText)
-		prefetched_raw_mutex->lock_shared();
-		const bool have = prefetched_raw.find(key) != prefetched_raw.end();
-		prefetched_raw_mutex->unlock_shared();
-		if (have)
+		std::shared_lock<std::shared_mutex> lk(*prefetched_raw_mutex);
+		if (prefetched_raw.find(key) != prefetched_raw.end())
 			return;
 	}
+	// ⚠️ This probe is only a fast path — it is NOT a claim on `key`. Everything below runs
+	// unlocked for milliseconds (GetRawPlainText copies several MB, stage_into copies them
+	// again), and in that window ~PlaintextImpl can call ForgetPrefetchedRaw(key) or
+	// LoadPlaintext can consume-and-erase. The insert at the end therefore re-checks under
+	// the exclusive lock instead of assuming the probe still holds; see there.
 	auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 	const auto& ptImpl = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 	FIDESlib::CKKS::RawPlainText raw = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
@@ -873,7 +916,7 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 	// 8-byte slot (their GPU lift reads u64 lanes by contract — see stage_into narrow_ok).
 	const bool narrow_ok = !pt->coeff_staged;
 	std::any entry = fhe_pin_stage()
-		? std::any(stage_into(g_stage_arena[g_stage_cur], std::move(raw), narrow_ok))
+		? std::any(stage_into(current_stage_arena(), std::move(raw), narrow_ok))
 		: std::any(std::move(raw));
 	if (pt->coeff_staged) {
 		if (entry.type() != typeid(StagedEntry) || std::any_cast<const StagedEntry&>(entry).arena == nullptr)
@@ -898,9 +941,23 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 		auto& pt_nc = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
 		pt_nc->GetElement<lbcrypto::DCRTPoly>() = lbcrypto::DCRTPoly();
 	}
-	prefetched_raw_mutex->lock();
-	prefetched_raw[key] = std::move(entry);
-	prefetched_raw_mutex->unlock();
+	// Publish. `operator[] = std::move(entry)` was wrong twice over: it DESTROYS whatever the
+	// key already held while the exclusive lock is held (that destructor can drop the last
+	// lbcrypto::Plaintext reference and re-enter ForgetPrefetchedRaw on this same
+	// non-recursive mutex), and it silently overwrites an entry that appeared while we were
+	// working — including one belonging to a DIFFERENT plaintext that the allocator has since
+	// placed at this address, which is precisely the address-recycling bug class
+	// ForgetPrefetchedRaw exists to prevent. try_emplace instead: first writer wins, and our
+	// loser copy is destroyed after the lock is released.
+	{
+		std::any loser;
+		{
+			std::unique_lock<std::shared_mutex> lk(*prefetched_raw_mutex);
+			// try_emplace leaves `entry` untouched when it does not insert, by contract.
+			if (!prefetched_raw.try_emplace(key, std::move(entry)).second)
+				loser = std::move(entry);   // someone published first — keep theirs, drop ours
+		}
+	}
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadCiphertext(Ciphertext<DCRTPoly>& ct) {
