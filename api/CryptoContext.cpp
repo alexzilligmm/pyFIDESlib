@@ -37,6 +37,7 @@
 #include <scheme/ckksrns/ckksrns-ser.h>
 
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <shared_mutex>
 #include <future>
@@ -401,7 +402,15 @@ struct StagedEntry {
 	bool						 coeff		  = false;
 	int							 target_limbs = 0;
 };
-PinnedArena		 g_stage_arena[2];
+// add.96: TWO halves are sufficient, and the reason is what a half actually holds — HOST
+// staging bytes, which are dead the instant the H2D retires. Compute reads DEVICE memory and
+// never touches the arena again, so a half is free long before CMP(i) ends.
+// Releasing at end-of-compute instead starves the producer (measured: xwait 0.0 -> 7347 ms,
+// ring serialised) and makes it look like a third half is needed. It is not; the release
+// point was wrong. run_residency_pipeline already establishes retirement with the
+// cudaStreamSynchronize it does before submitting EXTRACT(i+2) — that is the release point.
+constexpr int    kStageSlots = 2;
+PinnedArena      g_stage_arena[kStageSlots];
 std::atomic<int> g_stage_cur{0};
 std::mutex		 g_stage_mutex;
 
@@ -424,9 +433,57 @@ struct StageArenaView {
 StageArenaView view_of(PinnedArena& a) { return {&a, a.base, a.cap}; }
 
 // Start staging a new block: ping-pong to the other arena, (lazily, once) allocate it, reset bump.
+void stage_arena_begin();   // defined below; the owned variant wraps it
+
+// ── per-slot monitors for the staging arena (add.96) ─────────────────────────────────────
+// The arena has NUM_VRAM_SLOTS halves and the pipeline is deeper than that, so a half can be
+// recycled while the previous owner's ASYNC H2D is still reading it — "silently wrong weights,
+// not a crash", as the pipeline's own comment puts it. Proven: FHE_BLOCK_CIRCULAR corrupts from
+// token 2 with the arena on and is CLEAN with FHE_PIN_STAGE=0, same code and plan (add.96).
+//
+// A host mutex cannot express this: it releases when ACQ *enqueues*, but the half must stay
+// intact until the copy *retires*. So each half carries the id of the block that owns it, the
+// producer blocks until the half it is about to flip into is free, and the consumer releases it
+// only after that block's compute is done.
+//
+// slot_owner[h] = owning block id, or -1 for free. Legacy callers pass owner < 0 and keep the
+// old unconditional flip, so ViT / BERT / prefill are byte-identical.
+std::mutex				 g_slot_mutex;
+std::condition_variable	 g_slot_cv;
+int              g_slot_owner[kStageSlots] = {-1, -1};
+
+void stage_arena_release(int owner) {
+	if (owner < 0) return;
+	{
+		std::lock_guard<std::mutex> g(g_slot_mutex);
+		for (int h = 0; h < kStageSlots; ++h)
+			if (g_slot_owner[h] == owner) g_slot_owner[h] = -1;
+	}
+	g_slot_cv.notify_all();
+}
+
+void stage_arena_begin_owned(int owner) {
+	if (owner >= 0) {
+		std::unique_lock<std::mutex> lk(g_slot_mutex);
+		// IDEMPOTENT: a block owns at most one half. cpu_extract_block claims BEFORE the
+		// per-plaintext `pt->loaded` early-out, so a block already staged (by the cross-token
+		// prefetch) would otherwise claim a SECOND half next token — four claims against three
+		// slots, and the ring deadlocks with xwait pinned and token 1 never arriving. Re-claiming
+		// is wrong on its own terms too: the staged bytes live in the half this owner already
+		// holds, so flipping would strand them.
+		for (int h = 0; h < kStageSlots; ++h)
+			if (g_slot_owner[h] == owner) return;
+		// Block until the half we are about to flip INTO is free.
+		const int next = (g_stage_cur.load(std::memory_order_relaxed) + 1) % kStageSlots;
+		g_slot_cv.wait(lk, [&] { return g_slot_owner[next] < 0; });
+		g_slot_owner[next] = owner;
+	}
+	stage_arena_begin();
+}
+
 void stage_arena_begin() {
 	std::lock_guard<std::mutex> g(g_stage_mutex);
-	g_stage_cur.store((g_stage_cur.load(std::memory_order_relaxed) + 1) & 1,
+	g_stage_cur.store((g_stage_cur.load(std::memory_order_relaxed) + 1) % kStageSlots,
 					  std::memory_order_relaxed);
 	PinnedArena& a = g_stage_arena[g_stage_cur.load(std::memory_order_relaxed)];
 	const uint64_t ov = g_stage_overflow_pts.exchange(0);
@@ -609,7 +666,7 @@ void PrewarmStageArenas() {
 	static std::once_flag once;
 	std::call_once(once, [] {
 		g_stage_prewarm = std::async(std::launch::async, [] {
-			for (int i = 0; i < 2; ++i) {
+			for (int i = 0; i < kStageSlots; ++i) {
 				void* p = nullptr;
 				cudaMallocHost(&p, kStageArenaBytes);
 				std::lock_guard<std::mutex> g(g_stage_mutex);
@@ -629,6 +686,19 @@ void PrewarmStageArenas() {
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
 	if (fhe_pin_stage())
 		stage_arena_begin();
+}
+
+// owner >= 0 arms the monitor: claim a half for this block and block until it is free.
+void CryptoContextImpl<DCRTPoly>::BeginStageBlockOwned(int owner) {
+	if (fhe_pin_stage())
+		stage_arena_begin_owned(owner);
+}
+
+// Call once the block's compute is done — this is what makes the half reusable, and it is
+// deliberately NOT at enqueue time, which is where a mutex would have released it.
+void CryptoContextImpl<DCRTPoly>::ReleaseStageBlock(int owner) {
+	if (fhe_pin_stage())
+		stage_arena_release(owner);
 }
 
 void CryptoContextImpl<DCRTPoly>::SetPersistentStaging(bool on) { g_stage_persistent = on; }

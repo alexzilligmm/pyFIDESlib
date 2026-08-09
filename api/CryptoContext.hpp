@@ -99,6 +99,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// arena and reset it. Call once before the per-plaintext ExtractRawPlaintext calls of a block
 	/// (from the residency worker). No-op when FHE_PIN_STAGE is off.
 	void BeginStageBlock();
+	// Monitor-gated variants (add.96): claim/release one staging-arena half per block, so a half
+	// is never recycled while a previous owner's async H2D still reads it. owner < 0 = legacy.
+	void BeginStageBlockOwned(int owner);
+	void ReleaseStageBlock(int owner);
 	/// @brief Toggle PERSISTENT staging (FHE_PIN_STAGE): while on, LoadPlaintext/ExtractRawPlaintext
 	/// stage a plaintext once into a grow-once arena keyed by identity and async-load it every token
 	/// without re-extracting — for CONSTANT weights reloaded per token (lm_head tiles). Off ⇒ the
