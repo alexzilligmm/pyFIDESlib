@@ -391,14 +391,21 @@ struct StagedEntry {
 	// it to target_limbs on the GPU instead of uploading pre-built limbs.
 	bool						 coeff		  = false;
 	int							 target_limbs = 0;
+	// Arena generation this entry was staged under (multi-consume invalidation:
+	// the entry dies when ITS arena is recycled, i.e. two flips later — a flip-time
+	// clear is wrong under threaded prefetch, where the next block stages into the
+	// other arena while the current block still loads).
+	uint64_t					 gen = 0;
 };
 PinnedArena g_stage_arena[2];
 int			g_stage_cur = 0;
 std::mutex	g_stage_mutex;
+std::atomic<uint64_t> g_stage_gen{0};
 
 // Start staging a new block: ping-pong to the other arena, (lazily, once) allocate it, reset bump.
 void stage_arena_begin() {
 	std::lock_guard<std::mutex> g(g_stage_mutex);
+	g_stage_gen.fetch_add(1, std::memory_order_relaxed);
 	g_stage_cur	   = (g_stage_cur + 1) & 1;
 	PinnedArena& a = g_stage_arena[g_stage_cur];
 	const uint64_t ov = g_stage_overflow_pts.exchange(0);
@@ -457,7 +464,11 @@ StagedEntry stage_into(PinnedArena& a, FIDESlib::CKKS::RawPlainText&& raw) {
 	return e;
 }
 StagedEntry stage_raw(FIDESlib::CKKS::RawPlainText&& raw) {
-	return stage_into(g_stage_arena[g_stage_cur], std::move(raw));
+	// Lock-free like the original: the loader flips BEFORE staging a block, and no
+	// staging of the previous block overlaps its flip — cur/gen are stable here.
+	StagedEntry e = stage_into(g_stage_arena[g_stage_cur], std::move(raw));
+	e.gen		  = g_stage_gen.load(std::memory_order_relaxed);
+	return e;
 }
 
 // ---- Persistent staging: for CONSTANT weights reloaded every token (lm_head tiles). Stage each
@@ -473,6 +484,7 @@ PinnedArena		 g_persist_arena;
 auto&		g_persist_staged = *new std::unordered_map<const void*, StagedEntry>();
 auto&		g_persist_mutex	 = *new std::mutex();
 bool										 g_stage_persistent = false;
+bool										 g_stage_multi_consume = false;
 
 // Stage `raw` for plaintext `key` persistently (idempotent: no-op if already staged). Returns the
 // stored entry. Caller holds g_persist_mutex.
@@ -573,11 +585,38 @@ void PrewarmStageArenas() {
 }
 
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
-	if (fhe_pin_stage())
+	if (fhe_pin_stage()) {
 		stage_arena_begin();
+		// Multi-consume mode keeps staged entries across loads. An entry must die
+		// exactly when ITS arena is recycled — that is THIS flip for entries staged
+		// two generations ago (same ping-pong parity). A blanket clear here is
+		// wrong under threaded prefetch: the next block stages while the current
+		// one still loads, and clearing would orphan the current block's entries
+		// (measured: coeff "consumed twice" throw, 2026-08-10). Stale survivors
+		// past their generation would alias recycled bytes (the 48856712 class),
+		// hence the sweep below.
+		if (g_stage_multi_consume && prefetched_raw_mutex) {
+			const uint64_t G = g_stage_gen.load(std::memory_order_relaxed);
+			prefetched_raw_mutex->lock();
+			for (auto it = prefetched_raw.begin(); it != prefetched_raw.end();) {
+				if (it->second.type() == typeid(StagedEntry) &&
+					std::any_cast<const StagedEntry&>(it->second).gen + 2 <= G)
+					it = prefetched_raw.erase(it);
+				else
+					++it;
+			}
+			prefetched_raw_mutex->unlock();
+		}
+	}
 }
 
 void CryptoContextImpl<DCRTPoly>::SetPersistentStaging(bool on) { g_stage_persistent = on; }
+
+// Multi-chunk forwards (BERT seq-128 = 4 packed chunks) load the SAME weight
+// plaintext once per chunk within one block; erase-on-load makes reload 2..C
+// miss ("consumed twice" throw for coeff pts). Multi-consume keeps entries in
+// the map until the block flip (arena bytes live exactly that long anyway).
+void CryptoContextImpl<DCRTPoly>::SetStageMultiConsume(bool on) { g_stage_multi_consume = on; }
 
 double CryptoContextImpl<DCRTPoly>::ScalingFactorReal(uint32_t level) const {
 	const auto& context = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
@@ -746,13 +785,22 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 		auto it = prefetched_raw.find(key);
 		if (it != prefetched_raw.end()) {
 			if (it->second.type() == typeid(StagedEntry)) {
-				staged		= std::move(std::any_cast<StagedEntry&>(it->second));
+				if (g_stage_multi_consume) {
+					staged = std::any_cast<const StagedEntry&>(it->second);   // copy: reload per chunk
+				} else {
+					staged = std::move(std::any_cast<StagedEntry&>(it->second));
+				}
 				have_staged = true;
 			} else {
-				raw_pt	   = std::move(std::any_cast<FIDESlib::CKKS::RawPlainText&>(it->second));
+				if (g_stage_multi_consume) {
+					raw_pt = std::any_cast<const FIDESlib::CKKS::RawPlainText&>(it->second);
+				} else {
+					raw_pt = std::move(std::any_cast<FIDESlib::CKKS::RawPlainText&>(it->second));
+				}
 				from_stash = true;
 			}
-			prefetched_raw.erase(it);
+			if (!g_stage_multi_consume)
+				prefetched_raw.erase(it);   // single-consumption (proven default)
 		}
 		prefetched_raw_mutex->unlock();
 	}
