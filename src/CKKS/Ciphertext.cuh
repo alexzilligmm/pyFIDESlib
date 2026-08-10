@@ -325,6 +325,17 @@ class Ciphertext {
     void mult(const Ciphertext& b, const Ciphertext& c, bool rescale = false);
 
     /**
+     * @brief this += Σ_j a[j]·b[j] with ONE keyswitch (FHE_LANE_BATCH phase 2).
+     *
+     * *this* must already hold a NoiseLevel-2 product (the lane-0 seed) at the common
+     * level; every a[j]/b[j] must be NoiseLevel-1 at that level. The binomial partial
+     * products of all lanes are accumulated in one fused kernel pass (d0→c0, d1→c1,
+     * d2→keyswitch aux), then a single relinearization closes the sum — numerically
+     * Σ relin(d2_j) == relin(Σ d2_j). No rescale, mirroring serial mult(rescale=false).
+     */
+    void multAccumulateBatch(const std::vector<const Ciphertext*>& a, const std::vector<const Ciphertext*>& b);
+
+    /**
      * @brief Multiplies both polynomial components by a scalar without pre‑checks.
      *
      * The scalar is converted to the appropriate modulus element via

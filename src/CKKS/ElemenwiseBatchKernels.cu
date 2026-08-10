@@ -3309,6 +3309,56 @@ __global__ void mult_reuse_b___(void*** a, void*** b, const int primeid_init, co
     }
 }
 
+__global__ void binomialMultAccum_(const __grid_constant__ int primeid_init, void** acc0, void** acc1, void** acc2,
+                                   void*** a0, void*** a1, void*** b0, void*** b1, const __grid_constant__ int n) {
+    const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];
+    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+
+    if (ISU64(primeid)) {
+        using T = uint64_t;
+        T s0 = ((T*)(acc0[blockIdx.y]))[idx];
+        T s1 = ((T*)(acc1[blockIdx.y]))[idx];
+        T s2 = 0;
+        for (int j = 0; j < n; ++j) {
+            const T a0v = ((T*)(((void**)a0[j])[blockIdx.y]))[idx];
+            const T a1v = ((T*)(((void**)a1[j])[blockIdx.y]))[idx];
+            const T b0v = ((T*)(((void**)b0[j])[blockIdx.y]))[idx];
+            const T b1v = ((T*)(((void**)b1[j])[blockIdx.y]))[idx];
+            s0 = modadd(s0, modmult<ALGO_BARRETT>(a0v, b0v, primeid), primeid);
+            s1 = modadd(s1,
+                        modadd(modmult<ALGO_BARRETT>(a0v, b1v, primeid),
+                               modmult<ALGO_BARRETT>(a1v, b0v, primeid), primeid),
+                        primeid);
+            const T d2 = modmult<ALGO_BARRETT>(a1v, b1v, primeid);
+            s2 = (j == 0) ? d2 : modadd(s2, d2, primeid);
+        }
+        ((T*)(acc0[blockIdx.y]))[idx] = s0;
+        ((T*)(acc1[blockIdx.y]))[idx] = s1;
+        ((T*)(acc2[blockIdx.y]))[idx] = s2;
+    } else {
+        using T = uint32_t;
+        T s0 = ((T*)(acc0[blockIdx.y]))[idx];
+        T s1 = ((T*)(acc1[blockIdx.y]))[idx];
+        T s2 = 0;
+        for (int j = 0; j < n; ++j) {
+            const T a0v = ((T*)(((void**)a0[j])[blockIdx.y]))[idx];
+            const T a1v = ((T*)(((void**)a1[j])[blockIdx.y]))[idx];
+            const T b0v = ((T*)(((void**)b0[j])[blockIdx.y]))[idx];
+            const T b1v = ((T*)(((void**)b1[j])[blockIdx.y]))[idx];
+            s0 = modadd(s0, modmult<ALGO_BARRETT>(a0v, b0v, primeid), primeid);
+            s1 = modadd(s1,
+                        modadd(modmult<ALGO_BARRETT>(a0v, b1v, primeid),
+                               modmult<ALGO_BARRETT>(a1v, b0v, primeid), primeid),
+                        primeid);
+            const T d2 = modmult<ALGO_BARRETT>(a1v, b1v, primeid);
+            s2 = (j == 0) ? d2 : modadd(s2, d2, primeid);
+        }
+        ((T*)(acc0[blockIdx.y]))[idx] = s0;
+        ((T*)(acc1[blockIdx.y]))[idx] = s1;
+        ((T*)(acc2[blockIdx.y]))[idx] = s2;
+    }
+}
+
 __global__ void binomialMult_(const __grid_constant__ int primeid_init, void** c0, void** c1, void** c2, void** d0,
                               void** d1) {
     const int primeid = C_.primeid_flattened[primeid_init + blockIdx.y];

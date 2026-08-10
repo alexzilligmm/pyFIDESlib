@@ -117,6 +117,14 @@ __global__ void hoistedRotateDotKSKBatched___(void*** in1, void*** din1, void***
 __global__ void dotProductPt_(void** c0, void** c1, void*** data, const size_t ptroffset, const int primeidInit,
                               const int n);
 
+// Batched binomial multiply-accumulate over n ciphertext pairs (FHE_LANE_BATCH phase 2):
+//   acc0 += Σ_j a0[j]·b0[j]        (loads its initial value — the lane-0 product)
+//   acc1 += Σ_j a0[j]·b1[j] + a1[j]·b0[j]
+//   acc2  = Σ_j a1[j]·b1[j]        (overwritten — the keyswitch aux input starts empty)
+// One pass: every operand element is read exactly once, all n lanes in-thread.
+__global__ void binomialMultAccum_(const __grid_constant__ int primeid_init, void** acc0, void** acc1, void** acc2,
+                                   void*** a0, void*** a1, void*** b0, void*** b1, const __grid_constant__ int n);
+
 __global__ void binomialMult_(const __grid_constant__ int primeid_init, void** c0, void** c1, void** c2, void** d0,
                               void** d1);
 __global__ void binomialMultExtend_(const __grid_constant__ int primeid_init, void** c0, void** c1, void** c2,

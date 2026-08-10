@@ -337,6 +337,14 @@ class LimbPartition {
                                     const std::vector<LimbPartition*>& pt, int bStep, int gStep, int stride,
                                     double usage, bool ext);
 
+    // acc0 += Σ a0[j]·b0[j]; acc1 += Σ a0[j]·b1[j]+a1[j]·b0[j]; acc2 = Σ a1[j]·b1[j].
+    // One binomialMultAccum_ launch per partition (FHE_LANE_BATCH phase 2).
+    static void binomialMultAccumBatch(LimbPartition& acc0, LimbPartition& acc1, LimbPartition& acc2,
+                                       const std::vector<const LimbPartition*>& a0,
+                                       const std::vector<const LimbPartition*>& a1,
+                                       const std::vector<const LimbPartition*>& b0,
+                                       const std::vector<const LimbPartition*>& b1);
+
     static void fusedHoistedRotateBatch(std::vector<LimbPartition*>& out, const std::vector<LimbPartition*>& in,
                                         const std::vector<LimbPartition*>& ksk_a,
                                         const std::vector<LimbPartition*>& ksk_b, const std::vector<int>& indexes,

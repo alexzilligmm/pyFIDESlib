@@ -293,6 +293,60 @@ void LimbPartition::multScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
     cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
+void LimbPartition::binomialMultAccumBatch(LimbPartition& acc0, LimbPartition& acc1, LimbPartition& acc2,
+                                           const std::vector<const LimbPartition*>& a0,
+                                           const std::vector<const LimbPartition*>& a1,
+                                           const std::vector<const LimbPartition*>& b0,
+                                           const std::vector<const LimbPartition*>& b1) {
+    ContextData& cc = acc0.cc;
+    cudaSetDevice(acc0.device);
+    const int limbsize = acc0.getLimbSize(*acc0.level);
+    const int n = static_cast<int>(a0.size());
+    assert((int)a1.size() == n && (int)b0.size() == n && (int)b1.size() == n);
+    if (n == 0 || limbsize <= 0)
+        return;
+
+    // Pointer tables: 4 arrays of n limb-table pointers each.
+    std::vector<void**> data_ptrs(4 * n, nullptr);
+    for (int j = 0; j < n; ++j) {
+        data_ptrs[0 * n + j] = a0[j]->limbptr.data;
+        data_ptrs[1 * n + j] = a1[j]->limbptr.data;
+        data_ptrs[2 * n + j] = b0[j]->limbptr.data;
+        data_ptrs[3 * n + j] = b1[j]->limbptr.data;
+    }
+
+    Stream& s = acc0.s;
+    void*** data_ptrs_d;
+    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * data_ptrs.size(), s.ptr());
+    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * data_ptrs.size(), cudaMemcpyHostToDevice,
+                    s.ptr());
+
+    s.wait(acc1.s);
+    s.wait(acc2.s);
+    for (int j = 0; j < n; ++j) {
+        s.wait(a0[j]->getS());
+        s.wait(a1[j]->getS());
+        s.wait(b0[j]->getS());
+        s.wait(b1[j]->getS());
+    }
+
+    dim3 block = {128u, 1u, 1u};
+    dim3 grid = {cc.N / 128u, (uint32_t)limbsize, 1u};
+    binomialMultAccum_<<<grid, block, 0, s.ptr()>>>(PARTITION(acc0.id, 0), acc0.limbptr.data, acc1.limbptr.data,
+                                                    acc2.limbptr.data, data_ptrs_d + 0 * n, data_ptrs_d + 1 * n,
+                                                    data_ptrs_d + 2 * n, data_ptrs_d + 3 * n, n);
+
+    acc1.s.wait(s);
+    acc2.s.wait(s);
+    for (int j = 0; j < n; ++j) {
+        a0[j]->getS().wait(s);
+        a1[j]->getS().wait(s);
+        b0[j]->getS().wait(s);
+        b1[j]->getS().wait(s);
+    }
+    cudaFreeAsync(data_ptrs_d, s.ptr());
+}
+
 void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const std::vector<LimbPartition*>& in,
                                         const std::vector<LimbPartition*>& pt, int bStep, int gStep, int stride,
                                         double usage, bool ext) {

@@ -236,6 +236,15 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	Ciphertext<DCRTPoly> EvalMult(const Ciphertext<DCRTPoly>& ct1, const Ciphertext<DCRTPoly>& ct2);
 	Ciphertext<DCRTPoly> EvalMult(const Ciphertext<DCRTPoly>& ct1, Plaintext& pt);
 	Ciphertext<DCRTPoly> EvalMult(Plaintext& pt, const Ciphertext<DCRTPoly>& ct1);
+	// Batched ct×pt: returns outs[i] = ct1 * pts[i], all products issued in one fused
+	// GPU kernel pass (MultPtBatch). Semantics per output are identical to EvalMult(ct, pt):
+	// no rescale, NoiseLevel-2 products. Requires every pt at ct1's level.
+	std::vector<Ciphertext<DCRTPoly>> EvalMultPtBatch(const Ciphertext<DCRTPoly>& ct1,
+	                                                  std::vector<Plaintext>& pts);
+	// Batched ct×ct accumulate: acc += Σ_j as[j]*bs[j] with ONE relinearization (acc must be
+	// the NoiseLevel-2 lane-0 product; all as/bs NoiseLevel-1 at acc's level). GPU-only.
+	void EvalMultCtAccumBatch(Ciphertext<DCRTPoly>& acc, const std::vector<Ciphertext<DCRTPoly>>& as,
+	                          const std::vector<Ciphertext<DCRTPoly>>& bs);
 	Ciphertext<DCRTPoly> EvalMult(const Ciphertext<DCRTPoly>& ct1, double scalar);
 	Ciphertext<DCRTPoly> EvalMult(double scalar, const Ciphertext<DCRTPoly>& ct1);
 	void EvalMultInPlace(Ciphertext<DCRTPoly>& ct1, Plaintext& pt);

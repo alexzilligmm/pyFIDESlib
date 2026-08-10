@@ -2360,6 +2360,82 @@ Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(Plaintext& pt, const 
 	return EvalMult(ct1, pt);
 }
 
+std::vector<Ciphertext<DCRTPoly>> CryptoContextImpl<DCRTPoly>::EvalMultPtBatch(const Ciphertext<DCRTPoly>& ct1,
+                                                                               std::vector<Plaintext>& pts) {
+
+	std::vector<Ciphertext<DCRTPoly>> results;
+	results.reserve(pts.size());
+
+	// Fall back to CPU (and to the serial path on empty input).
+	if (this->devices.empty()) {
+		for (auto& pt : pts)
+			results.push_back(EvalMult(ct1, pt));
+		return results;
+	}
+
+	// GPU path.
+	this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct1));
+	for (auto& pt : pts) {
+		this->LoadPlaintext(pt);
+		this->WaitPlaintextReady(pt->gpu);
+	}
+
+	auto ct_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct1->gpu));
+
+	std::vector<std::shared_ptr<FIDESlib::CKKS::Ciphertext>> results_gpu;
+	results_gpu.reserve(pts.size());
+	std::vector<FIDESlib::CKKS::Plaintext*> pts_gpu;
+	pts_gpu.reserve(pts.size());
+
+	for (auto& pt : pts) {
+		Ciphertext<DCRTPoly> result = this->MakeGpuResultLike(ct1);
+		results_gpu.push_back(
+			std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(result->gpu)));
+		pts_gpu.push_back(std::static_pointer_cast<FIDESlib::CKKS::Plaintext>(this->GetDevicePlaintext(pt->gpu)).get());
+		results.push_back(std::move(result));
+	}
+
+	FIDESlib::CKKS::MultPtBatch(results_gpu, *ct_gpu, pts_gpu);
+
+	return results;
+}
+
+void CryptoContextImpl<DCRTPoly>::EvalMultCtAccumBatch(Ciphertext<DCRTPoly>& acc,
+                                                       const std::vector<Ciphertext<DCRTPoly>>& as,
+                                                       const std::vector<Ciphertext<DCRTPoly>>& bs) {
+
+	// GPU-only: the CPU fallback would be the serial loop, which the wrapper keeps anyway.
+	if (this->devices.empty()) {
+		OPENFHE_THROW("EvalMultCtAccumBatch: GPU-only (serial fallback lives in the caller)");
+	}
+
+	this->LoadCiphertext(acc);
+	for (auto& ct : as)
+		this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+	for (auto& ct : bs)
+		this->LoadCiphertext(const_cast<Ciphertext<DCRTPoly>&>(ct));
+
+	auto acc_gpu = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(acc->gpu));
+
+	std::vector<const FIDESlib::CKKS::Ciphertext*> as_gpu, bs_gpu;
+	as_gpu.reserve(as.size());
+	bs_gpu.reserve(bs.size());
+	std::vector<std::shared_ptr<FIDESlib::CKKS::Ciphertext>> keepalive;
+	keepalive.reserve(as.size() + bs.size());
+	for (auto& ct : as) {
+		auto g = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+		as_gpu.push_back(g.get());
+		keepalive.push_back(std::move(g));
+	}
+	for (auto& ct : bs) {
+		auto g = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(this->GetDeviceCiphertext(ct->gpu));
+		bs_gpu.push_back(g.get());
+		keepalive.push_back(std::move(g));
+	}
+
+	acc_gpu->multAccumulateBatch(as_gpu, bs_gpu);
+}
+
 Ciphertext<DCRTPoly> CryptoContextImpl<DCRTPoly>::EvalMult(const Ciphertext<DCRTPoly>& ct1, double scalar) {
 
 	// Fall back to CPU.

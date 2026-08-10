@@ -195,6 +195,12 @@ class RNSPoly {
     static void fusedHoistedRotateBatch(std::vector<RNSPoly*>& out, const std::vector<RNSPoly*>& in,
                                         const std::vector<RNSPoly*>& ksk_a, const std::vector<RNSPoly*>& ksk_b,
                                         const std::vector<int>& indexes, int stride, double usage, bool c0_modup);
+
+    // acc0 += Σ a0[j]·b0[j]; acc1 += Σ a0[j]·b1[j]+a1[j]·b0[j]; acc2 = Σ a1[j]·b1[j]
+    // (FHE_LANE_BATCH phase 2 — batched binomial ct×ct accumulate ahead of ONE keyswitch).
+    static void binomialMultAccumBatch(RNSPoly& acc0, RNSPoly& acc1, RNSPoly& acc2,
+                                       const std::vector<const RNSPoly*>& a0, const std::vector<const RNSPoly*>& a1,
+                                       const std::vector<const RNSPoly*>& b0, const std::vector<const RNSPoly*>& b1);
 };
 }  // namespace FIDESlib::CKKS
 #endif  //FIDESLIB_CKKS_RNSPOLY_CUH
