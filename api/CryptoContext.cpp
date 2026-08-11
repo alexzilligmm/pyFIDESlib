@@ -1726,6 +1726,16 @@ std::shared_ptr<void> CryptoContextImpl<DCRTPoly>::StoreRaw(const Ciphertext<DCR
 		ct_gpu->storeStagedOrdered(g_mag_ring.base + snap->slot_off, snap->meta, g_mag_ring.stream, keep);
 		cudaEventCreateWithFlags(&snap->ev, cudaEventDisableTiming);
 		cudaEventRecord(snap->ev, g_mag_ring.stream);
+		// FHE_MAG_SYNC_STORE=1 (2026-08-11): materialize the snapshot BEFORE returning —
+		// the D2H wait (~ms) closes every remaining producer/consumer ordering hole at the
+		// cost of a main-thread stall per node. Diagnostic lever for the async-vs-sync
+		// magnitude gate; the event above stays authoritative for the worker.
+		static const bool sync_store = [] {
+			const char* e = std::getenv("FHE_MAG_SYNC_STORE");
+			return e && *e && std::atoi(e) != 0;
+		}();
+		if (sync_store)
+			cudaEventSynchronize(snap->ev);
 	} else {
 		snap->cpu_only	  = true;
 		snap->cpu_raw.numRes = 0;   // DecryptStoredRaw refuses
