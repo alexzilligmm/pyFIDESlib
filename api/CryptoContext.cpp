@@ -401,6 +401,7 @@ struct StagedEntry {
 	// it to target_limbs on the GPU instead of uploading pre-built limbs.
 	bool						 coeff		  = false;
 	int							 target_limbs = 0;
+	int							 prescale_log2 = 0;   // un-prescale ×2^k applied by the GPU lift
 };
 // add.96: TWO halves are sufficient, and the reason is what a half actually holds — HOST
 // staging bytes, which are dead the instant the H2D retires. Compute reads DEVICE memory and
@@ -728,7 +729,8 @@ static size_t total_q_limbs(const std::any& cpu_ctx) {
 	return context->GetCryptoParameters()->GetElementParams()->GetParams().size();
 }
 
-void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale) {
+void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale,
+                                                  int prescale_log2) {
 	auto& ptImpl = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
 	// The coeff lift reconstructs from the first `d` primes (Garner), so the host encode must
 	// leave exactly d limbs — one on a classic chain, the whole first-mod group on a composite
@@ -742,6 +744,7 @@ void CryptoContextImpl<DCRTPoly>::MarkCoeffStaged(Plaintext& pt, uint32_t target
 	ptImpl->SetLevel(target_level);
 	ptImpl->SetScalingFactor(target_scale);
 	pt->coeff_staged = true;
+	pt->coeff_prescale_log2 = prescale_log2;
 }
 
 // Called from ~PlaintextImpl: drop a worker-staged entry that was never consumed. Without this,
@@ -875,11 +878,13 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 					OPENFHE_THROW("LoadPlaintext: coeff-staged plaintext overflowed the persistent arena");
 				e->coeff		= true;
 				e->target_limbs = static_cast<int>(total_q_limbs(this->cpu) - pt->GetLevel());
+				e->prescale_log2 = pt->coeff_prescale_log2;
 			}
 		}
 		if (e->coeff) {
 			gpu_pt->loadCoeffExpand(e->meta, e->arena, e->off, e->len,
-			                        (int)composite_degree_of(this->cpu), e->target_limbs, load_stream);
+			                        (int)composite_degree_of(this->cpu), e->target_limbs, load_stream,
+			                        e->prescale_log2);
 		} else if (e->arena != nullptr) {
 			gpu_pt->loadStaged(e->meta, e->arena, e->off, e->len, load_stream);
 		} else if (load_stream != nullptr) {
@@ -919,7 +924,8 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 
 	if (have_staged && staged.coeff) {
 		gpu_pt->loadCoeffExpand(staged.meta, staged.arena, staged.off, staged.len,
-								(int)composite_degree_of(this->cpu), staged.target_limbs, load_stream);
+								(int)composite_degree_of(this->cpu), staged.target_limbs, load_stream,
+								staged.prescale_log2);
 	} else if (have_staged && staged.arena != nullptr) {
 		gpu_pt->loadStaged(staged.meta, staged.arena, staged.off, staged.len, load_stream);
 	} else {
@@ -996,6 +1002,7 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 		se.coeff		= true;
 		// pt->GetLevel() reports the TARGET level (MarkCoeffStaged); limbs = depth+1 - level.
 		se.target_limbs = static_cast<int>(total_q_limbs(this->cpu) - pt->GetLevel());
+		se.prescale_log2 = pt->coeff_prescale_log2;
 	}
 	// FHE_STAGE_RELEASE_CPU: once the limbs live in the pinned arena, the OpenFHE-side DCRTPoly is
 	// redundant (~4-6 MB/pt; a ViT block is ~65 GB) — drop it so staged blocks don't double-hold

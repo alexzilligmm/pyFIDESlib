@@ -154,9 +154,12 @@ class RNSPoly {
     // reconstruction. The lift's capacity is the PRODUCT of the source primes, so on a
     // composite chain only src_limbs==d gives a usable bound (one 28-bit prime cannot carry
     // a 2^54-scaled coefficient).
+    // prescale_log2 (MarkCoeffStaged): host values were encoded ÷2^k to fit the centered-lift
+    // bound; after the lift every limb is multiplied back by (2^k mod q_i) — exact integer
+    // un-prescale, no scale/level change.
     void loadCoeffExpand(const uint8_t* arena, const std::vector<size_t>& off,
                          const std::vector<size_t>& len, int src_limbs, int target_limbs,
-                         cudaStream_t stream);
+                         cudaStream_t stream, int prescale_log2 = 0);
     void rotateModupDotKSK(RNSPoly& poly, RNSPoly& poly1, const KeySwitchingKey& key);
     void squareModupDotKSK(RNSPoly& c0, RNSPoly& c1, const KeySwitchingKey& key);
     void generatePartialSpecialLimbs();

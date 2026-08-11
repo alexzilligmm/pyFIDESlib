@@ -94,7 +94,8 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// overwrites the plaintext's level + scaling factor to the target's and sets coeff_staged.
 	/// Staged loads then expand it to the target limbs ON THE GPU (INTT → broadcastLimb0 → NTT),
 	/// replacing the host-side per-limb CRT+NTT that dominates MakeCKKSPackedPlaintext (~4.6x).
-	void MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale);
+	void MarkCoeffStaged(Plaintext& pt, uint32_t target_level, double target_scale,
+	                     int prescale_log2 = 0);
 	/// @brief Begin staging a residency block under FHE_PIN_STAGE: ping-pong to the next pinned
 	/// arena and reset it. Call once before the per-plaintext ExtractRawPlaintext calls of a block
 	/// (from the residency worker). No-op when FHE_PIN_STAGE is off.

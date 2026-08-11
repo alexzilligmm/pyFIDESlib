@@ -1165,7 +1165,7 @@ void RNSPoly::loadStaged(const uint8_t* base, const std::vector<size_t>& off,
 
 void RNSPoly::loadCoeffExpand(const uint8_t* arena, const std::vector<size_t>& off,
                               const std::vector<size_t>& len, int src_limbs, int target_limbs,
-                              cudaStream_t stream) {
+                              cudaStream_t stream, int prescale_log2) {
     // See RNSPoly.cuh. Mirrors ModRaise's raise mechanic (INTT → grow → raise → NTT), sourcing
     // the first `src_limbs` limbs from the pinned arena instead of an existing ciphertext.
     //
@@ -1204,6 +1204,20 @@ void RNSPoly::loadCoeffExpand(const uint8_t* arena, const std::vector<size_t>& o
             broadcastLimb0();                         // centered SwitchModulus q0 → q_i
         else
             coeffLiftCentered();                      // Garner + AGGREGATE centring vs Q0/2
+    }
+    if (prescale_log2 > 0) {
+        // Un-prescale (MarkCoeffStaged): the host encode divided the values by 2^k so the
+        // centered lift bound held; multiply every limb back by (2^k mod q_i). Exact on the
+        // integers the lift reconstructed (m·2^k < q-product trivially), domain-agnostic
+        // (a scalar multiply commutes with NTT) — done here in coefficient form.
+        std::vector<uint64_t> sc(target_limbs);
+        for (int i = 0; i < target_limbs; ++i) {
+            const uint64_t qi = cc.prime[i].p;
+            uint64_t v = 1 % qi;
+            for (int b = 0; b < prescale_log2; ++b) v = (v * 2) % qi;
+            sc[i] = v;
+        }
+        multScalar(sc);
     }
     NTT(cc.batch, true);                              // all limbs back to EVAL
 }
