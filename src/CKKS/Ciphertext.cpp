@@ -425,18 +425,37 @@ void Ciphertext::storeStaged(uint8_t* base, StagedCtMeta& m, cudaStream_t stream
 
 void Ciphertext::storeStagedOrdered(uint8_t* base, StagedCtMeta& m, cudaStream_t stream, int max_limbs) {
     CKKS::SetCurrentContext(cc_);
-    // order the snapshot AFTER the producing ops (partition stream), then copy on the
-    // caller's stream — main thread never waits on the device.
-    cudaEvent_t ready = nullptr;
-    cudaEventCreateWithFlags(&ready, cudaEventDisableTiming);
-    cudaEventRecord(ready, c0.GPU.at(0).s.ptr());
-    cudaStreamWaitEvent(stream, ready, 0);
-    cudaEventDestroy(ready);
+    // Order the snapshot AFTER the producing ops, then copy on the caller's stream — the
+    // main thread never waits on the device.
+    // ⚠️ FIX 2026-08-11 (the add.80 async-magnitude garbage): the original code waited on
+    // c0.GPU[0].s ONLY, then D2H-copied BOTH polys across ALL partitions — c1's streams
+    // (and any non-zero partition) raced the ring-stream copy, so the snapshot could read
+    // stale/partial limbs (CRT garbage in both directions, nondeterministic, worse under
+    // load). Wait on EVERY partition stream of BOTH polys.
+    auto wait_all = [&](RNSPoly& p) {
+        for (auto& part : p.GPU) {
+            cudaEvent_t ready = nullptr;
+            cudaEventCreateWithFlags(&ready, cudaEventDisableTiming);
+            cudaEventRecord(ready, part.s.ptr());
+            cudaStreamWaitEvent(stream, ready, 0);
+            cudaEventDestroy(ready);
+        }
+    };
+    wait_all(c0);
+    wait_all(c1);
     m.numRes = (max_limbs > 0) ? std::min(max_limbs, c0.getLevel() + 1) : (c0.getLevel() + 1);
     m.N      = cc.N;
     size_t cursor = 0;
     c0.storeStaged(base, cursor, m.off0, m.len0, stream, max_limbs);
     c1.storeStaged(base, cursor, m.off1, m.len1, stream, max_limbs);
+    // Reverse ordering: later ops on the ct's own streams (including pool-reuse writes
+    // after an eviction) must not overwrite the buffers before the pending D2H drains.
+    cudaEvent_t done = nullptr;
+    cudaEventCreateWithFlags(&done, cudaEventDisableTiming);
+    cudaEventRecord(done, stream);
+    for (auto& part : c0.GPU) cudaStreamWaitEvent(part.s.ptr(), done, 0);
+    for (auto& part : c1.GPU) cudaStreamWaitEvent(part.s.ptr(), done, 0);
+    cudaEventDestroy(done);
     m.total_bytes = cursor;
     m.NoiseLevel  = NoiseLevel;
     m.Noise       = NoiseFactor;
