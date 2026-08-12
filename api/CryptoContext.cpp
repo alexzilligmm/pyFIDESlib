@@ -384,6 +384,10 @@ struct PinnedArena {
 	std::atomic<size_t> used{0};
 };
 std::atomic<uint64_t> g_stage_overflow_pts{0};   // pts that fell back pageable since the last flip
+// Prefill chunk-weight cache (2026-08-12): while set, ExtractRawPlaintext keeps the
+// OpenFHE-side payload even under FHE_STAGE_RELEASE_CPU, so a later chunk can RE-STAGE
+// the same plaintexts instead of re-encoding them (~2 GB/block host for coeff pts).
+std::atomic<bool> g_stage_release_suppressed{false};
 
 bool stage_stats_enabled() {
 	static const bool v = [] {
@@ -682,6 +686,10 @@ void PrewarmStageArenas() {
 			}
 		});
 	});
+}
+
+void CryptoContextImpl<DCRTPoly>::SuppressStageReleaseCpu(bool suppress) {
+	g_stage_release_suppressed.store(suppress, std::memory_order_relaxed);
 }
 
 void CryptoContextImpl<DCRTPoly>::BeginStageBlock() {
@@ -1013,7 +1021,8 @@ void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
 		const char* e = std::getenv("FHE_STAGE_RELEASE_CPU");
 		return e && *e && std::atoi(e) != 0;
 	}();
-	if (release_cpu && entry.type() == typeid(StagedEntry) &&
+	if (release_cpu && !g_stage_release_suppressed.load(std::memory_order_relaxed) &&
+		entry.type() == typeid(StagedEntry) &&
 		std::any_cast<const StagedEntry&>(entry).arena != nullptr) {
 		auto& pt_nc = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
 		pt_nc->GetElement<lbcrypto::DCRTPoly>() = lbcrypto::DCRTPoly();

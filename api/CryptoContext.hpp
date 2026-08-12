@@ -195,6 +195,10 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// main-thread half. DecryptStoredRaw is pure CPU (container from a per-limb-count
 	/// prototype cache + OpenFHE decrypt) and is safe to call from worker threads
 	/// concurrently with GPU compute. The handle is an opaque RawCipherText.
+	/// Prefill chunk-weight cache: while suppressed, staged plaintexts KEEP their
+	/// OpenFHE-side payload (FHE_STAGE_RELEASE_CPU ignored) so they can be re-staged by a
+	/// later chunk instead of re-encoded. Global toggle; pair suppress(true)/(false).
+	void SuppressStageReleaseCpu(bool suppress);
 	std::shared_ptr<void> StoreRaw(const Ciphertext<DCRTPoly>& ct);
 	void DecryptStoredRaw(const std::shared_ptr<void>& raw, const PrivateKey<DCRTPoly>& sk, Plaintext* pt);
 
