@@ -109,6 +109,7 @@ template <> class CryptoContextImpl<DCRTPoly> {
 	/// without re-extracting — for CONSTANT weights reloaded per token (lm_head tiles). Off ⇒ the
 	/// ping-pong block arena. Set true before such loads, false after.
 	void SetPersistentStaging(bool on);
+	void SetStageMultiConsume(bool on);
 	/// @brief Load a ciphertext to the devices.
 	/// @param ct Ciphertext to load. Handles both an OpenFHE-backed ct->cpu and
 	/// a ct->cpu previously stashed by StoreDeviceCiphertext (RawCipherText).
