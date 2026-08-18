@@ -54,7 +54,13 @@ CiphertextImpl<DCRTPoly>::CiphertextImpl(const Ciphertext<DCRTPoly>& other) : Ci
 // ---- Clone ----
 
 Ciphertext<DCRTPoly> CiphertextImpl<DCRTPoly>::Clone() const {
-	Ciphertext<DCRTPoly> clone = std::make_shared<CiphertextImpl<DCRTPoly>>(*this);
+	// GPU-resident ciphertexts clone with the metadata-only CPU shadow (the BAKED-ON
+	// lazy-shadow discipline; CloneEmpty carries all scalar value-metadata — slots,
+	// level, noiseScaleDeg, scalingFactor — so only the ELEMENTS stay lazy). The old
+	// deep host copy made clone ~40x its device cost (788 us wrapper vs 18 us lazy;
+	// the delta was host DCRTPoly memcpy). A ciphertext that is NOT loaded lives on
+	// the CPU: the deep copy remains the only correct behavior there.
+	Ciphertext<DCRTPoly> clone = std::make_shared<CiphertextImpl<DCRTPoly>>(*this, /*lazy_cpu_shadow=*/this->loaded);
 	return clone;
 }
 
