@@ -528,6 +528,13 @@ __global__ void expandKskA_(uint32_t* out, const KskSeedWords seed, const int di
         out[idx] = kskexpand::expand_coeff(seed.k, (uint32_t)digit, p, (uint32_t)idx, n16);
 }
 
+__global__ void expandKskA64_(uint64_t* out, const KskSeedWords seed, const int digit, const uint64_t p,
+                              const uint32_t n8, const int N) {
+    const int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < N)
+        out[idx] = kskexpand::expand_coeff64(seed.k, (uint32_t)digit, p, (uint32_t)idx, n8);
+}
+
 __global__ void packKsk_(uint32_t* out, const uint32_t* in, const int N, const int bits) {
     const uint32_t total = (uint32_t)(((uint64_t)N * bits + 31) >> 5);
     const uint32_t w = threadIdx.x + blockIdx.x * blockDim.x;
@@ -1247,15 +1254,208 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
 // Same-TU launcher (see the .cuh note: cross-TU template-kernel launches hit
 // 'invalid device function' — the launch must live in the defining TU). Supported packed
 // widths are the instantiated set {27, 28}; kskPackBitsPolicy only arms those.
+// ===================== u64 (KSKB, SPEC v2) regen kernels — 2026-08-26 =====================
+// The NATIVE_SIZE=64 twins of the register-shape regen arms. One KSKB ChaCha block serves
+// 8 coefficients (2 keystream words each), so SLOTS = 8 and each thread owns the 8
+// consecutive coefficients its block generates — the same no-barrier amortization as the
+// u32 SLOTS=16 kernels. u64 chains never pack (kskPackBitsPolicy is u32-only), so there is
+// no BITS template; kskb streams dense u64. Reduction of the accepted 64-bit word pair is
+// a plain `% p` (no 32-bit recip trick at this width; Barrett handles the dot products).
+__global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
+    fusedDotKSKRegen64_(void** out1, void** sout1, void** out2, void** sout2, void*** digits, int num_d, int id,
+                        int num_special, int init, KskSeedWords aseed, const uint32_t n8) {
+    constexpr int SLOTS = 8;
+    const uint32_t b0 = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);  // == slot>>3
+    const int base = (int)(b0 << 3);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint64_t pval = C_.primes[primeid];
+    const uint64_t m_p = (0xFFFFFFFFFFFFFFFFull / pval) * pval;
+    const uint32_t w13 = ((uint32_t)(pval >> 32) << 4);  // digit tag ORed in per digit below
+    const uint32_t p_lo = (uint32_t)pval;
+
+    uint64_t a1[SLOTS], a2[SLOTS];
+#pragma unroll
+    for (int w = 0; w < SLOTS; ++w) {
+        a1[w] = 0;
+        a2[w] = 0;
+    }
+
+    for (int i = 0; i < num_d; ++i) {
+        const bool decomp = (i == primeid_digit);
+        const int pos = C_.pos_in_digit[i][primeid];
+        const int pp = decomp ? pos_dec : pos;
+        const uint64_t* inp = (const uint64_t*)digits[i + decomp * 3 * C_.dnum][pp] + base;
+        const uint64_t* kskbp = (const uint64_t*)digits[2 * C_.dnum + i + decomp * 3 * C_.dnum][pp] + base;
+
+        uint32_t ks[16];
+        kskexpand::chacha_block_tail(aseed.k, b0, w13 | ((uint32_t)i & 0xFu), p_lo, kskexpand::kDomainSep64, ks);
+        uint64_t v[SLOTS];
+        uint32_t need = 0;
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            v[w] = (uint64_t)ks[2 * w] | ((uint64_t)ks[2 * w + 1] << 32);
+            need |= (v[w] >= m_p) ? (1u << w) : 0u;
+        }
+        if (need) {
+            for (uint32_t tt = 1; tt < (uint32_t)kskexpand::kTMax; ++tt) {
+                uint32_t es[16];
+                kskexpand::chacha_block_tail(aseed.k, b0 + tt * n8, w13 | ((uint32_t)i & 0xFu), p_lo,
+                                             kskexpand::kDomainSep64, es);
+#pragma unroll
+                for (int w = 0; w < SLOTS; ++w)
+                    if (need & (1u << w)) {
+                        v[w] = (uint64_t)es[2 * w] | ((uint64_t)es[2 * w + 1] << 32);
+                        if (v[w] < m_p)
+                            need &= ~(1u << w);
+                    }
+                if (!need)
+                    break;
+            }
+        }
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint64_t kska = v[w] % pval;
+            const uint64_t din = inp[w];
+            a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(din, kska, primeid), primeid);
+            a2[w] = modadd(a2[w], modmult<ALGO_BARRETT>(din, kskbp[w], primeid), primeid);
+        }
+    }
+
+#pragma unroll
+    for (int w = 0; w < SLOTS; ++w) {
+        if (primeid < C_.L) {
+            ((uint64_t*)out1[pos_dec])[base + w] = a1[w];
+            ((uint64_t*)out2[pos_dec])[base + w] = a2[w];
+        } else {
+            ((uint64_t*)sout1[primeid - C_.L])[base + w] = a1[w];
+            ((uint64_t*)sout2[primeid - C_.L])[base + w] = a2[w];
+        }
+    }
+}
+
+__global__ void __launch_bounds__(128, FIDESLIB_DOT_REGEN_MINCTA)
+    hoistedRotateDotKSKRegen64_(void*** din1, void** c0, void*** out1, void*** sout1, void*** out2, void*** sout2,
+                                const int n, const int* indexes, void*** digits, int num_d, int id, int num_special,
+                                int init, void** sc0, bool c0_modup, const uint32_t* __restrict__ seeds,
+                                const uint32_t n8) {
+    constexpr int SLOTS = 8;
+    const uint32_t b0 = (uint32_t)(threadIdx.x + blockIdx.x * blockDim.x);
+    const int base = (int)(b0 << 3);
+    const int blky = blockIdx.y + init;
+
+    const int primeid =
+        (blky < num_special) ? C_.primeid_digit_to[0][blky] : C_.primeid_partition[id][blky - num_special];
+    const int primeid_digit = C_.primeid_digit[primeid];
+    const int pos_dec = blky - num_special;
+
+    const uint64_t pval = C_.primes[primeid];
+    const uint64_t m_p = (0xFFFFFFFFFFFFFFFFull / pval) * pval;
+    const uint32_t whi = ((uint32_t)(pval >> 32) << 4);
+    const uint32_t p_lo = (uint32_t)pval;
+
+    // c0 folded into aux2's initial value, exactly like the u32 regen kernel / the dense
+    // generic arm (shoup by P only on the non-modup mainline path).
+    const uint64_t* c0p = nullptr;
+    if (c0_modup || primeid < C_.L)
+        c0p = primeid < C_.L ? (const uint64_t*)c0[pos_dec] : (const uint64_t*)sc0[primeid - C_.L];
+    const bool c0_shoup = (!c0_modup && primeid < C_.L);
+
+    for (int j = 0; j < n; ++j) {
+        const int offset = j * 3 * 2 * C_.dnum;
+        const uint32_t* key = seeds + j * 8;
+
+        uint64_t aux1[SLOTS], aux2[SLOTS];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            aux1[w] = 0;
+            uint64_t in2 = c0p ? c0p[base + w] : 0ull;
+            if (c0p && c0_shoup)
+                in2 = modmult<ALGO_SHOUP>(in2, C_.P[primeid], primeid, C_.P_shoup[primeid]);
+            aux2[w] = in2;
+        }
+
+        for (int i = 0; i < num_d; ++i) {
+            const bool decomp = (i == primeid_digit);
+            const int pos = C_.pos_in_digit[i][primeid];
+            const int pp = decomp ? pos_dec : pos;
+            const uint64_t* dinp = (const uint64_t*)din1[i + decomp * 3 * C_.dnum][pp] + base;
+            const uint64_t* kskbp =
+                (const uint64_t*)digits[offset + 2 * C_.dnum + i + decomp * 3 * C_.dnum][pp] + base;
+
+            uint32_t ks[16];
+            kskexpand::chacha_block_tail(key, b0, whi | ((uint32_t)i & 0xFu), p_lo, kskexpand::kDomainSep64, ks);
+            uint64_t v[SLOTS];
+            uint32_t need = 0;
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                v[w] = (uint64_t)ks[2 * w] | ((uint64_t)ks[2 * w + 1] << 32);
+                need |= (v[w] >= m_p) ? (1u << w) : 0u;
+            }
+            if (need) {
+                for (uint32_t tt = 1; tt < (uint32_t)kskexpand::kTMax; ++tt) {
+                    uint32_t es[16];
+                    kskexpand::chacha_block_tail(key, b0 + tt * n8, whi | ((uint32_t)i & 0xFu), p_lo,
+                                                 kskexpand::kDomainSep64, es);
+#pragma unroll
+                    for (int w = 0; w < SLOTS; ++w)
+                        if (need & (1u << w)) {
+                            v[w] = (uint64_t)es[2 * w] | ((uint64_t)es[2 * w + 1] << 32);
+                            if (v[w] < m_p)
+                                need &= ~(1u << w);
+                        }
+                    if (!need)
+                        break;
+                }
+            }
+#pragma unroll
+            for (int w = 0; w < SLOTS; ++w) {
+                const uint64_t kska = v[w] % pval;
+                const uint64_t din = dinp[w];
+                aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(din, kska, primeid), primeid);
+                aux2[w] = modadd(aux2[w], modmult<ALGO_BARRETT>(din, kskbp[w], primeid), primeid);
+            }
+        }
+
+        const int rot_index = indexes[j];
+#pragma unroll
+        for (int w = 0; w < SLOTS; ++w) {
+            const uint32_t out_idx = automorph_slot(C_.logN, rot_index, (uint32_t)(base + w));
+            if (primeid < C_.L) {
+                ((uint64_t*)out1[j][pos_dec])[out_idx] = aux1[w];
+                ((uint64_t*)out2[j][pos_dec])[out_idx] = aux2[w];
+            } else {
+                ((uint64_t*)sout1[j][primeid - C_.L])[out_idx] = aux1[w];
+                ((uint64_t*)sout2[j][primeid - C_.L])[out_idx] = aux2[w];
+            }
+        }
+    }
+}
+
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
-                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16, int regen_shape) {
+                         int ksk_pack_bits, const uint32_t* a_seed, uint32_t n16, int regen_shape,
+                         int chain_type) {
     KskSeedWords sw{};
     if (a_seed)
         for (int i = 0; i < 8; ++i)
             sw.k[i] = a_seed[i];
     if (a_seed == nullptr)
         regen_shape = 0;
+    if (regen_shape != 0 && chain_type != 0) {
+        // u64 (KSKB) chain: the single register-shape arm; one thread per 8 coefficients.
+        if (grid.x % 8u != 0u)
+            throw std::runtime_error("launchFusedDotKSK_2: u64 regen needs grid.x % 8 == 0");
+        grid.x /= 8u;
+        fusedDotKSKRegen64_<<<grid, block, 0, stream>>>(out1, sout1, out2, sout2, digits, num_d, id, num_special,
+                                                        init, sw, n16 * 2u /* == N>>3 */);
+        return;
+    }
     // Shape 1 (stage B) gives each thread 16 coefficients, so grid.x shrinks by 16 — done here
     // rather than at the three call sites, which all pass the same N/block.x grid. The 4-slot
     // cooperative shape shrinks it by 4 instead (same env switch as the hoisted launcher).
@@ -2120,7 +2320,18 @@ __global__ void
 void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
-                                 bool c0_modup, int ksk_pack_bits, const uint32_t* seeds, uint32_t n16) {
+                                 bool c0_modup, int ksk_pack_bits, const uint32_t* seeds, uint32_t n16,
+                                 int chain_type) {
+    if (seeds && chain_type != 0) {
+        // u64 (KSKB) chain: caller passes the /16 grid it uses for the u32 register shape;
+        // the u64 shape owns 8 coefficients per thread, so scale grid.x back up by 2.
+        dim3 grid64 = grid;
+        grid64.x *= 2u;
+        hoistedRotateDotKSKRegen64_<<<grid64, block, 0, stream>>>(din1, c0, out1, sout1, out2, sout2, n, indexes,
+                                                                  digits, num_d, id, num_special, init, sc0,
+                                                                  c0_modup, seeds, n16 * 2u /* == N>>3 */);
+        return;
+    }
 /* Macro, not a helper template, for one reason: BITS must reach the kernel as a COMPILE-TIME
  * template argument (Lever 1b-i measured a runtime-width variant at +2.4%), so the arms have
  * to be selected by a switch over instantiations. The macro keeps the argument list — 15+

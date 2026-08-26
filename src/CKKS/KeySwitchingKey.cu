@@ -65,14 +65,16 @@ void KeySwitchingKey::Initialize(RawKeySwitchKey& rkk, int q_band) {
         const char* e = std::getenv("FIDESLIB_KSK_EXPAND_LOAD");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    const bool seeded_a =
-        expand_on_load && !rkk.a_seed.empty() && cc->GPUid.size() == 1 && cc->precom.constants[0].type == 0;
+    // 2026-08-26: the type == 0 condition is gone — SPEC v2 (KSKB) covers u64 chains, and
+    // expandKskADigits / the regen dot arms dispatch per chain type.
+    const bool seeded_a = expand_on_load && !rkk.a_seed.empty() && cc->GPUid.size() == 1;
     // Lever 1b-ii memory endgame: at level >= 2 BOTH `a`-readers (hoistedRotateDotKSK and
     // fusedDotKSK) regenerate from the seed, so `a` is never read and never needs to exist.
     // Release it instead of expanding it — half of every key's storage. The N condition is
     // the stage-B kernels' 16-coefficients-per-thread requirement; if it fails, the launch
     // gates fall back to streaming, so `a` must stay materialized.
-    const bool release_a = seeded_a && kskRegenLevel() >= 2 && cc->N % (128 * 16) == 0;
+    const bool release_a = seeded_a && kskRegenLevel() >= 2 &&
+                           cc->N % (128 * (cc->precom.constants[0].type == 0 ? 16 : 8)) == 0;
 
     // `a`'s rows are never allocated in the first place when released: the pointer TABLES the
     // host staging paths read live in bufferAUXptrs and are built by the LimbPartition

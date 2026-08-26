@@ -524,11 +524,17 @@ void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
     const uint32_t n16 = (uint32_t)cc.N >> 4;
     const uint32_t grid = (uint32_t)((cc.N + 127) / 128);
 
+    const uint32_t n8 = (uint32_t)cc.N >> 3;
     auto expand_one = [&](LimbImpl& l, int digit) {
-        assert(l.index() == U32);
-        const uint32_t p = (uint32_t)cc.precom.constants[id].primes[PRIMEID(l)];
         STREAM(l).wait(s);
-        expandKskA_<<<dim3{grid}, 128, 0, STREAM(l).ptr()>>>(std::get<U32>(l).v.data, sw, digit, p, n16, cc.N);
+        if (l.index() == U32) {
+            const uint32_t p = (uint32_t)cc.precom.constants[id].primes[PRIMEID(l)];
+            expandKskA_<<<dim3{grid}, 128, 0, STREAM(l).ptr()>>>(std::get<U32>(l).v.data, sw, digit, p, n16, cc.N);
+        } else {
+            // SPEC v2 (KSKB): the NATIVE_SIZE=64 chain's limbs, primes < 2^60.
+            const uint64_t p = cc.precom.constants[id].primes[PRIMEID(l)];
+            expandKskA64_<<<dim3{grid}, 128, 0, STREAM(l).ptr()>>>(std::get<U64>(l).v.data, sw, digit, p, n8, cc.N);
+        }
     };
     for (size_t i = 0; i < DECOMPlimb.size(); ++i)
         for (auto& j : DECOMPlimb.at(i))
@@ -544,7 +550,8 @@ void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
         for (auto& j : DECOMPlimb.at(i))
             for (size_t k = 0; k < meta.size(); ++k)
                 if (PRIMEID(j) == meta.at(k).id)
-                    cpu_ptr[k] = std::get<U32>(j).v.data;
+                    cpu_ptr[k] = (j.index() == U32) ? (void*)std::get<U32>(j).v.data
+                                                    : (void*)std::get<U64>(j).v.data;
     cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
 
     for (auto& d : DECOMPlimb)

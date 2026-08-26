@@ -29,10 +29,11 @@ namespace FIDESlib::CKKS {
  *                   regenerate from; its `a` rows are the only copy of those values.
  *   GPUid == 1    - the seed is recorded per LimbPartition; on multi-GPU the peer partitions
  *                   never ran expandKskADigits and carry no seed.
- *   type == 0     - the regen arms live only in the u32 fast path. FROZEN SPEC v1 expands to
- *                   u32 residues; a u64 chain would need a spec extension, not a cast. */
+ *   (2026-08-26: the type == 0 condition is GONE — SPEC v2 added the KSKB u64 lane, and the
+ *   u64 register-shape regen kernels consume it; see fusedDotKSKRegen64_ /
+ *   hoistedRotateDotKSKRegen64_.) */
 static bool kskRegenEligible(const LimbPartition& ksk_a) {
-    return ksk_a.ksk_seed_set && ksk_a.cc.GPUid.size() == 1 && ksk_a.cc.precom.constants[0].type == 0;
+    return ksk_a.ksk_seed_set && ksk_a.cc.GPUid.size() == 1;
 }
 
 /* fusedDotKSK: returns the key's 8-word seed and, via *shape, which regen arm to launch
@@ -49,7 +50,13 @@ static const uint32_t* kskRegenSeed(const LimbPartition& ksk_a, int block_x, int
                                      "but the regen arm is not armed for this launch");
         return nullptr;
     }
-    if (level >= 3) {
+    if (ksk_a.cc.precom.constants[0].type != 0) {
+        // u64 (KSKB) chain: one register-shape arm; the launcher selects it by chain_type,
+        // shape only needs to be nonzero. Needs whole 8-coefficient threads.
+        if (ksk_a.cc.N % (block_x * 8) != 0)
+            return nullptr;
+        *shape = 1;
+    } else if (level >= 3) {
         *shape = 2;
     } else {
         if (ksk_a.cc.N % (block_x * 16) != 0)  // stage B needs whole 16-coefficient threads
@@ -529,7 +536,7 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
             launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special + num_limbs}, 128, s.ptr(),
                                 out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
                                 out2.SPECIALlimbptr.data, digits.data, i, id, num_special, 0, ksk_a.key_pack_bits,
-                                regen_seed, (uint32_t)cc.N >> 4, regen_shape);
+                                regen_seed, (uint32_t)cc.N >> 4, regen_shape, cc.precom.constants[0].type);
         }
     }
     cudaFreeAsync(digits.data, s.ptr());
@@ -668,7 +675,8 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
             digits.data + offset_output_c1, digits.data + offset_output_c1s, digits.data + offset_output_c0,
             digits.data + offset_output_c0s, n, (int*)(digits.data + offset_indexes), digits.data, i, id, num_special,
             0, src_c0.SPECIALlimbptr.data, c0_modup, kpb,
-            regen ? (const uint32_t*)(digits.data + offset_seeds) : nullptr, (uint32_t)cc.N >> 4);
+            regen ? (const uint32_t*)(digits.data + offset_seeds) : nullptr, (uint32_t)cc.N >> 4,
+            cc.precom.constants[0].type);
 
         // n32 debug: full-vector dumps of the hoisted-rotation dot inputs/outputs at prime q0,
         // for offline per-position verification (dot+automorph, then the moddown chain).
@@ -1510,7 +1518,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                 launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num_special}, 128, s.ptr(), out1.limbptr.data,
                                     out1.SPECIALlimbptr.data, out2.limbptr.data, out2.SPECIALlimbptr.data, digits,
                                     num_d, id, num_special, 0, ksk_a.key_pack_bits, regen_seed,
-                                    (uint32_t)cc.N >> 4, regen_shape);
+                                    (uint32_t)cc.N >> 4, regen_shape, cc.precom.constants[0].type);
             }
         }
 
@@ -1863,7 +1871,7 @@ void LimbPartition::modup_ksk_moddown_mgpu(
                     launchFusedDotKSK_2(dim3{(uint32_t)cc.N / 128, (uint32_t)num}, 128, stream.ptr(),
                                         out1.limbptr.data, out1.SPECIALlimbptr.data, out2.limbptr.data,
                                         out2.SPECIALlimbptr.data, digits, i, id, num_special, num_special + start,
-                                        ksk_a.key_pack_bits, regen_seed, (uint32_t)cc.N >> 4, regen_shape);
+                                        ksk_a.key_pack_bits, regen_seed, (uint32_t)cc.N >> 4, regen_shape, cc.precom.constants[0].type);
                 }
             }
         }

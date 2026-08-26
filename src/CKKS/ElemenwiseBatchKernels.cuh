@@ -88,7 +88,7 @@ __global__ void eval_linear_w_sum_(const __grid_constant__ int n, void** a, void
 void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1, void** sout1, void** out2,
                          void** sout2, void*** digits, int num_d, int id, int num_special, int init,
                          int ksk_pack_bits, const uint32_t* a_seed = nullptr, uint32_t n16 = 0,
-                         int regen_shape = 0);
+                         int regen_shape = 0, int chain_type = 0);
 /* seeds: DEVICE pointer to n*8 seed words (one 256-bit seed per rotation key, in the same
  * order as the rotation loop) => the stage-B REGEN kernel is launched instead: each thread
  * owns 16 consecutive coefficients and regenerates each (key, digit) ChaCha block once in
@@ -97,7 +97,8 @@ void launchFusedDotKSK_2(dim3 grid, dim3 block, cudaStream_t stream, void** out1
 void launchHoistedRotateDotKSK_2(dim3 grid, dim3 block, size_t shmem, cudaStream_t stream, void*** din1, void** c0,
                                  void*** out1, void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                  void*** digits, int num_d, int id, int num_special, int init, void** sc0,
-                                 bool c0_modup, int ksk_pack_bits, const uint32_t* seeds = nullptr, uint32_t n16 = 0);
+                                 bool c0_modup, int ksk_pack_bits, const uint32_t* seeds = nullptr, uint32_t n16 = 0,
+                                 int chain_type = 0);
 /* Packs N canonical u32 residues (< 2^bits) into a dense bits-per-coefficient bitstream.
  * out must have ceil(N*bits/32) words + 1 zeroed guard word (for the consumer funnelshift). */
 __global__ void packKsk_(uint32_t* out, const uint32_t* in, int N, int bits);
@@ -109,6 +110,8 @@ struct KskSeedWords {
     uint32_t k[8];
 };
 __global__ void expandKskA_(uint32_t* out, KskSeedWords seed, int digit, uint32_t p, uint32_t n16, int N);
+/* SPEC v2 (KSKB) twin for the NATIVE_SIZE=64 chain: primes < 2^60, n8 = N>>3. */
+__global__ void expandKskA64_(uint64_t* out, KskSeedWords seed, int digit, uint64_t p, uint32_t n8, int N);
 __global__ void hoistedRotateDotKSKBatched___(void*** in1, void*** din1, void*** c0, void*** sc0, void*** out1,
                                               void*** sout1, void*** out2, void*** sout2, int n, const int* indexes,
                                               void*** digits, int num_d, int id, int num_special, int init,
