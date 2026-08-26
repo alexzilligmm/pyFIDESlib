@@ -1229,7 +1229,13 @@ __global__ void fusedDotKSKRegen4_(void** out1, void** sout1, void** out2, void*
             else
                 kskb = ((const uint32_t*)kskbp)[base + w];
 #if FIDESLIB_LAZY_DOT_ACC
-            a1[w] += (uint64_t)in4[w] * ks[w];  // raw keystream word — congruent mod p
+            // Wide-prime guard (2026-08-26, add.159): the raw keystream word is ~2^32
+            // regardless of p, so in*ks is 2^62 at a 30-bit prime and dnum=7 of them
+            // WRAP u64 (2^64.8) — one silent bad coefficient per ~65k, the add.156/158
+            // "60-bit q0 detonation". Reducing ks first keeps every product < 2^60 and
+            // the lazy sum < 2^63. Narrow primes keep the reduce-free fast path.
+            a1[w] += (uint64_t)in4[w] *
+                     (C_.prime_bits[primeid] > 28 ? modByRecip(ks[w], pval, recip) : ks[w]);
             a2[w] += (uint64_t)in4[w] * kskb;
 #else
             a1[w] = modadd(a1[w], modmult<ALGO_BARRETT>(in4[w], kska, primeid), primeid);
@@ -2077,7 +2083,10 @@ __global__ void
                 else
                     kskb = ((const uint32_t*)kskbp)[base + w];
 #if FIDESLIB_LAZY_DOT_ACC
-                aux1[w] += (uint64_t)d4[w] * ks[w];  // raw keystream word — congruent mod p
+                // Wide-prime guard (2026-08-26, add.159): reduce the ~2^32 keystream
+                // word before the lazy accumulate on >28-bit primes — see fusedDotKSKRegen4_.
+                aux1[w] += (uint64_t)d4[w] *
+                           (C_.prime_bits[primeid] > 28 ? modByRecip(ks[w], pval, recip) : ks[w]);
                 aux2[w] += (uint64_t)d4[w] * kskb;
 #else
                 aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[w], kska, primeid), primeid);
@@ -2286,7 +2295,10 @@ __global__ void
                     kskb = __funnelshift_r(kb[lo >> 5], kb[(lo >> 5) + 1], lo & 31) & ((1u << KSK_BITS) - 1u);
                 }
 #if FIDESLIB_LAZY_DOT_ACC
-                aux1[w] += (uint64_t)d4[w] * ks[w];  // raw keystream word — congruent mod p
+                // Wide-prime guard (2026-08-26, add.159): reduce the ~2^32 keystream
+                // word before the lazy accumulate on >28-bit primes — see fusedDotKSKRegen4_.
+                aux1[w] += (uint64_t)d4[w] *
+                           (C_.prime_bits[primeid] > 28 ? modByRecip(ks[w], pval, recip) : ks[w]);
                 aux2[w] += (uint64_t)d4[w] * kskb;
 #else
                 aux1[w] = modadd(aux1[w], modmult<ALGO_BARRETT>(d4[w], kska, primeid), primeid);
