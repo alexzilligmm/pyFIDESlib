@@ -69,13 +69,16 @@ FIDESLIB_KSK_HD void quarterround(uint32_t& a, uint32_t& b, uint32_t& c, uint32_
     c += d; b ^= c; b = rotl32(b, 7);
 }
 
-/* One ChaCha block (rounds = kRounds) for the KSKA domain: out[16] = keystream words. */
-FIDESLIB_KSK_HD void chacha_block(const uint32_t key[8], uint32_t block_ctr, uint32_t digit, uint32_t modulus,
-                                  uint32_t out[16]) {
+/* One ChaCha block (rounds = kRounds) with caller-supplied tail words s[13..15].
+ * The KSKA (u32) lane passes (digit, modulus, kDomainSep); the KSKB (u64) lane passes
+ * its packed tag words — the domain separation lives entirely in the state words, so
+ * the two lanes' keystreams never collide. */
+FIDESLIB_KSK_HD void chacha_block_tail(const uint32_t key[8], uint32_t block_ctr, uint32_t w13, uint32_t w14,
+                                       uint32_t w15, uint32_t out[16]) {
     uint32_t s[16] = {0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u,
                       key[0],      key[1],      key[2],      key[3],
                       key[4],      key[5],      key[6],      key[7],
-                      block_ctr,   digit,       modulus,     kDomainSep};
+                      block_ctr,   w13,         w14,         w15};
     uint32_t x0 = s[0], x1 = s[1], x2 = s[2], x3 = s[3], x4 = s[4], x5 = s[5], x6 = s[6], x7 = s[7], x8 = s[8],
              x9 = s[9], x10 = s[10], x11 = s[11], x12 = s[12], x13 = s[13], x14 = s[14], x15 = s[15];
 #if defined(__CUDA_ARCH__)
@@ -97,6 +100,13 @@ FIDESLIB_KSK_HD void chacha_block(const uint32_t key[8], uint32_t block_ctr, uin
     out[12] = x12 + s[12]; out[13] = x13 + s[13]; out[14] = x14 + s[14]; out[15] = x15 + s[15];
 }
 
+/* The original KSKA-lane block: byte-identical keystream to SPEC v1 (pure refactor onto
+ * chacha_block_tail; the CpuGpuParity + keygen-vector gates prove the stream unchanged). */
+FIDESLIB_KSK_HD void chacha_block(const uint32_t key[8], uint32_t block_ctr, uint32_t digit, uint32_t modulus,
+                                  uint32_t out[16]) {
+    chacha_block_tail(key, block_ctr, digit, modulus, kDomainSep, out);
+}
+
 /* Expand ONE coefficient: uniform in [0, p), addressed by (key, digit, p, slot).
  * n16 = N >> 4 (the escalation stride). Reference path — computes a full block per
  * attempt; the stage-3 kernel path amortizes the base block across 16 lanes. */
@@ -111,6 +121,40 @@ FIDESLIB_KSK_HD uint32_t expand_coeff(const uint32_t key[8], uint32_t digit, uin
         v = out[w];
         if (v < m_p)
             break;  // accepted (falls through to v % p); after kTMax rejects: fallback v % p
+    }
+    return v % p;
+}
+
+// ========================= SPEC v2 — the 64-bit (KSKB) lane =========================
+// (2026-08-26, NATIVE_SIZE=64 port.) Primes up to 2^60 (the n64 chain: 53-bit scale,
+// 60-bit q0/specials). Additive next to SPEC v1: the u32 lane's keystream is untouched.
+//   s[13] = (digit & 0xF) | (uint32)(p >> 32) << 4    digit < 16 (dnum <= 8 everywhere
+//                                                     deployed), p_hi = p>>32 < 2^28 for
+//                                                     p < 2^60 — exact fit, asserted at
+//                                                     the OpenFHE call site
+//   s[14] = (uint32)p                                 low word of the modulus tag
+//   s[15] = 0x4b534b42                                "KSKB" domain separator
+// Addressing: one 16-word block serves 8 consecutive slots (2 words/coefficient,
+// little-endian pair v = out[2w] | out[2w+1]<<32); escalation stride n8 = N >> 3.
+// Rejection: m_p = (UINT64_MAX / p) * p — identical floor semantics to the u32 lane
+// (for odd p > 1, floor((2^64-1)/p) == floor(2^64/p)). Rejection prob per attempt
+// < p/2^64 <= 2^-4 at p < 2^60; T_MAX unchanged.
+constexpr uint32_t kDomainSep64 = 0x4b534b42u;  // "KSKB"
+
+FIDESLIB_KSK_HD uint64_t expand_coeff64(const uint32_t key[8], uint32_t digit, uint64_t p, uint32_t slot,
+                                        uint32_t n8) {
+    const uint32_t b0 = slot >> 3;
+    const uint32_t w = slot & 7u;
+    const uint32_t w13 = (digit & 0xFu) | ((uint32_t)(p >> 32) << 4);
+    const uint32_t p_lo = (uint32_t)p;
+    const uint64_t m_p = (0xFFFFFFFFFFFFFFFFull / p) * p;
+    uint32_t out[16];
+    uint64_t v = 0;
+    for (uint32_t t = 0; t < (uint32_t)kTMax; ++t) {
+        chacha_block_tail(key, b0 + t * n8, w13, p_lo, kDomainSep64, out);
+        v = (uint64_t)out[2u * w] | ((uint64_t)out[2u * w + 1u] << 32);
+        if (v < m_p)
+            break;  // accepted; after kTMax rejects: fallback v % p (prob < 2^-64/coeff)
     }
     return v % p;
 }

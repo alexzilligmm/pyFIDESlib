@@ -1,4 +1,4 @@
-From f9288d3bd2da22bb1b50e74d4f2bc401a1cada75 Mon Sep 17 00:00:00 2001
+From 2c8bd5d734032311d760f40a4bf6d292c0bb7af2 Mon Sep 17 00:00:00 2001
 From: Davide-F5-Marincione <marincione.1927757@studenti.uniroma1.it>
 Date: Mon, 27 Jul 2026 16:42:23 +0200
 Subject: [PATCH] KSKA seed expansion (FIDESlib Lever 1b-ii): derive hybrid-KSK
@@ -18,18 +18,18 @@ The seed rides on EvalKeyRelinImpl (m_ASeed, in-process only, not serialized;
 OPENFHE_HAS_KSKA_SEED feature macro). u32-moduli chains only; threshold-HE
 (ekPrev) and OPENFHE_KSKA_SEED=0 keep conventional seedless keys.
 ---
- src/core/include/utils/kskseedexpand.h     | 122 +++++++++++++++++++++
- src/pke/include/key/evalkeyrelin.h         |  22 +++-
- src/pke/lib/keyswitch/keyswitch-hybrid.cpp |  65 ++++++++++-
- 3 files changed, 205 insertions(+), 4 deletions(-)
+ src/core/include/utils/kskseedexpand.h     | 166 +++++++++++++++++++++
+ src/pke/include/key/evalkeyrelin.h         |  22 ++-
+ src/pke/lib/keyswitch/keyswitch-hybrid.cpp |  85 ++++++++++-
+ 3 files changed, 269 insertions(+), 4 deletions(-)
  create mode 100644 src/core/include/utils/kskseedexpand.h
 
 diff --git a/src/core/include/utils/kskseedexpand.h b/src/core/include/utils/kskseedexpand.h
 new file mode 100644
-index 0000000..56b2988
+index 00000000..613d403e
 --- /dev/null
 +++ b/src/core/include/utils/kskseedexpand.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,166 @@
 +//
 +// Lever 1b-ii (KSK seed expansion): deterministic, random-access expansion of the
 +// key-switching-key `a` component from a 256-bit per-key seed.
@@ -101,13 +101,16 @@ index 0000000..56b2988
 +    c += d; b ^= c; b = rotl32(b, 7);
 +}
 +
-+/* One ChaCha block (rounds = kRounds) for the KSKA domain: out[16] = keystream words. */
-+FIDESLIB_KSK_HD void chacha_block(const uint32_t key[8], uint32_t block_ctr, uint32_t digit, uint32_t modulus,
-+                                  uint32_t out[16]) {
++/* One ChaCha block (rounds = kRounds) with caller-supplied tail words s[13..15].
++ * The KSKA (u32) lane passes (digit, modulus, kDomainSep); the KSKB (u64) lane passes
++ * its packed tag words — the domain separation lives entirely in the state words, so
++ * the two lanes' keystreams never collide. */
++FIDESLIB_KSK_HD void chacha_block_tail(const uint32_t key[8], uint32_t block_ctr, uint32_t w13, uint32_t w14,
++                                       uint32_t w15, uint32_t out[16]) {
 +    uint32_t s[16] = {0x61707865u, 0x3320646eu, 0x79622d32u, 0x6b206574u,
 +                      key[0],      key[1],      key[2],      key[3],
 +                      key[4],      key[5],      key[6],      key[7],
-+                      block_ctr,   digit,       modulus,     kDomainSep};
++                      block_ctr,   w13,         w14,         w15};
 +    uint32_t x0 = s[0], x1 = s[1], x2 = s[2], x3 = s[3], x4 = s[4], x5 = s[5], x6 = s[6], x7 = s[7], x8 = s[8],
 +             x9 = s[9], x10 = s[10], x11 = s[11], x12 = s[12], x13 = s[13], x14 = s[14], x15 = s[15];
 +#if defined(__CUDA_ARCH__)
@@ -129,6 +132,13 @@ index 0000000..56b2988
 +    out[12] = x12 + s[12]; out[13] = x13 + s[13]; out[14] = x14 + s[14]; out[15] = x15 + s[15];
 +}
 +
++/* The original KSKA-lane block: byte-identical keystream to SPEC v1 (pure refactor onto
++ * chacha_block_tail; the CpuGpuParity + keygen-vector gates prove the stream unchanged). */
++FIDESLIB_KSK_HD void chacha_block(const uint32_t key[8], uint32_t block_ctr, uint32_t digit, uint32_t modulus,
++                                  uint32_t out[16]) {
++    chacha_block_tail(key, block_ctr, digit, modulus, kDomainSep, out);
++}
++
 +/* Expand ONE coefficient: uniform in [0, p), addressed by (key, digit, p, slot).
 + * n16 = N >> 4 (the escalation stride). Reference path — computes a full block per
 + * attempt; the stage-3 kernel path amortizes the base block across 16 lanes. */
@@ -147,13 +157,47 @@ index 0000000..56b2988
 +    return v % p;
 +}
 +
++// ========================= SPEC v2 — the 64-bit (KSKB) lane =========================
++// (2026-08-26, NATIVE_SIZE=64 port.) Primes up to 2^60 (the n64 chain: 53-bit scale,
++// 60-bit q0/specials). Additive next to SPEC v1: the u32 lane's keystream is untouched.
++//   s[13] = (digit & 0xF) | (uint32)(p >> 32) << 4    digit < 16 (dnum <= 8 everywhere
++//                                                     deployed), p_hi = p>>32 < 2^28 for
++//                                                     p < 2^60 — exact fit, asserted at
++//                                                     the OpenFHE call site
++//   s[14] = (uint32)p                                 low word of the modulus tag
++//   s[15] = 0x4b534b42                                "KSKB" domain separator
++// Addressing: one 16-word block serves 8 consecutive slots (2 words/coefficient,
++// little-endian pair v = out[2w] | out[2w+1]<<32); escalation stride n8 = N >> 3.
++// Rejection: m_p = (UINT64_MAX / p) * p — identical floor semantics to the u32 lane
++// (for odd p > 1, floor((2^64-1)/p) == floor(2^64/p)). Rejection prob per attempt
++// < p/2^64 <= 2^-4 at p < 2^60; T_MAX unchanged.
++constexpr uint32_t kDomainSep64 = 0x4b534b42u;  // "KSKB"
++
++FIDESLIB_KSK_HD uint64_t expand_coeff64(const uint32_t key[8], uint32_t digit, uint64_t p, uint32_t slot,
++                                        uint32_t n8) {
++    const uint32_t b0 = slot >> 3;
++    const uint32_t w = slot & 7u;
++    const uint32_t w13 = (digit & 0xFu) | ((uint32_t)(p >> 32) << 4);
++    const uint32_t p_lo = (uint32_t)p;
++    const uint64_t m_p = (0xFFFFFFFFFFFFFFFFull / p) * p;
++    uint32_t out[16];
++    uint64_t v = 0;
++    for (uint32_t t = 0; t < (uint32_t)kTMax; ++t) {
++        chacha_block_tail(key, b0 + t * n8, w13, p_lo, kDomainSep64, out);
++        v = (uint64_t)out[2u * w] | ((uint64_t)out[2u * w + 1u] << 32);
++        if (v < m_p)
++            break;  // accepted; after kTMax rejects: fallback v % p (prob < 2^-64/coeff)
++    }
++    return v % p;
++}
++
 +}  // namespace FIDESlib::CKKS::kskexpand
 +
 +#undef FIDESLIB_KSK_HD
 +
 +#endif  // FIDESLIB_CKKS_KSKSEEDEXPAND_CUH
 diff --git a/src/pke/include/key/evalkeyrelin.h b/src/pke/include/key/evalkeyrelin.h
-index 8ea9462..f2db600 100644
+index 8ea9462d..f2db600a 100644
 --- a/src/pke/include/key/evalkeyrelin.h
 +++ b/src/pke/include/key/evalkeyrelin.h
 @@ -32,6 +32,9 @@
@@ -228,10 +272,10 @@ index 8ea9462..f2db600 100644
     * Setter function to store Relinearization Element Vector B.
     * Overrides base class implementation.
 diff --git a/src/pke/lib/keyswitch/keyswitch-hybrid.cpp b/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
-index 552fee8..fd9eb68 100644
+index 552fee8f..74ff84e5 100644
 --- a/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
 +++ b/src/pke/lib/keyswitch/keyswitch-hybrid.cpp
-@@ -43,8 +43,48 @@
+@@ -43,8 +43,61 @@
  #include "scheme/ckksrns/ckksrns-cryptoparameters.h"
  #include "ciphertext.h"
  
@@ -260,16 +304,29 @@ index 552fee8..fd9eb68 100644
 +// Expand one hybrid-keyswitch digit's `a` over paramsQP, directly in EVALUATION format —
 +// exactly what DCRTPoly(dug, paramsQP, Format::EVALUATION) produces distribution-wise, but
 +// deterministic from (seed, part, modulus, slot) and reproducible on the GPU.
-+DCRTPoly SeededKskA(const uint32_t* seed, uint32_t part, const std::shared_ptr<DCRTPoly::Params>& paramsQP) {
++// wide=false: SPEC v1 KSKA lane (all moduli < 2^32). wide=true: SPEC v2 KSKB lane
++// (moduli < 2^60, the NATIVE_SIZE=64 chain) — 2 keystream words per coefficient,
++// stride N>>3, "KSKB" domain separator. The lane is a PER-KEY property: the GPU
++// side selects it by chain word size, so a key never mixes lanes across limbs.
++DCRTPoly SeededKskA(const uint32_t* seed, uint32_t part, const std::shared_ptr<DCRTPoly::Params>& paramsQP,
++                    bool wide) {
 +    DCRTPoly a(paramsQP, Format::EVALUATION, true);
 +    const uint32_t N   = paramsQP->GetRingDimension();
 +    const uint32_t n16 = N >> 4;
++    const uint32_t n8  = N >> 3;
 +    const auto& parms  = paramsQP->GetParams();
 +    for (size_t i = 0; i < parms.size(); ++i) {
-+        const uint32_t p = parms[i]->GetModulus().template ConvertToInt<uint32_t>();
++        const uint64_t p64 = parms[i]->GetModulus().template ConvertToInt<uint64_t>();
 +        DCRTPoly::PolyType poly(parms[i], Format::EVALUATION, true);
-+        for (uint32_t s = 0; s < N; ++s)
-+            poly[s] = FIDESlib::CKKS::kskexpand::expand_coeff(seed, part, p, s, n16);
++        if (wide) {
++            for (uint32_t s = 0; s < N; ++s)
++                poly[s] = FIDESlib::CKKS::kskexpand::expand_coeff64(seed, part, p64, s, n8);
++        }
++        else {
++            const uint32_t p = static_cast<uint32_t>(p64);
++            for (uint32_t s = 0; s < N; ++s)
++                poly[s] = FIDESlib::CKKS::kskexpand::expand_coeff(seed, part, p, s, n16);
++        }
 +        a.SetElementAtIndex(i, std::move(poly));
 +    }
 +    return a;
@@ -280,7 +337,7 @@ index 552fee8..fd9eb68 100644
  EvalKey<DCRTPoly> KeySwitchHYBRID::KeySwitchGenInternal(const PrivateKey<DCRTPoly> oldKey,
                                                          const PrivateKey<DCRTPoly> newKey) const {
      return KeySwitchHYBRID::KeySwitchGenInternal(oldKey, newKey, nullptr);
-@@ -99,9 +139,28 @@ EvalKey<DCRTPoly> KeySwitchHYBRID::KeySwitchGenInternal(const PrivateKey<DCRTPol
+@@ -99,9 +152,35 @@ EvalKey<DCRTPoly> KeySwitchHYBRID::KeySwitchGenInternal(const PrivateKey<DCRTPol
      std::vector<NativeInteger> PModq = cryptoParams->GetPModq();
      size_t numPerPartQ               = cryptoParams->GetNumPerPartQ();
  
@@ -288,12 +345,19 @@ index 552fee8..fd9eb68 100644
 +    // expanded from it. Only when all QP moduli fit u32 (the expander is u32-wide);
 +    // otherwise / under OPENFHE_KSKA_SEED=0 / for threshold HE the key stays seedless.
 +    std::vector<uint32_t> aSeed;
++    bool aSeedWide = false;  // false: KSKA (u32) lane; true: KSKB (u64, p < 2^60) lane
 +    if (KskaSeedEnabled() && ekPrev == nullptr) {
 +        bool fits32 = true;
-+        for (auto& prm : paramsQP->GetParams())
-+            if (prm->GetModulus().template ConvertToInt<uint64_t>() > 0xFFFFFFFFull)
++        bool fits60 = true;
++        for (auto& prm : paramsQP->GetParams()) {
++            const uint64_t m = prm->GetModulus().template ConvertToInt<uint64_t>();
++            if (m > 0xFFFFFFFFull)
 +                fits32 = false;
-+        if (fits32) {
++            if (m >= (1ull << 60))
++                fits60 = false;  // p_hi must fit 28 bits next to the digit tag (SPEC v2)
++        }
++        if (fits32 || fits60) {
++            aSeedWide = !fits32;
 +            PRNG& prng = PseudoRandomNumberGenerator::GetPRNG();
 +            aSeed.resize(8);
 +            for (auto& w : aSeed)
@@ -306,12 +370,12 @@ index 552fee8..fd9eb68 100644
 -                                           ekPrev->GetAVector()[part];                                      // threshold HE
 +        DCRTPoly a = (ekPrev != nullptr) ? ekPrev->GetAVector()[part]  // threshold HE
 +                     : (!aSeed.empty())
-+                         ? SeededKskA(aSeed.data(), static_cast<uint32_t>(part), paramsQP)  // seed-expanded
++                         ? SeededKskA(aSeed.data(), static_cast<uint32_t>(part), paramsQP, aSeedWide)  // seed-expanded
 +                         : DCRTPoly(dug, paramsQP, Format::EVALUATION);  // single-key HE, conventional
          DCRTPoly e(dgg, paramsQP, Format::EVALUATION);
          DCRTPoly b(paramsQP, Format::EVALUATION, true);
  
-@@ -131,6 +190,8 @@ EvalKey<DCRTPoly> KeySwitchHYBRID::KeySwitchGenInternal(const PrivateKey<DCRTPol
+@@ -131,6 +210,8 @@ EvalKey<DCRTPoly> KeySwitchHYBRID::KeySwitchGenInternal(const PrivateKey<DCRTPol
      ek->SetAVector(std::move(av));
      ek->SetBVector(std::move(bv));
      ek->SetKeyTag(newKey->GetKeyTag());
@@ -321,5 +385,5 @@ index 552fee8..fd9eb68 100644
  }
  
 -- 
-2.43.7
+2.43.0
 
