@@ -2899,6 +2899,8 @@ __device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*
 
     ACC* acc_this_thread = ((ACC*)buffer) + block_id;
 
+    // Wide-prime guard (2026-08-26, add.159): see dotProductLtBatchedPt3BodyG.
+    const bool wideAcc = sizeof(T) == 4 && C_.prime_bits[primeid] > 28;
     const bool im_c0 = threadIdx.y == 0;
     void*** inputs = im_c0 ? c0_in : c1_in;
     void*** outputs = im_c0 ? c0_out : c1_out;
@@ -2927,6 +2929,9 @@ __device__ __forceinline__ void dotProductLtBatchedPt3Body(void*** c0_out, void*
                     acc_this_thread[j * in_stride] = mult;
                 else
                     acc_this_thread[j * in_stride] = acc_this_thread[j * in_stride] + mult;
+                if (wideAcc)
+                    acc_this_thread[j * in_stride] =
+                        (ACC)modreduce_lazy((uint64_t)acc_this_thread[j * in_stride], primeid);
 
                 if (i == bStep - 1) {
                     // modreduce(__uint128_t)->uint64_t and modreduce(uint64_t)->uint32_t both exist
@@ -2954,6 +2959,12 @@ template <typename T, typename ACC, int GSTEP>
 __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void*** c1_out, void*** c0_in,
                                                             void*** c1_in, void*** pts, const int bStep, const int n,
                                                             const int idx, const int primeid) {
+    // Wide-prime guard (2026-08-26, add.159): the u64 accumulator's "bStep up to 2^8"
+    // bound assumes 28-bit primes (2^56 products). A 30-bit limb's products are 2^60,
+    // so bStep >= 16 wraps u64 silently — measured as ~3 bits lost at a 2x30-bit q0
+    // (CtS/StC run bStep ~32). Reduce per chunk on wide primes; the branch is uniform
+    // per primeid and touches only the q0 limbs of a wide chain.
+    const bool wideAcc = sizeof(T) == 4 && C_.prime_bits[primeid] > 28;
     const bool im_c0 = threadIdx.y == 0;
     void*** inputs = im_c0 ? c0_in : c1_in;
     void*** outputs = im_c0 ? c0_out : c1_out;
@@ -2982,6 +2993,9 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
                 ACC m2 = (p2 != nullptr) ? (ACC)in2 * (ACC)FIDESLIB_STREAM_LD((T*)p2[blockIdx.y] + idx) : (ACC)0;
                 ACC m3 = (p3 != nullptr) ? (ACC)in3 * (ACC)FIDESLIB_STREAM_LD((T*)p3[blockIdx.y] + idx) : (ACC)0;
                 acc[j] = acc[j] + m0 + m1 + m2 + m3;
+                // wide primes: 4 products = 2^62 on top of a <2^31 residue — reduce per quad.
+                if (wideAcc)
+                    acc[j] = (ACC)modreduce_lazy((uint64_t)acc[j], primeid);
             }
         }
 #endif
@@ -2997,6 +3011,8 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
                 ACC m0 = (p0 != nullptr) ? (ACC)in0 * (ACC)FIDESLIB_STREAM_LD((T*)p0[blockIdx.y] + idx) : (ACC)0;
                 ACC m1 = (p1 != nullptr) ? (ACC)in1 * (ACC)FIDESLIB_STREAM_LD((T*)p1[blockIdx.y] + idx) : (ACC)0;
                 acc[j] = acc[j] + m0 + m1;
+                if (wideAcc)
+                    acc[j] = (ACC)modreduce_lazy((uint64_t)acc[j], primeid);
             }
         }
 #endif
@@ -3009,6 +3025,8 @@ __device__ __forceinline__ void dotProductLtBatchedPt3BodyG(void*** c0_out, void
                 if (pt_partition != nullptr)
                     mult = (ACC)in * (ACC)FIDESLIB_STREAM_LD((T*)pt_partition[blockIdx.y] + idx);
                 acc[j] = acc[j] + mult;
+                if (wideAcc)
+                    acc[j] = (ACC)modreduce_lazy((uint64_t)acc[j], primeid);
             }
         }
 #pragma unroll
