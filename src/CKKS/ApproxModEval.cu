@@ -20,6 +20,19 @@ constexpr bool PRINT = false;
 
 using namespace FIDESlib::CKKS;
 
+#include "CKKS/Bootstrap.cuh"
+// Stage-divergence harness (add.165): stash checkpoints INSIDE the EvalMod segment —
+// the 60/54 comb's low-frequency generator lives between post-CtS and pre-StC and the
+// outer probes cannot attribute it. Inert unless a caller installed the stash.
+static void emStageProbe(const char* stage, FIDESlib::CKKS::Ciphertext& ctxt) {
+    if (FIDESlib::CKKS::g_btsStageStash) {
+        cudaDeviceSynchronize();
+        auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
+        c->copy(ctxt);
+        FIDESlib::CKKS::g_btsStageStash->emplace_back(stage, std::move(c));
+    }
+}
+
 void evalChebyshevSeries(Ciphertext& ctxt, const KeySwitchingKey& keySwitchingKey, std::vector<double>& coefficients, double lower_bound, double upper_bound);
 void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey& kskEval, double outScale = 1.0);
 
@@ -106,9 +119,13 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	bool constexpr COMPLEX = true;
 	ContextData& cc		   = ctxtEnc.cc;
 
+	emStageProbe("EM-in-Re", ctxtEnc);
+	emStageProbe("EM-in-Im", ctxtEncI);
 	if constexpr (COMPLEX)
 		evalChebyshevSeries(ctxtEncI, cc.GetCoeffsChebyshev(), -1.0, 1.0);
 	evalChebyshevSeries(ctxtEnc, cc.GetCoeffsChebyshev(), -1.0, 1.0);
+	emStageProbe("EM-cheby-Re", ctxtEnc);
+	emStageProbe("EM-cheby-Im", ctxtEncI);
 	if constexpr (PRINT) {
 		std::cout << "ctxtEnc res " << ctxtEnc.getLevel() << " " << ctxtEnc.NoiseLevel << std::endl;
 		for (auto& i : ctxtEnc.c0.GPU.at(0).limb) {
@@ -128,6 +145,8 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	applyDoubleAngleIterations(ctxtEnc, cc.GetDoubleAngleIts(), keySwitchingKey);
 	if constexpr (COMPLEX)
 		applyDoubleAngleIterations(ctxtEncI, cc.GetDoubleAngleIts(), keySwitchingKey);
+	emStageProbe("EM-DA-Re", ctxtEnc);
+	emStageProbe("EM-DA-Im", ctxtEncI);
 	if (!sparseArcsineMode() && arcsineEnabled()) {
 		applyArcsineCorrection(ctxtEnc);
 		if constexpr (COMPLEX)
@@ -151,9 +170,11 @@ void FIDESlib::CKKS::approxModReduction(Ciphertext& ctxtEnc, Ciphertext& ctxtEnc
 	// cudaDeviceSynchronize();
 	if constexpr (COMPLEX)
 		ctxtEncI.multMonomial(cc.N / 2);
+	emStageProbe("EM-mono-Im", ctxtEncI);
 	// cudaDeviceSynchronize();
 	if constexpr (COMPLEX)
 		ctxtEnc.add(ctxtEncI);
+	emStageProbe("EM-comb", ctxtEnc);
 	if constexpr (!COMPLEX)
 		ctxtEnc.add(ctxtEnc);
 	// cudaDeviceSynchronize();
@@ -895,10 +916,20 @@ void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey
 	ContextData& cc = ctxt.cc;
 	int32_t r		= its;
 	// std::cout << "Its: " << its << std::endl;
+	// add.165 probe plumbing: distinguish the Re/Im calls in the stash names
+	static std::atomic<int> daCall{0};
+	const int callId = FIDESlib::CKKS::g_btsStageStash ? daCall++ : 0;
 	for (int32_t j = 1; j < r + 1; j++) {
 		if (cc.rescaleTechnique == FIDESlib::CKKS::FIXEDMANUAL)
 			ctxt.rescale();
 		ctxt.square(false);
+		if (FIDESlib::CKKS::g_btsStageStash) {
+			cudaDeviceSynchronize();
+			auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
+			c->copy(ctxt);
+			FIDESlib::CKKS::g_btsStageStash->emplace_back(
+			    "EM-DAc" + std::to_string(callId) + "-sq" + std::to_string(j), std::move(c));
+		}
 		double scalar = -1.0 / std::pow((2.0 * M_PI) / outScale, std::pow(2.0, j - r));
 		if (daFoldBits() && j == r) {
 			const double s = std::pow(2.0, daFoldBits());
@@ -907,6 +938,13 @@ void applyDoubleAngleIterations(Ciphertext& ctxt, int its, const KeySwitchingKey
 		} else {
 			ctxt.add(ctxt);
 			ctxt.addScalar(scalar);
+		}
+		if (FIDESlib::CKKS::g_btsStageStash) {
+			cudaDeviceSynchronize();
+			auto c = std::make_shared<FIDESlib::CKKS::Ciphertext>(ctxt.cc_);
+			c->copy(ctxt);
+			FIDESlib::CKKS::g_btsStageStash->emplace_back(
+			    "EM-DAc" + std::to_string(callId) + "-it" + std::to_string(j), std::move(c));
 		}
 
 		// cudaDeviceSynchronize();

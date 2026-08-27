@@ -553,6 +553,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
                               const bool sparse_encaps) {
     CudaNvtxRange r(std::string{sc::current().function_name()}.substr());
     ContextData& cc = ctxt.cc;
+    btsStageProbe("MR-entry", ctxt);
     //------------------------------------------------------------------------------
     // RAISING THE MODULUS
     //------------------------------------------------------------------------------
@@ -784,6 +785,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         }
     }
 
+    btsStageProbe("MR-bottom", ctxt);
     if (sparse_encaps) {
         if (cc.compositeDegree() > 1) {
             // COMPOSITESCALING: M-4 as a STANDARD hybrid keyswitch in the MAIN context at the
@@ -801,6 +803,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
             ctxt.reinterpretContext(sparse_ctxt);
         }
     }
+    btsStageProbe("MR-atob", ctxt);
 
     //   std::cout << "Boot start " << std::endl;
     // auto ctxtDCRT = raised->GetElements();
@@ -920,6 +923,7 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         std::cout << std::endl;
     }
 
+    btsStageProbe("MR-raised", ctxt);
     if (sparse_encaps) {
         if (cc.compositeDegree() > 1) {
             // COMPOSITESCALING: M-2 back to the dense key, MAIN-context standard hybrid key.
@@ -935,5 +939,6 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
         }
     }
 
+    btsStageProbe("MR-btoa", ctxt);
     ctxt.slots = cc.N / 2;
 }
