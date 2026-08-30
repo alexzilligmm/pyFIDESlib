@@ -29,6 +29,9 @@ using sc = std::source_location;
 constexpr int PREFIX_SIZE = 23;
 #endif
 
+// add.166 add.71: while capturing, a memcpy's host SOURCE must outlive the capture.
+#define CAP_SRC(p, n) (FIDESlib::captureActive() ? FIDESlib::stageForCapture((p), (n)) : (const void*)(p))
+
 namespace FIDESlib::CKKS {
 
 LimbPartition::LimbPartition(LimbPartition&& l) noexcept
@@ -300,12 +303,12 @@ void LimbPartition::generate(std::vector<LimbRecord>& records, std::vector<LimbI
     if (size > 0) {
         if (!noptr) {
         if (limbs_size + size > ptrs.size) { std::cerr << "PTRS BOUNDS ERROR: ptrs.size=" << ptrs.size << " limbs_size=" << limbs_size << " size=" << size << " total=" << (limbs_size + size) << " at " << __FILE__ << ":" << __LINE__ << std::endl; }
-            cudaMemcpyAsync(ptrs.data + limbs_size, cpu_ptr.data(), size * sizeof(void*), cudaMemcpyHostToDevice,
-                            s.ptr());
+            cudaMemcpyAsync(ptrs.data + limbs_size, CAP_SRC(cpu_ptr.data(), size * sizeof(void*)),
+                            size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
             CudaCheckErrorModNoSync;
             if (auxptrs) {
-                cudaMemcpyAsync((*auxptrs).data + limbs_size, cpu_auxptr.data(), size * sizeof(void*),
-                                cudaMemcpyHostToDevice, s.ptr());
+                cudaMemcpyAsync((*auxptrs).data + limbs_size, CAP_SRC(cpu_auxptr.data(), size * sizeof(void*)),
+                                size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
             }
             CudaCheckErrorModNoSync;
         }
@@ -419,7 +422,7 @@ void LimbPartition::packKeyLimbs(const int bits) {
                     h_limbptr[k] = p;
         }
     }
-    cudaMemcpyAsync(limbptr.data, h_limbptr.data(), limbptr.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(limbptr.data, CAP_SRC(h_limbptr.data(), limbptr.size * sizeof(void*)), limbptr.size * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
     for (size_t i = 0; i < DIGITlimb.size(); ++i) {
         if (DIGITlimb[i].empty())
             continue;
@@ -552,7 +555,7 @@ void LimbPartition::expandKskADigits(const std::vector<uint32_t>& seed) {
                 if (PRIMEID(j) == meta.at(k).id)
                     cpu_ptr[k] = (j.index() == U32) ? (void*)std::get<U32>(j).v.data
                                                     : (void*)std::get<U64>(j).v.data;
-    cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(limbptr.data, CAP_SRC(cpu_ptr.data(), cpu_ptr.size() * sizeof(void*)), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
 
     for (auto& d : DECOMPlimb)
         for (auto& j : d)
@@ -1749,7 +1752,7 @@ void LimbPartition::loadDecompDigit(const std::vector<std::vector<std::vector<ui
                 }
             }
         }
-        cudaMemcpyAsync(limbptr.data, cpu_ptr.data(), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
+        cudaMemcpyAsync(limbptr.data, CAP_SRC(cpu_ptr.data(), cpu_ptr.size() * sizeof(void*)), cpu_ptr.size() * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
     } else {
         for (size_t i = 0; i < DECOMPmeta.size(); ++i) {
             for (size_t j = 0; j < limb_size; ++j) {
@@ -2860,7 +2863,7 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
     uint64_t* elems;
     cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
     //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
-    cudaMemcpyAsync(elems, vector.data(), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
+    cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
 
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
@@ -2912,7 +2915,7 @@ void LimbPartition::addScalar(std::vector<uint64_t>& vector) {
     uint64_t* elems;
     cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
     //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
-    cudaMemcpyAsync(elems, vector.data(), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
+    cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
@@ -2938,7 +2941,7 @@ void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
     uint64_t* elems;
     cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
     //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
-    cudaMemcpyAsync(elems, vector.data(), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
+    cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
         uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);

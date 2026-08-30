@@ -57,6 +57,9 @@ void CudaHostSync();
 void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cudaEvent_t ev);
 void captureAdoptStream(cudaStream_t s);   // join a mid-capture-created stream to the capture
 bool captureActive();
+// Stage a host buffer into a persistent pinned arena so a captured memcpy's SOURCE outlives the
+// capture. Returns `src` unchanged when not needed or on failure. See CudaUtils.cu (add.166 add.71).
+const void* stageForCapture(const void* src, size_t bytes);
 void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev);
 inline void breakpoint() {}
 

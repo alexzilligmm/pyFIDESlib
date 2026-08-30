@@ -3,6 +3,7 @@
 //
 
 #include <atomic>
+#include <cstring>
 #include <cstdlib>
 #include <algorithm>
 #include <cassert>
@@ -352,6 +353,40 @@ void unregisterL2WindowStream(cudaStream_t s) {
 // do create streams lazily mid-bootstrap, so Stream::init has to join the capture on the spot.
 std::atomic<cudaStream_t> g_capture_origin{nullptr};
 std::atomic<cudaEvent_t> g_capture_ev{nullptr};
+
+// Stage a small HOST buffer into a persistent PINNED arena and return the stable pointer
+// (add.166 add.71). Graph capture records a memcpy's SOURCE ADDRESS; this library sources many
+// of them from function-local std::vectors, which are dead by replay time — that is what made a
+// well-formed, launchable graph die executing with cudaErrorIllegalAddress. Copying into an arena
+// that outlives the graph makes those sources valid.
+// ⚠️ Contents are frozen at capture. That is correct for a capture-then-replay-once proof, and it
+// is exactly the "stale scalar" hazard for a CACHED graph replayed on new data — see add.61.
+// ⚠️ Bump allocator, never reset: one capture's worth of staging (~64 KB) leaks per capture.
+// Bring-up only, same disposition as the GPUfree capture guard.
+namespace {
+std::mutex stage_mtx;
+uint8_t* stage_base = nullptr;
+size_t stage_off = 0, stage_cap = 0;
+}  // namespace
+
+const void* stageForCapture(const void* src, size_t bytes) {
+    if (!src || bytes == 0) return src;
+    std::lock_guard<std::mutex> lk(stage_mtx);
+    if (stage_base == nullptr) {
+        stage_cap = 64ull << 20;   // 64 MB of pinned staging; ~64 KB is used per captured bootstrap
+        if (cudaHostAlloc((void**)&stage_base, stage_cap, cudaHostAllocPortable) != cudaSuccess) {
+            stage_base = nullptr;
+            stage_cap = 0;
+            return src;            // refuse to fail the op over a staging buffer
+        }
+    }
+    const size_t need = (bytes + 255) & ~(size_t)255;
+    if (stage_off + need > stage_cap) return src;   // exhausted: fall back, capture will just fail
+    uint8_t* dst = stage_base + stage_off;
+    stage_off += need;
+    std::memcpy(dst, src, bytes);
+    return dst;
+}
 
 bool captureActive() {
     return g_capture_origin.load(std::memory_order_relaxed) != nullptr;
