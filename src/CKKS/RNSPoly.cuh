@@ -105,6 +105,7 @@ class RNSPoly {
     void modupInto(RNSPoly& poly);
     RNSPoly& dotKSKInPlaceFrom(RNSPoly& poly, const KeySwitchingKey& ksk, const RNSPoly* limbsrc = nullptr);
     void multScalar(std::vector<uint64_t>& vector1);
+    void multScalar(const uint64_t* d_elems);   // FIDESLIB_SCALAR_DEV_MEMO (add.166 add.62)
     void squareElement(const RNSPoly& poly);
     void binomialSquareFold(RNSPoly& c0_res, const RNSPoly& c2_key_switched_0, const RNSPoly& c2_key_switched_1);
     void addScalar(std::vector<uint64_t>& vector1);

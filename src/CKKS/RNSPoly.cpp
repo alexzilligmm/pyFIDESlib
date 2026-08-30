@@ -760,6 +760,13 @@ void RNSPoly::multScalar(std::vector<uint64_t>& vector1) {
         GPU[i].multScalar(vector1);
     }
 }
+void RNSPoly::multScalar(const uint64_t* d_elems) {
+#pragma omp parallel for num_threads(cc.GPUid.size())
+    for (size_t i = 0; i < cc.GPUid.size(); ++i) {
+        assert(omp_get_num_threads() == (int)cc.GPUid.size());
+        GPU[i].multScalar(d_elems);
+    }
+}
 void RNSPoly::add(const RNSPoly& a, const RNSPoly& b) {
 #if FIDESLIB_COPY_CENSUS
     {

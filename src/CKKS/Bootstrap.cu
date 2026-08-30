@@ -2,6 +2,8 @@
 // Created by carlosad on 4/12/24.
 //
 
+#include <atomic>
+#include <cstdlib>
 #include "CKKS/AccumulateBroadcast.cuh"
 #include "CKKS/ApproxModEval.cuh"
 #include "CKKS/Bootstrap.cuh"
@@ -277,7 +279,93 @@ void FIDESlib::CKKS::BootstrapCPUraise(
     }
 }
 
+// ── CUDA GRAPH BRING-UP (add.166 add.69, FIDESLIB_BTS_GRAPH) ────────────────────────────────
+// Why this is being reopened after add.60 closed it: the close was correct on its own evidence
+// (bootstrap interiors are 91.4% GPU-busy, so the ceiling is small) but three things changed.
+//   * add.62 measured the REAL intra-bootstrap idle unprofiled at ~1.0-1.3 ms/bts = ~0.6-0.75
+//     s/token, which after add.61 landed is the LARGEST remaining addressable item;
+//   * add.62 also REFUTED the allocator/event-overhead explanation, leaving the arithmetic
+//     2826 launches x ~0.35 us ~= 1.0 ms — residual per-launch dispatch gap, which is precisely
+//     and only what a graph removes;
+//   * FIDESLIB_SCALAR_DEV_MEMO (add.62) already removes multScalar's per-call PAGEABLE H2D, one
+//     of the capture blockers the add.61 design review identified.
+//
+// mode 0 = off, byte-identical eager (default).
+// mode 2 = DRY CAPTURE: capture on a CLONE, report the outcome, discard the graph, then run the
+//          real bootstrap eagerly. A clone is required because work does NOT execute during
+//          capture — probing the live ciphertext would leave it garbage AND double-apply the
+//          host-side metadata updates (NoiseFactor/level/slots), which replay never re-runs.
+//          This mode answers "is capture even possible, and with what error" for one build.
+static int btsGraphMode() {
+    static const int v = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_GRAPH");
+        return (e && *e) ? std::atoi(e) : 0;
+    }();
+    return v;
+}
+
+namespace FIDESlib::CKKS { static void BootstrapEager(Ciphertext& ctxt, int slots, bool prescaled); }
+using FIDESlib::CKKS::BootstrapEager;
+
 void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled) {
+    if (btsGraphMode() >= 2) {
+        // WARM UP FIRST. Several allocations in this library are lazily initialised on first use
+        // and are capture-hostile: `modup_ksk_moddown_mgpu`'s static `signals` does
+        // cudaFreeHost + cudaHostAlloc + cudaDeviceSynchronize (RNSPoly.cpp:1474-1510), all of
+        // which are "operation not permitted when stream is capturing". They run ONCE, so the fix
+        // is to let a few bootstraps run eagerly before probing rather than to touch that code.
+        static std::atomic<int> calls{0};
+        if (calls.fetch_add(1) < 3) { BootstrapEager(ctxt, slots, prescaled); return; }
+        static std::atomic<int> reported{0};
+        static std::atomic<int> ok{0}, fail{0};
+        Ciphertext probe(ctxt.cc_);
+        probe.copy(ctxt);
+        // Capture the PROBE's stream, not ctxt's. The clone owns its own partition streams, so
+        // capturing ctxt's produced a valid but EMPTY graph (nodes=0) — the tell that the work
+        // went somewhere the capture was not watching.
+        cudaStream_t s = probe.c0.GPU[0].getS().ptr();
+        cudaGraph_t g = nullptr;
+        static cudaEvent_t fork_ev = [] {
+            cudaEvent_t e = nullptr;
+            cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+            return e;
+        }();
+        std::vector<cudaStream_t> forked;
+        cudaError_t eb = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed);
+        if (eb == cudaSuccess) {
+            // Pull every live FIDESlib stream INTO the capture, else the first cross-stream
+            // Stream::wait is cudaErrorStreamCaptureIsolation ("dependency created on uncaptured
+            // work in another stream", CudaUtils.cu:235) — which is how the previous attempt died.
+            FIDESlib::captureForkAll(s, forked, fork_ev);
+            std::fprintf(stderr, "[bts_graph] forked %zu stream(s) into the capture\n",
+                         forked.size());
+            BootstrapEager(probe, slots, prescaled);
+            FIDESlib::captureJoinAll(s, forked, fork_ev);   // un-joined fork => CaptureUnjoined
+            cudaError_t ee = cudaStreamEndCapture(s, &g);
+            size_t nodes = 0;
+            if (ee == cudaSuccess && g) cudaGraphGetNodes(g, nullptr, &nodes);
+            if (ee == cudaSuccess) ++ok; else ++fail;
+            if (reported.fetch_add(1) < 12)
+                std::fprintf(stderr,
+                             "[bts_graph] dry begin=%s end=%s nodes=%zu forked=%zu slots=%d lvl=%d\n",
+                             cudaGetErrorName(eb), cudaGetErrorName(ee), nodes, forked.size(),
+                             slots, (int)ctxt.c0.getLevel());
+            if (g) cudaGraphDestroy(g);
+        } else {
+            ++fail;
+            if (reported.fetch_add(1) < 12)
+                std::fprintf(stderr, "[bts_graph] dry begin=%s (capture refused)\n",
+                             cudaGetErrorName(eb));
+        }
+        cudaGetLastError();   // the probe's failures are DIAGNOSTIC; never leak into the real run
+        BootstrapEager(ctxt, slots, prescaled);
+        return;
+    }
+    BootstrapEager(ctxt, slots, prescaled);
+}
+
+namespace FIDESlib::CKKS {
+static void BootstrapEager(Ciphertext& ctxt, const int slots, const bool prescaled) {
     CudaNvtxRange r(std::string{sc::current().function_name()});
 
     assert(slots >= ctxt.slots);
@@ -482,6 +570,7 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
 
     ctxt.slots = old_slots;
 }
+}  // namespace FIDESlib::CKKS
 
 double FIDESlib::CKKS::GetPreScaleFactor(Context& cc_, int slots) {
     ContextData& cc = *cc_;

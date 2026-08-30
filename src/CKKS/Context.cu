@@ -437,6 +437,43 @@ RNSPoly& ContextData::getModdownAux(const int num) {
     p->generateSpecialLimbs(false, true);
     return *p;
 }
+bool scalarDevMemoEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_SCALAR_DEV_MEMO");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+const uint64_t* ContextData::DevElemForEvalMult(int level, const double operand, int level_in) {
+    if (!scalarDevMemoEnabled())
+        return nullptr;
+    uint64_t operand_bits;
+    std::memcpy(&operand_bits, &operand, sizeof(operand_bits));
+    const ElemMemoKey memo_key{level, (level_in == -1 ? level : level_in), operand_bits};
+    {
+        std::lock_guard<std::mutex> g(elem_memo_mutex);
+        auto it = dev_elem_memo.find(memo_key);
+        if (it != dev_elem_memo.end())
+            return it->second;
+    }
+    // Miss: build the host residues through the EXISTING memo (so the two never diverge), then
+    // publish one persistent device copy. Deliberately plain cudaMalloc + SYNCHRONOUS cudaMemcpy,
+    // not the async pool: the pool's GPUmalloc records on a global per-device stream and makes
+    // the caller wait on it (CudaUtils.cu:474-478), which is exactly the cross-stream handshake
+    // this change exists to stop paying. The sync happens O(distinct scalars) times in the whole
+    // run -- a few thousand at warmup -- and never again.
+    const std::vector<uint64_t> host = ElemForEvalMult(level, operand, level_in);
+    uint64_t* d = nullptr;
+    if (cudaMalloc(&d, host.size() * sizeof(uint64_t)) != cudaSuccess || d == nullptr)
+        return nullptr;   // fall back to the eager path; never fail the op over a cache
+    cudaMemcpy(d, host.data(), host.size() * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    std::lock_guard<std::mutex> g(elem_memo_mutex);
+    auto [it, inserted] = dev_elem_memo.emplace(memo_key, d);
+    if (!inserted) cudaFree(d);   // lost a race; keep the winner
+    return it->second;
+}
+
 std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double operand, int level_in) {
 
     // Memoized: the Chebyshev evaluator calls this once per weight per bootstrap with a

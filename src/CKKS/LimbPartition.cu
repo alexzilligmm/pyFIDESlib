@@ -1671,21 +1671,50 @@ void LimbPartition::generateLimbConstant() {
     assert(limb.size() == 0);
     assert(limbsize <= meta.size());
 
-    if (bufferLIMB == nullptr) {
-        //bufferLIMB = (uint64_t*)GPUmalloc(device, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
-        //cudaMallocAsync(&bufferLIMB, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
-    } else {
+    // FHE_ACQ_FAST=1 (add.166 add.64): allocate ONE slab and let generate() build non-owning limb
+    // views into it, instead of one GPUmalloc per limb. Measured motivation, not cleanup:
+    // add.63 attributed `res_acquire` to Plaintext::loadStaged = 338 ms/token at **100% GPU idle**,
+    // of which LimbPartition::generate outside bootstraps is 4530 calls / 149.2 ms (40.7 us each).
+    // Each pooled GPUmalloc also takes mempool_lock and does a record + cudaStreamWaitEvent against
+    // the GLOBAL per-device pool stream (CudaUtils.cu:474-478), so ~20 per plaintext is ~20
+    // cross-stream handshakes as well as 20 allocations.
+    //
+    // The slab path is the SAME one generateLimbSingleMalloc uses for ciphertexts, so the view
+    // construction is proven; what was never exercised is using it for `constant` (plaintext)
+    // polys. Sizing note: a U32 limb is placed at uint32 index 2*offset with offset advancing by
+    // cc.N, i.e. each limb reserves 2N uint32 slots = N uint64s — so N*limbsize*sizeof(uint64_t)
+    // is exact for BOTH chains.
+    // ⚠️ Default OFF. The failure mode is mis-offset limb views = silently wrong weights, so the
+    // gate is weight_relevels=0 AND KL in band, not merely "it ran".
+    static const bool slab = [] {
+        const char* e = std::getenv("FHE_ACQ_FAST");
+        return e && *e && std::atoi(e) != 0;
+    }();
+    // ⚠️ ROUND UP TO A POWER OF TWO (add.166 add.64). GPUmalloc only uses its POOL when the size is
+    // a power of two -- `if (cache && (bytes & (bytes - 1)) == 0)` at CudaUtils.cu:437. The natural
+    // slab size (N*limbsize*8 ~= 24 MB) is not, so the first cut of this fell through to the
+    // UNPOOLED cudaMallocAsync(..., 0) on the legacy default stream and was a measured wash: it
+    // traded ~20 pooled stream-local allocations for one default-stream allocation that implicitly
+    // synchronises against every blocking stream. Rounding costs ~33% of a buffer that is freed
+    // immediately and recycled by the pool.
+    size_t want = std::max((size_t)1, (size_t)cc.N * (size_t)limbsize * sizeof(uint64_t));
+    if (want & (want - 1)) {
+        size_t p2 = 1;
+        while (p2 < want) p2 <<= 1;
+        want = p2;
+    }
+    if (bufferLIMB != nullptr) {
         GPUfree(bufferLIMB, id, (int)bufferLIMBbytes, s.ptr());  // FAILURE §7
         bufferLIMB = nullptr;
         bufferLIMBbytes = 0;
-        //cudaFreeAsync(&bufferLIMB, s.ptr());
-        //bufferLIMB = (uint64_t*)GPUmalloc(device, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
-        //cudaMallocAsync(&bufferLIMB, std::max(1ul, cc.N * limbsize * sizeof(uint64_t)), s.ptr());
+    }
+    if (slab) {
+        bufferLIMB = (uint64_t*)GPUmalloc(device, (int)want, s.ptr());
+        bufferLIMBbytes = bufferLIMB ? want : 0;   // nullptr => fall through to the per-limb path
     }
 
     //limb.clear();
-    //generate(meta, limb, limbptr, (int)limbsize - 1, &auxptr, bufferLIMB, 0, nullptr, 0);
-    generate(meta, limb, limbptr, (int)limbsize - 1, nullptr /*&auxptr*/, nullptr, 0, nullptr, 0);
+    generate(meta, limb, limbptr, (int)limbsize - 1, nullptr /*&auxptr*/, bufferLIMB, 0, nullptr, 0);
 }
 
 void LimbPartition::loadDecompDigit(const std::vector<std::vector<std::vector<uint64_t>>>& data,
@@ -2849,6 +2878,32 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
         s.wait(STREAM(limb[i]));
     }
     cudaFreeAsync(elems, s.ptr());
+}
+
+// FIDESLIB_SCALAR_DEV_MEMO (add.166 add.62): same launches, byte for byte, but the operand
+// residues come from ContextData::DevElemForEvalMult's persistent device buffer instead of a
+// per-call cudaMallocAsync + PAGEABLE cudaMemcpyAsync + cudaFreeAsync. The removed copy was the
+// expensive part: a sub-64 KB pageable H2D is staged synchronously by the driver on the calling
+// HOST thread, and with one enqueue thread that stall is a GPU gap.
+void LimbPartition::multScalar(const uint64_t* d_elems) {
+    const int limbsize = getLimbSize(*level);
+    cudaSetDevice(device);
+    for (int i = 0; i < limbsize; i += cc.batch) {
+        STREAM(limb[i]).wait(s);
+        uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+        const int smul_bpt = fideslibAddBytes();
+        const size_t smul_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (smul_bpl && smul_bpt >= 16 && (smul_bpl % (size_t)(smul_bpt * 128)) == 0)
+            launchScalarMultBytes(dim3{(uint32_t)(smul_bpl / (smul_bpt * 128)), num_limbs}, dim3{128},
+                                  STREAM(limb[i]).ptr(), limbptr.data + i, (uint64_t*)d_elems,
+                                  PARTITION(id, i), nullptr, smul_bpt);
+        else
+            Scalar_mult_<ALGO_BARRETT><<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
+                limbptr.data + i, (uint64_t*)d_elems, PARTITION(id, i), nullptr);
+    }
+    for (int i = 0; i < limbsize; i += cc.batch) {
+        s.wait(STREAM(limb[i]));
+    }
 }
 
 void LimbPartition::addScalar(std::vector<uint64_t>& vector) {

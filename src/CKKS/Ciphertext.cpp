@@ -117,12 +117,24 @@ constexpr std::array<const char*, 18> opstr{ "                   Noop: ",
 // S7 thread-safety: pre-populate every enum key at static init so operator[] never
 // inserts (a concurrent map-node insert is UB); the remaining concurrent int++ can tear
 // a count but cannot corrupt the map. Counters are diagnostics, not measurements.
-std::map<OPS, int> op_count = [] {
+// ⚠️ INTENTIONALLY NEVER DESTROYED (2026-08-29) — same static-destruction-order fiasco as
+// CudaUtils.cu's pool statics and as add.166 add.56 / commit 8c15703. `ContextData::~ContextData`
+// (Context.cu:1124) calls Ciphertext::clearOpRecord() -> op_count.clear(), but op_count lives in
+// THIS TU and the context cache in another; when op_count's destructor ran first, the .clear()
+// re-erased already-freed nodes. Proven by ASan (add.166 add.59):
+//   ERROR: AddressSanitizer: attempting double-free on a 40-byte region
+//     #1 std::_Rb_tree<OPS, pair<const OPS,int>>::_M_erase
+//     #2 FIDESlib::CKKS::Ciphertext::clearOpRecord()
+//     #3 FIDESlib::CKKS::ContextData::~ContextData()
+//     #6 std::map<Parameters, shared_ptr<ContextData>>::~map()  <- __run_exit_handlers
+//   with the "freed by" stack being the SAME _M_erase.
+// These are diagnostic counters; leaking one map per process is free.
+std::map<OPS, int>& op_count = *new std::map<OPS, int>([] {
 	std::map<OPS, int> m;
 	for (int i = 0; i <= (int)OPS::HOISTEDROTATEOUTS; ++i)
 		m[(OPS)i] = 0;
 	return m;
-}();
+}());
 
 Ciphertext::Ciphertext(Ciphertext&& ct_moved) noexcept
 : my_range(std::move(ct_moved.my_range)), keyID(std::move(ct_moved.keyID)), cc_(ct_moved.cc_), cc(*cc_), c0(std::move(ct_moved.c0)), c1(std::move(ct_moved.c1)),
@@ -928,9 +940,18 @@ void Ciphertext::multScalarNoPrecheck(const double c, bool rescale) {
 		++t_adjust_work.scalar;
 	op_count[OPS::MULTSCALAR]++;
 
-	auto elem = cc.ElemForEvalMult(c0.getLevel(), c);
-	c0.multScalar(elem);
-	c1.multScalar(elem);
+	// FIDESLIB_SCALAR_DEV_MEMO (add.166 add.62): when armed, both polys read the operand from a
+	// persistent device buffer, removing 2x (cudaMallocAsync + PAGEABLE cudaMemcpyAsync +
+	// cudaFreeAsync) per ciphertext scalar-multiply. nullptr => knob off or allocation refused,
+	// so the eager path below is the fallback and stays the only path by default.
+	if (const uint64_t* d_elem = cc.DevElemForEvalMult(c0.getLevel(), c)) {
+		c0.multScalar(d_elem);
+		c1.multScalar(d_elem);
+	} else {
+		auto elem = cc.ElemForEvalMult(c0.getLevel(), c);
+		c0.multScalar(elem);
+		c1.multScalar(elem);
+	}
 
 	// Manage metadata
 	NoiseLevel += 1;

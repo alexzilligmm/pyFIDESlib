@@ -266,6 +266,9 @@ class LimbPartition {
 
     void modupInto(LimbPartition& partition, LimbPartition& partition1);
     void multScalar(std::vector<uint64_t>& vector);
+    // Device-resident operand (FIDESLIB_SCALAR_DEV_MEMO, add.166 add.62). Buffer is owned by
+    // ContextData::DevElemForEvalMult and outlives every call.
+    void multScalar(const uint64_t* d_elems);
     void squareElement(const LimbPartition& p);
     void binomialSquareFold(LimbPartition& c0_res, const LimbPartition& c2_key_switched_0,
                             const LimbPartition& c2_key_switched_1);

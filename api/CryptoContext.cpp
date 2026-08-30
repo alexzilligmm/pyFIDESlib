@@ -21,6 +21,7 @@
 
 #include <any>
 #include <atomic>
+#include <optional>
 #include <cmath>
 #include <fstream>
 #include <complex>
@@ -897,16 +898,91 @@ void CryptoContextImpl<DCRTPoly>::KvLoadStaged(Ciphertext<DCRTPoly>& ct, const s
 	ct->original_level = this->multiplicative_depth - ct->GetLevel();
 }
 
+namespace {
+bool ptLoadStreamEnabled() {
+	static const bool v = [] {
+		const char* e = std::getenv("FIDESLIB_PT_LOAD_STREAM");
+		return e != nullptr && std::atoi(e) != 0;
+	}();
+	return v;
+}
+cudaStream_t ptFallbackStream() {
+	static cudaStream_t s = [] {
+		cudaStream_t st = nullptr;
+		cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking);
+		return st;
+	}();
+	return s;
+}
+}  // namespace
+
+// FIDESLIB_ACQ_PROBE=1 (add.166 add.63) — host-side breakdown of LoadPlaintext, the ~390 ms/token
+// `res_acquire` scope. Pure steady_clock, NO CUDA, so it is immune to the StepProfiler's per-scope
+// device drain (that distinction is what made [residperf] trustworthy where the profiler was not).
+// Printed and reset by AcqProbeReport(). Exists because add.62 spent a build on a mechanism that
+// was real and worthless: measure the split before optimising it.
+namespace {
+bool acqProbeOn() {
+	static const bool v = [] {
+		const char* e = std::getenv("FIDESLIB_ACQ_PROBE");
+		return e != nullptr && std::atoi(e) != 0;
+	}();
+	return v;
+}
+std::atomic<uint64_t> g_acq_n{0}, g_acq_mk{0}, g_acq_lookup{0}, g_acq_extract{0},
+					  g_acq_upload{0}, g_acq_register{0}, g_acq_ready{0};
+// Per-BRANCH counts. The first cut of this probe timed only the non-staged branch while `n`
+// counted every call, so `upload/n` averaged an untimed majority into a meaningless 490 us
+// (NVTX said the true split was 3920 staged @86us + 188 non-staged @1498us). Count what you time.
+std::atomic<uint64_t> g_acq_c_persist{0}, g_acq_c_staged{0}, g_acq_c_coeff{0}, g_acq_c_plain{0},
+					  g_acq_t_staged{0}, g_acq_t_extract{0};
+struct AcqTick {
+	std::atomic<uint64_t>& sink;
+	std::chrono::steady_clock::time_point t0;
+	explicit AcqTick(std::atomic<uint64_t>& s) : sink(s), t0(std::chrono::steady_clock::now()) {}
+	~AcqTick() {
+		sink.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+						   std::chrono::steady_clock::now() - t0).count(),
+					   std::memory_order_relaxed);
+	}
+};
+}  // namespace
+
+extern "C" void AcqProbeReport(int tok) {
+	if (!acqProbeOn()) return;
+	auto ms = [](std::atomic<uint64_t>& a) {
+		return (double)a.exchange(0, std::memory_order_relaxed) / 1e6;
+	};
+	const uint64_t n = g_acq_n.exchange(0, std::memory_order_relaxed);
+	auto ct = [](std::atomic<uint64_t>& a) {
+		return (unsigned long long)a.exchange(0, std::memory_order_relaxed);
+	};
+	std::printf("[acqprobe] tok%d n=%llu | persist=%llu staged=%llu(%.1fms) coeff=%llu "
+				"plain=%llu(%.1fms) | extract=%.1f mk=%.1f lookup=%.1f register=%.1f ready=%.1f ms\n",
+				tok, (unsigned long long)n, ct(g_acq_c_persist), ct(g_acq_c_staged),
+				ms(g_acq_t_staged), ct(g_acq_c_coeff), ct(g_acq_c_plain), ms(g_acq_upload),
+				ms(g_acq_t_extract), ms(g_acq_mk), ms(g_acq_lookup), ms(g_acq_register),
+				ms(g_acq_ready));
+	std::fflush(stdout);
+}
+
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stream_override) {
 	if (pt->loaded || this->devices.empty())
 		return;
+	const bool _probe = acqProbeOn();
+	if (_probe) g_acq_n.fetch_add(1, std::memory_order_relaxed);
 
 	if (!this->loaded) {
 		OPENFHE_THROW("CryptoContext not loaded to any device");
 	}
 
 	auto& context_gpu = std::any_cast<FIDESlib::CKKS::Context&>(this->gpu);
-	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
+	std::shared_ptr<FIDESlib::CKKS::Plaintext> gpu_pt;
+	{
+		std::optional<AcqTick> _t;
+		if (_probe) _t.emplace(g_acq_mk);
+		gpu_pt = std::make_shared<FIDESlib::CKKS::Plaintext>(context_gpu);
+	}
 	const cudaStream_t load_stream = ResolvePlaintextLoadStream(stream_override);
 
 	const void* key = static_cast<const void*>(pt.get());
@@ -942,10 +1018,14 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 		} else {
 			gpu_pt->load(e->meta);
 		}
+		if (_probe) g_acq_c_persist.fetch_add(1, std::memory_order_relaxed);
 		uint32_t handle = this->RegisterDevicePlaintext(std::move(gpu_pt));
 		pt->gpu			= handle;
 		pt->loaded		= true;
 		RecordPlaintextReady(handle, load_stream);
+		// Preserve the old contract: loaded-on-return. Waits on OUR stream only, not the device.
+		if (stream_override == nullptr && !plaintext_streams_enabled && ptLoadStreamEnabled())
+			cudaStreamSynchronize(load_stream);
 		return;
 	}
 
@@ -956,6 +1036,8 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 	FIDESlib::CKKS::RawPlainText raw_pt;
 	bool					   from_stash = false;
 	if (prefetched_raw_mutex) {
+		std::optional<AcqTick> _t;
+		if (_probe) _t.emplace(g_acq_lookup);
 		// RAII: the any_casts below can throw (a std::any holding neither type), and the raw
 		// lock/unlock pair this replaces would then have stranded the mutex for the process.
 		std::unique_lock<std::shared_mutex> lk(*prefetched_raw_mutex);
@@ -982,10 +1064,13 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 	}
 
 	if (have_staged && staged.coeff) {
+		if (_probe) g_acq_c_coeff.fetch_add(1, std::memory_order_relaxed);
 		gpu_pt->loadCoeffExpand(staged.meta, staged.arena, staged.off, staged.len,
 								(int)composite_degree_of(this->cpu), staged.target_limbs, load_stream,
 								staged.prescale_log2);
 	} else if (have_staged && staged.arena != nullptr) {
+		std::optional<AcqTick> _t;
+		if (_probe) { g_acq_c_staged.fetch_add(1, std::memory_order_relaxed); _t.emplace(g_acq_t_staged); }
 		gpu_pt->loadStaged(staged.meta, staged.arena, staged.off, staged.len, load_stream);
 	} else {
 		// A coeff-marked plaintext carries only its first d limbs — it MUST come through the
@@ -995,20 +1080,36 @@ void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stre
 						  "twice, or staged before the arena was armed) — this is a bug");
 		FIDESlib::CKKS::RawPlainText* src = have_staged ? &staged.meta : &raw_pt;   // staged-fallback keeps sub_0
 		if (!have_staged && !from_stash) {
+			std::optional<AcqTick> _e;
+			if (_probe) _e.emplace(g_acq_t_extract);
 			auto& context	   = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(this->cpu);
 			const auto& ptImpl = std::any_cast<const lbcrypto::Plaintext&>(pt->cpu);
 			raw_pt			   = FIDESlib::CKKS::GetRawPlainText(context, ptImpl);
 		}
+		std::optional<AcqTick> _t;
+		if (_probe) { g_acq_c_plain.fetch_add(1, std::memory_order_relaxed); _t.emplace(g_acq_upload); }
 		if (load_stream != nullptr) {
 			gpu_pt->load(*src, load_stream);
 		} else {
 			gpu_pt->load(*src);
 		}
 	}
-	uint32_t handle = this->RegisterDevicePlaintext(std::move(gpu_pt));
+	uint32_t handle;
+	{
+		std::optional<AcqTick> _t;
+		if (_probe) _t.emplace(g_acq_register);
+		handle = this->RegisterDevicePlaintext(std::move(gpu_pt));
+	}
 	pt->gpu			= handle;
 	pt->loaded		= true;
-	RecordPlaintextReady(handle, load_stream);
+	{
+		std::optional<AcqTick> _t;
+		if (_probe) _t.emplace(g_acq_ready);
+		RecordPlaintextReady(handle, load_stream);
+	}
+	// Preserve the old contract: loaded-on-return. Waits on OUR stream only, not the device.
+	if (stream_override == nullptr && !plaintext_streams_enabled && ptLoadStreamEnabled())
+		cudaStreamSynchronize(load_stream);
 }
 
 void CryptoContextImpl<DCRTPoly>::ExtractRawPlaintext(Plaintext& pt) {
@@ -3275,12 +3376,27 @@ void CryptoContextImpl<DCRTPoly>::Synchronize() const {
 	}
 }
 
+// FIDESLIB_PT_LOAD_STREAM=1 (add.166 add.65) — a dedicated NON-BLOCKING stream for plaintext loads
+// that would otherwise fall to the legacy default stream.
+//
+// Today a no-override LoadPlaintext returns nullptr, so Plaintext::load runs on stream 0, which
+// implicitly synchronises against every blocking stream: each call DRAINS the pipeline. Measured
+// (add.63/64): 210 such loads/token at **11.0 ms each unprofiled**, of which ~234 ms/token is real
+// GPU IDLE (the rest is the host waiting for GPU work that had to happen anyway — add.63's nsys
+// inversion showed the same probe reads 1.41 ms/call under a profiler, because the profiler removes
+// the queue depth the sync was waiting on).
+//
+// SEMANTICS ARE UNCHANGED, deliberately: the caller still gets a fully-loaded plaintext on return,
+// because LoadPlaintext synchronises THIS stream (and only this stream) before returning. That is
+// what makes it safe without touching the WaitPlaintextReady/compute-stream machinery, whose
+// waits cover only ResolvePlaintextComputeStream() while FIDESlib ops run on per-partition
+// streams — enabling that path instead risks a kernel reading a plaintext before its H2D lands.
 cudaStream_t CryptoContextImpl<DCRTPoly>::ResolvePlaintextLoadStream(cudaStream_t stream_override) const {
 	if (stream_override != nullptr) {
 		return stream_override;
 	}
 	if (!plaintext_streams_enabled) {
-		return nullptr;
+		return ptLoadStreamEnabled() ? ptFallbackStream() : nullptr;
 	}
 	return plaintext_load_stream;
 }

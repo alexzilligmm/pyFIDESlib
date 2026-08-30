@@ -2,6 +2,7 @@
 // Created by carlosad on 25/03/24.
 //
 
+#include <atomic>
 #include <cstdlib>
 #include <algorithm>
 #include <cassert>
@@ -221,7 +222,12 @@ void Stream::wait(Stream& s, bool external) {
     assert(ptr_ != nullptr);
     assert(s.ptr_ != nullptr);
     assert(ev != nullptr);
-    if (!s.updated) {
+    // ⚠️ WHILE CAPTURING, ALWAYS re-record (add.166 add.69). `updated` means "this stream has a
+    // valid event", but an event recorded BEFORE cudaStreamBeginCapture is uncaptured work, and
+    // waiting on it from a capturing stream is cudaErrorStreamCaptureIsolation — the 5th and
+    // subtlest capture blocker, and invisible from the error site alone because the WAIT is what
+    // fails while the offending RECORD happened earlier and elsewhere.
+    if (!s.updated || captureActive()) {
         assert(!external);  // Has to be recorded in the origin graph
         CudaCheckErrorModNoSync;
         cudaEventRecordWithFlags(s.ev, s.ptr_, cudaEventRecordDefault);
@@ -259,9 +265,23 @@ void Stream::wait(cudaStream_t s) {
  * construction. hitRatio is derived once at set time (carveout / window) so the hardware
  * randomly persists at most a carveout's worth of the window instead of thrashing it. */
 namespace {
-std::mutex l2win_mtx;
-std::set<cudaStream_t> l2win_streams;
-cudaAccessPolicyWindow l2win{};  // num_bytes == 0 <=> no window configured
+/* ⚠️ INTENTIONALLY NEVER DESTROYED (2026-08-29) — static-destruction-order fiasco, the same class
+ * add.166 add.56 root-caused for g_staged_shared and commit 8c15703 fixed the same way.
+ *
+ * These are namespace statics, but the FIDESlib Contexts that own every Stream live in ANOTHER
+ * static (the `std::map<Parameters, shared_ptr<ContextData>>` context cache, a different TU).
+ * Destruction order across TUs is unspecified, and in practice this registry went FIRST: at exit
+ * `__run_exit_handlers` destroyed the context map -> ~ContextData -> ~vector<LimbPartition> ->
+ * ~Stream -> unregisterL2WindowStream(), which then erased from an ALREADY-DESTROYED std::set and
+ * segfaulted inside _Rb_tree_rebalance_for_erase. Locking the destroyed mutex is UB for the same
+ * reason, so both leak deliberately.
+ *
+ * Leaking them is free: a std::set of stream handles and a mutex, released by the kernel at exit.
+ * This was masked until 2026-08-29 by CudaCheckErrorMod's _Exit(1) firing on the preceding
+ * `cudaErrorCudartUnloading` — the process died before it could reach the crash. */
+std::mutex& l2win_mtx = *new std::mutex();
+std::set<cudaStream_t>& l2win_streams = *new std::set<cudaStream_t>();
+cudaAccessPolicyWindow l2win{};  // num_bytes == 0 <=> no window configured (POD, trivially destructible)
 
 void l2winApply(cudaStream_t s) {  // call with l2win_mtx held, l2win.num_bytes > 0
     cudaStreamAttrValue attr{};
@@ -314,6 +334,57 @@ void unregisterL2WindowStream(cudaStream_t s) {
 }
 }  // namespace detail
 
+// ── GRAPH-CAPTURE FORK/JOIN (add.166 add.69) ────────────────────────────────────────────────
+// A bootstrap touches ~10-40 partition streams. cudaStreamBeginCapture only captures the origin
+// stream plus streams that are FORKED FROM IT while capturing; a capturing stream waiting on an
+// event recorded by a NON-capturing stream is cudaErrorStreamCaptureIsolation — which is exactly
+// how the dry capture died:
+//   CudaUtils.cu:235 'dependency created on uncaptured work in another stream'  (Stream::wait)
+// So every live FIDESlib stream must be pulled into the capture up front and joined back before
+// EndCapture (an un-joined forked stream is cudaErrorStreamCaptureUnjoined).
+//
+// The registry is free: `l2win_streams` already holds every live stream by construction
+// (Stream::init/~Stream register/unregister), and add.59 gave it a never-destroyed lifetime.
+// ⚠️ Single-threaded bring-up only. Capture is a property of the STREAM, not the thread, so any
+// other host thread touching a forked stream would have its work silently swept into the graph.
+// A stream CREATED DURING the capture is not forked by captureForkAll (it did not exist yet), and
+// its first cross-stream wait is then cudaErrorStreamCaptureIsolation. `generate()`/`initStream()`
+// do create streams lazily mid-bootstrap, so Stream::init has to join the capture on the spot.
+std::atomic<cudaStream_t> g_capture_origin{nullptr};
+std::atomic<cudaEvent_t> g_capture_ev{nullptr};
+
+bool captureActive() {
+    return g_capture_origin.load(std::memory_order_relaxed) != nullptr;
+}
+
+void captureAdoptStream(cudaStream_t s) {
+    cudaStream_t origin = g_capture_origin.load(std::memory_order_relaxed);
+    cudaEvent_t ev = g_capture_ev.load(std::memory_order_relaxed);
+    if (!origin || !ev || !s || s == origin) return;
+    cudaEventRecord(ev, origin);       // legal: origin is the capturing stream
+    cudaStreamWaitEvent(s, ev, 0);     // pulls the newcomer into the capture
+}
+
+void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cudaEvent_t ev) {
+    g_capture_origin.store(origin, std::memory_order_relaxed);
+    g_capture_ev.store(ev, std::memory_order_relaxed);
+    forked.clear();
+    cudaEventRecord(ev, origin);
+    std::lock_guard<std::mutex> lock(l2win_mtx);
+    for (cudaStream_t s : l2win_streams) {
+        if (s == origin) continue;
+        if (cudaStreamWaitEvent(s, ev, 0) == cudaSuccess) forked.push_back(s);
+    }
+}
+void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev) {
+    g_capture_origin.store(nullptr, std::memory_order_relaxed);
+    g_capture_ev.store(nullptr, std::memory_order_relaxed);
+    for (cudaStream_t s : forked) {
+        cudaEventRecord(ev, s);
+        cudaStreamWaitEvent(origin, ev, 0);
+    }
+}
+
 int low = -1;
 int high = -1;
 void Stream::init(int priority) {
@@ -335,6 +406,7 @@ void Stream::init(int priority) {
     cudaStreamCreateWithPriority(&ptr_, 0 /*cudaStreamNonBlocking*/, prio);
     //cudaStreamCreateWithFlags(&ptr, cudaStreamNonBlocking);
     detail::registerL2WindowStream(ptr_);
+    captureAdoptStream(ptr_);   // no-op unless a graph capture is in flight (add.166 add.69)
 
     cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
     cudaEventCreate(&ev, cudaEventDisableTiming);
@@ -395,11 +467,30 @@ void initGPUprop() {
     }
 }
 
-std::mutex mempool_lock[8];
+/* ⚠️ INTENTIONALLY NEVER DESTROYED (2026-08-29) — the SAME static-destruction-order fiasco as
+ * l2win_streams above and as add.166 add.56 / commit 8c15703. `new T[8]` yields a plain T*, so
+ * every `mempool_lock[id]` / `size_to_memory[id]` / `s[id]` use site is unchanged.
+ *
+ * PROVEN BY ASan (recipe: add.166 add.56 — setarch -R first, LD_PRELOAD scoped to the target):
+ *   heap-use-after-free, READ of size 32768 in memmove
+ *     #1 FIDESlib::GPUfree            <- push_back into the pool's free-list vector
+ *     #7 FIDESlib::CKKS::ContextData::~ContextData
+ *     #10 std::map<Parameters, shared_ptr<ContextData>>::~map   <- the static context cache
+ *     #11 __run_exit_handlers
+ *   freed by:  std::_Rb_tree<int, vector<void*>>::_M_erase  <- size_to_memory's OWN destructor
+ *              #2 __GI_exit
+ *   allocated by: FIDESlib::GPUmalloc
+ * i.e. the pool map is destroyed by the exit handlers FIRST, and the context cache's destructor
+ * then calls GPUfree, which push_backs into the destroyed free-list. Order across TUs is
+ * unspecified, so the only robust fix is to outlive every possible caller.
+ *
+ * Cost: one 8-element pool per process, reclaimed by the kernel at exit; the DEVICE memory it
+ * tracks is reclaimed by the driver regardless. Do not "fix the leak" — it is load-bearing. */
+std::mutex* const mempool_lock = new std::mutex[8];
 
-std::map<int, std::vector<void*>> size_to_memory[8];
+std::map<int, std::vector<void*>>* const size_to_memory = new std::map<int, std::vector<void*>>[8];
 
-FIDESlib::Stream s[8];
+FIDESlib::Stream* const s = new FIDESlib::Stream[8];
 //void* GPUmalloc(int id, int bytes, cudaStream_t stream, FIDESlib::CKKS::Context& cc) {
 void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
     void* ptr = nullptr;
@@ -454,8 +545,26 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
     }
 
     //std::cout << bytes << std::endl;
+    // ⚠️ CAPTURE BLOCKER #1 (add.166 add.69). This unpooled fallback allocates on the LEGACY
+    // STREAM (`0`). FIDESlib streams are created BLOCKING (CudaUtils.cu:349 passes flags=0 with
+    // cudaStreamNonBlocking commented out), so a legacy-stream op while one of them is capturing
+    // is illegal: the dry capture died with
+    //   LimbPartition.cu:581 'operation would make the legacy stream depend on a capturing
+    //   blocking stream'  (= cudaErrorStreamCaptureImplicit)
+    // Note WHY that site reaches the fallback at all: `bufferSPECIALbytes = N*meta*2*8` is not a
+    // power of two, and GPUmalloc's pool is gated on power-of-two sizes (:437) — the same gate
+    // that made add.64's slab a wash. Using the CALLER's stream is strictly more correct anyway
+    // (the memory is used on that stream; the legacy version only worked by leaning on the
+    // implicit sync that blocking streams give). Scoped to graph bring-up for now so the shipped
+    // allocator path is byte-identical until capture is proven end to end.
+    static const bool graph_bringup = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_GRAPH");
+        return e && *e && std::atoi(e) != 0;
+    }();
     if (0) {
         cudaMalloc(&ptr, bytes);
+    } else if (graph_bringup) {
+        cudaMallocAsync(&ptr, bytes, stream);
     } else if (1) {
         cudaMallocAsync(&ptr, bytes, 0);
     } else {

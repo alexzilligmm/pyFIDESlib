@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace FIDESlib {
 
@@ -50,6 +51,13 @@ class CudaNvtxRange {
 int getNumDevices();
 
 void CudaHostSync();
+
+// Graph-capture fork/join over every live FIDESlib stream (add.166 add.69). See the definition in
+// CudaUtils.cu for why this is required and why it is single-threaded-only.
+void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cudaEvent_t ev);
+void captureAdoptStream(cudaStream_t s);   // join a mid-capture-created stream to the capture
+bool captureActive();
+void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev);
 inline void breakpoint() {}
 
 /* FATAL CUDA ERROR EXIT (2026-08-04). These three macros used `exit(0)`, which was wrong twice
@@ -60,12 +68,25 @@ inline void breakpoint() {}
  * killed by PID. On a one-GPU box that silently blocks the next run.
  * `_Exit(1)` skips all of that: the kernel reclaims the device memory immediately, and the
  * status is finally nonzero. Diagnostics are unaffected — the backtrace and message are already
- * printed above. */
+ * printed above.
+ *
+ * ⚠️ `cudaErrorCudartUnloading` IS WHITELISTED (2026-08-29). It does not mean "a CUDA call
+ * failed" — it means the runtime is being torn down, which is the NORMAL state inside static
+ * destructors at process exit. `ContextData::~ContextData` (Context.cu:1066) opens with
+ * CudaCheckErrorMod, so every clean run ended in `_Exit(1)`; and because `_Exit` deliberately
+ * skips stdio flushing, the buffered `printf` above was DISCARDED — the process exited 1 with
+ * NO MESSAGE AT ALL. That made a fully green `test_fideslib_wrapper` (7/7, all bitcmp badcounts
+ * 0) report as a failure to every gate script that keys on the exit code, with nothing in the
+ * log to explain it. The siblings at Context.cu:1070-1084 were already commented out one by one
+ * by someone hitting the same wall; this fixes the class instead of the instances.
+ * Safe by construction: cudartUnloading cannot occur while the runtime is live, so whitelisting
+ * it cannot mask a real fault during normal operation. Genuine fatal errors still `_Exit(1)`. */
 #define CudaCheckErrorMod                                                                    \
     do {                                                                                     \
         cudaDeviceSynchronize();                                                             \
         cudaError_t e = cudaGetLastError();                                                  \
-        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled) {                    \
+        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled &&                    \
+            e != cudaErrorCudartUnloading) {                                                 \
                                                                                              \
             printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
@@ -77,7 +98,8 @@ inline void breakpoint() {}
     do {                                                                                     \
         cudaStreamSynchronize(0);                                                            \
         cudaError_t e = cudaGetLastError();                                                  \
-        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled) {                    \
+        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled &&                    \
+            e != cudaErrorCudartUnloading) {                                                 \
             printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
             _Exit(1); /* NOT exit(0): see note above */                                                                         \
@@ -88,7 +110,8 @@ inline void breakpoint() {}
     do {                                                                                                          \
         /*cudaDeviceSynchronize();*/                                                                              \
         cudaError_t e = cudaGetLastError();                                                                       \
-        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled && e != cudaErrorGraphExecUpdateFailure) { \
+        if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled && e != cudaErrorGraphExecUpdateFailure \
+            && e != cudaErrorCudartUnloading) {                                                                   \
             void* array[10];                                                                                      \
             size_t size;                                                                                          \
             size = backtrace(array, 10);                                                                          \

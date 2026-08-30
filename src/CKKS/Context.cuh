@@ -254,6 +254,28 @@ class ContextData {
     };
     std::mutex elem_memo_mutex;
     std::unordered_map<ElemMemoKey, std::vector<uint64_t>, ElemMemoKeyHash> elem_memo;
+
+   public:
+    /** FIDESLIB_SCALAR_DEV_MEMO (default off, add.166 add.62) — the DEVICE-side companion to
+     *  elem_memo. Returns a persistent device buffer holding ElemForEvalMult's residues, or
+     *  nullptr when the knob is off.
+     *
+     *  Why: LimbPartition::multScalar did cudaMallocAsync + cudaMemcpyAsync FROM PAGEABLE HOST
+     *  STACK + cudaFreeAsync on EVERY call (~124/bootstrap, ~71k/token). A sub-64 KB pageable
+     *  H2D is staged synchronously by the driver ON THE CALLING HOST THREAD (this repo documents
+     *  it at LimbPartition.cu:1543-1545), and with one enqueue thread that host stall IS a GPU
+     *  gap — add.166 add.62 measured ~1.0-1.3 ms of real idle per bootstrap.
+     *
+     *  Why a memo and not a reused staging buffer: the entry is written ONCE at first use and
+     *  never again, so there is no write-after-read race against an in-flight async copy. A
+     *  single reused pinned buffer would need either a slot ring or a per-call event to be
+     *  correct, i.e. it would trade the malloc for the event traffic it was meant to remove.
+     *  Keyed identically to elem_memo, so a hit here implies a hit there: same bytes, same
+     *  kernel, same order => BIT-IDENTICAL by construction. That is the gate. */
+    const uint64_t* DevElemForEvalMult(int level, double operand, int level_in = -1);
+
+   private:
+    std::unordered_map<ElemMemoKey, uint64_t*, ElemMemoKeyHash> dev_elem_memo;
 };
 
 Context GenCryptoContextGPU(const Parameters& param, const std::vector<int>& devs);
