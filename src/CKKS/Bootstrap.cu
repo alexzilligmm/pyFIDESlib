@@ -6,9 +6,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -19,6 +23,7 @@
 #include "CKKS/Ciphertext.cuh"
 #include "CKKS/CoeffsToSlots.cuh"
 #include "CKKS/Context.cuh"
+#include "CKKS/KeySwitchingKey.cuh"   // BootstrapPrecapture touches precom.keys (needs complete type)
 #if defined(__clang__)
 #include <experimental/source_location>
 using sc = std::experimental::source_location;
@@ -344,6 +349,36 @@ static int btsGraphMode() {
     return v;
 }
 
+// FIDESLIB_BTS_GRAPH_DRAIN — how the per-hit parameter rewrite is ordered against the previous
+// in-flight replay of the same exec (mode 4 only; the default eager path never reads this).
+//   1 (default) = the add.73 behavior: cudaStreamSynchronize the slot stream, then host memcpy
+//                 into the pinned arena. Correct, costs a sync per hit.
+//   0 = NO drain: the rewrite goes through a per-entry double-buffered pinned staging and a
+//       stream-ordered cudaMemcpyAsync (H2H) on the slot stream, so it lands after the previous
+//       replay by stream order. The four add.73 removal attempts were all DEVICE-side ordering;
+//       a host memcpy cannot be ordered by any of them — this replaces the host write itself.
+//   2 = NO drain, host memcpy kept: the known-detonating arm (KL pinned ~63 on tokens 1+),
+//       preserved on purpose as the falsifier/sanitizer target.
+static int btsDrainMode() {
+    static const int v = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_GRAPH_DRAIN");
+        return (e && *e) ? std::atoi(e) : 1;
+    }();
+    return v;
+}
+
+// FIDESLIB_BTS_GRAPH_JOURNAL — path of the bootstrap-shape journal (unset = off). Mode 4
+// appends one line per successful capture; BootstrapPrecapture() replays the file at setup on
+// synthesized ciphertexts so the ~19 captures leave token 0's critical path. Append-only and
+// deduped on read, so re-running only ever teaches it new shapes.
+static const char* btsJournalPath() {
+    static const char* p = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_GRAPH_JOURNAL");
+        return (e && *e) ? e : (const char*)nullptr;
+    }();
+    return p;
+}
+
 namespace FIDESlib::CKKS {
 
 
@@ -590,6 +625,17 @@ struct BtsCacheEntry {
     std::vector<RNSPoly> owned_aux;
     std::unique_ptr<ContextData::KsWorkspaceSet> ks_ws;
     uint64_t hits = 0;
+    // ⭐ FIDESLIB_BTS_GRAPH_DRAIN=0: double-buffered pinned staging for the stream-ordered
+    // parameter rewrite. Layout per buffer: [raise scalars][restore scalars]. The per-buffer
+    // event guards the HOST-side repack (buffer i must not be rewritten until its previous
+    // enqueue was consumed by the stream) — with two buffers and ~21 ms bootstraps it is
+    // signalled long before it is checked, so the wait is ~free. Raw handles, no destructor:
+    // the cache is a static map and CUDA calls at static destruction are the b25b226 bug class.
+    void* stage_buf[2] = {nullptr, nullptr};
+    cudaEvent_t stage_ev[2] = {nullptr, nullptr};
+    bool stage_ev_rec[2] = {false, false};
+    size_t stage_bytes = 0;
+    int stage_idx = 0;
 };
 
 std::atomic<uint64_t> g_cache_hits{0};
@@ -763,12 +809,22 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
                      bts_cache.size(), slots, e.in_level, e.out_level, e.in_noise, e.out_noise, e.in_slots,
                      e.out_slots, ctxt.NoiseFactor, e.owned_aux.size(), e.raise_slots.size(),
                      e.restore_slots.size(), (int)e.raise_param.valid);
+        // Teach the shape journal (see btsJournalPath). cap_entry_nf is the PRE-drain entry
+        // NoiseFactor — exactly what a synthesized precapture ciphertext must carry.
+        if (const char* jp = btsJournalPath()) {
+            if (std::FILE* jf = std::fopen(jp, "a")) {
+                std::fprintf(jf, "%d %d %d %d %d %.17g %s\n", slots, prescaled ? 1 : 0, e.in_level,
+                             e.in_noise, e.in_slots, e.cap_entry_nf, ctxt.keyID.c_str());
+                std::fclose(jf);
+            }
+        }
         ctxt.copy(*e.slot);
         cudaGetLastError();
         return true;
     }
 
     // ── HIT ────────────────────────────────────────────────────────────────────────────────
+    CudaNvtxRange _hit_range("bts_cache.hit");
     // ⚠️ THE GUARD THAT MAKES THIS SAFE TO SHIP. add.72's hardest lesson was that a graph can run
     // with sync=cudaSuccess and sanitizer-clean and still compute garbage (err_max 4.29e+132) when
     // an address it baked has moved. Anything that reallocates a slot limb makes every kernel node
@@ -820,12 +876,15 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
     // launched asynchronously. Overwriting them from the host while a previous replay of this same
     // exec is still in flight corrupts that run's scalars — which is exactly when KL jumped from
     // 0.78 to 62 (and then stayed pinned at saturation regardless of what value was written).
-    // Drain this slot's stream before touching the arena. If this is the cause, the fix is real
-    // but costs a sync per hit; a per-slot double buffer would remove it again.
-    if (!e.raise_slots.empty() || !e.restore_slots.empty())
+    // Drain this slot's stream before touching the arena (DRAIN=1, the shipped add.73 behavior).
+    // DRAIN=0 removes the sync by replacing the HOST write with a stream-ordered one — see the
+    // rewrite block below. DRAIN=2 skips the drain and keeps the host write: the detonating arm,
+    // kept as the falsifier.
+    if (btsDrainMode() == 1 && (!e.raise_slots.empty() || !e.restore_slots.empty()))
         cudaStreamSynchronize(e.slot->c0.GPU[0].getS().ptr());
 
     if (!e.raise_slots.empty() && e.raise_param.valid) {
+        CudaNvtxRange _param_range("bts_cache.hit.param");
         // correction = effCorrectionFactor(slots) - deg, and `deg` is a property of the SHAPE the
         // key already pins, so the delta in `correction` is exactly the delta in the effective
         // factor — no need to re-derive deg.
@@ -842,15 +901,63 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         const double adj = (e.raise_param.targetSF / nf) * (e.raise_param.modToDrop / nf) *
                            std::pow(2.0, -(double)now_corr);
         const std::vector<uint64_t> res = cc.ElemForEvalMult(e.raise_param.level, adj);
-        for (auto& sl : e.raise_slots)
-            std::memcpy(sl.first, res.data(), std::min(sl.second, res.size() * sizeof(uint64_t)));
+        std::vector<uint64_t> op_;
         if (e.cap_restore_level >= 0) {
             const uint64_t corFactor = (uint64_t)1 << now_corr;
-            std::vector<uint64_t> op_(e.cap_restore_level + 1);   // NOT the raise level
+            op_.resize(e.cap_restore_level + 1);   // NOT the raise level
             for (size_t i = 0; i < op_.size(); ++i)
                 op_[i] = corFactor % cc.prime[i].p;
-            for (auto& sl : e.restore_slots)
-                std::memcpy(sl.first, op_.data(), std::min(sl.second, op_.size() * sizeof(uint64_t)));
+        }
+        const size_t res_b = res.size() * sizeof(uint64_t);
+        const size_t op_b = op_.size() * sizeof(uint64_t);
+        bool stream_ordered = (btsDrainMode() == 0);
+        if (stream_ordered) {
+            // ⭐ DRAIN=0: STREAM-ORDERED rewrite. The hazard the drain covers is a HOST write into
+            // arena slots a still-running previous replay reads — device-side ordering cannot fix
+            // that (all four add.73 attempts were device-side, and all failed identically). So the
+            // write itself moves onto the slot stream: pack the scalars into a per-entry pinned
+            // staging buffer and cudaMemcpyAsync (H2H) them into the arena on the slot stream.
+            // Same-stream launches serialise, so the copy lands after the previous replay and
+            // before this one, with no sync anywhere. Double-buffered so the HOST repack of a
+            // staging buffer never races its own previous enqueue (per-buffer event, ~free: with
+            // two buffers it was consumed ~2 bootstraps ago).
+            if (e.stage_buf[0] == nullptr) {
+                e.stage_bytes = res_b + op_b;   // shape-fixed: level and cap_restore_level are keyed
+                for (int i = 0; i < 2; ++i) {
+                    if (cudaHostAlloc(&e.stage_buf[i], e.stage_bytes, cudaHostAllocDefault) != cudaSuccess ||
+                        cudaEventCreateWithFlags(&e.stage_ev[i], cudaEventDisableTiming) != cudaSuccess) {
+                        std::fprintf(stderr, "[bts_cache] staging alloc failed — falling back to drain\n");
+                        e.stage_buf[0] = e.stage_buf[1] = nullptr;
+                        break;
+                    }
+                }
+            }
+            if (e.stage_buf[0] == nullptr || res_b + op_b > e.stage_bytes)
+                stream_ordered = false;   // alloc failed or shape drifted: fall back to the drain path
+        }
+        if (stream_ordered) {
+            const int bi = e.stage_idx ^= 1;
+            if (e.stage_ev_rec[bi])
+                cudaEventSynchronize(e.stage_ev[bi]);
+            unsigned char* buf = static_cast<unsigned char*>(e.stage_buf[bi]);
+            std::memcpy(buf, res.data(), res_b);
+            if (op_b) std::memcpy(buf + res_b, op_.data(), op_b);
+            cudaStream_t sp = e.slot->c0.GPU[0].getS().ptr();
+            for (auto& sl : e.raise_slots)
+                cudaMemcpyAsync(sl.first, buf, std::min(sl.second, res_b), cudaMemcpyHostToHost, sp);
+            if (op_b)
+                for (auto& sl : e.restore_slots)
+                    cudaMemcpyAsync(sl.first, buf + res_b, std::min(sl.second, op_b), cudaMemcpyHostToHost, sp);
+            cudaEventRecord(e.stage_ev[bi], sp);
+            e.stage_ev_rec[bi] = true;
+        } else {
+            if (btsDrainMode() == 0)   // fallback engaged: pay the drain rather than detonate
+                cudaStreamSynchronize(e.slot->c0.GPU[0].getS().ptr());
+            for (auto& sl : e.raise_slots)
+                std::memcpy(sl.first, res.data(), std::min(sl.second, res_b));
+            if (op_b)
+                for (auto& sl : e.restore_slots)
+                    std::memcpy(sl.first, op_.data(), std::min(sl.second, op_b));
         }
     }
 
@@ -865,15 +972,18 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         e.slot->c0.GPU[0].s.wait(g.s);
 
     cudaStream_t s = e.slot->c0.GPU[0].getS().ptr();
-    for (size_t i = 0; i < src.size(); ++i) {
-        if (src[i].second != e.in_bufs[i].second) {
-            std::fprintf(stderr, "[bts_cache] input limb %zu width changed — eager\n", i);
-            cudaGraphExecDestroy(e.exec);
-            e.exec = nullptr;
-            e.poisoned = true;
-            return false;
+    {
+        CudaNvtxRange _copyin_range("bts_cache.hit.copyin");
+        for (size_t i = 0; i < src.size(); ++i) {
+            if (src[i].second != e.in_bufs[i].second) {
+                std::fprintf(stderr, "[bts_cache] input limb %zu width changed — eager\n", i);
+                cudaGraphExecDestroy(e.exec);
+                e.exec = nullptr;
+                e.poisoned = true;
+                return false;
+            }
+            cudaMemcpyAsync(e.in_bufs[i].first, src[i].first, src[i].second, cudaMemcpyDeviceToDevice, s);
         }
-        cudaMemcpyAsync(e.in_bufs[i].first, src[i].first, src[i].second, cudaMemcpyDeviceToDevice, s);
     }
 
     // ⚠️ NO cudaStreamSynchronize HERE. The eager bootstrap returns asynchronously, so syncing per
@@ -881,14 +991,17 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
     // ate more than the dispatch gap the graph exists to remove. Ordering is already correct
     // without it: the graph runs on the slot's stream and the copy-out below goes through
     // LimbPartition::copyLimb, whose opening Stream::wait covers exactly that stream.
-    if (cudaGraphLaunch(e.exec, s) != cudaSuccess) {
-        std::fprintf(stderr, "[bts_cache] replay launch failed at hit %llu — dropping exec, going eager\n",
-                     (unsigned long long)e.hits);
-        cudaGraphExecDestroy(e.exec);
-        e.exec = nullptr;
-        e.poisoned = true;
-        cudaGetLastError();
-        return false;
+    {
+        CudaNvtxRange _launch_range("bts_cache.hit.launch");
+        if (cudaGraphLaunch(e.exec, s) != cudaSuccess) {
+            std::fprintf(stderr, "[bts_cache] replay launch failed at hit %llu — dropping exec, going eager\n",
+                         (unsigned long long)e.hits);
+            cudaGraphExecDestroy(e.exec);
+            e.exec = nullptr;
+            e.poisoned = true;
+            cudaGetLastError();
+            return false;
+        }
     }
     ++e.hits;
 
@@ -903,6 +1016,7 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
     // so the event this records is taken AFTER the launch, which is precisely the guarantee needed.
     // (Reusing a stale event is capture blocker #5's mechanism, add.69, in reverse.)
     {
+        CudaNvtxRange _copyout_range("bts_cache.hit.copyout");
         Stream& origin = e.slot->c0.GPU[0].s;
         for (auto& g : e.slot->c0.GPU)
             if (&g.s != &origin)
@@ -1614,4 +1728,72 @@ void FIDESlib::CKKS::ModRaise(Ciphertext& ctxt, const int slots, const uint32_t 
 
     btsStageProbe("MR-btoa", ctxt);
     ctxt.slots = cc.N / 2;
+}
+
+// ⭐ Setup-time pre-capture (TO-TRY 0-GRAPHCACHE item 4). Token 0 under mode 4 costs
+// ~110-130 s because every shape's first bootstrap pays warm+capture+instantiate inline.
+// The shapes are stable run-to-run (they are properties of the PLAN), so a journal written
+// by a previous run replays here on SYNTHESIZED ciphertexts: garbage limb contents (grown,
+// never written — bootstrap arithmetic on junk residues cannot fault, only compute junk,
+// and the capture discards values anyway), but the exact (level, NoiseLevel, slots, keyID,
+// NoiseFactor) metadata the cache keys and the capture bakes. After this, token 0's
+// bootstraps are all cache HITS.
+int FIDESlib::CKKS::BootstrapPrecapture(FIDESlib::CKKS::Context& cc) {
+    using FIDESlib::CKKS::Ciphertext;
+    if (btsGraphMode() != 4)
+        return 0;
+    const char* jp = btsJournalPath();
+    if (!jp)
+        return 0;
+    std::ifstream jf(jp);
+    if (!jf)
+        return 0;
+    struct Shape {
+        int slots_arg, presc, level, noise, ct_slots;
+        double nf;
+        std::string key;
+    };
+    std::vector<Shape> shapes;
+    std::set<std::tuple<int, int, int, int, int>> seen;
+    std::string line;
+    while (std::getline(jf, line)) {
+        Shape s;
+        std::istringstream is(line);
+        if (!(is >> s.slots_arg >> s.presc >> s.level >> s.noise >> s.ct_slots >> s.nf >> s.key))
+            continue;
+        if (s.nf == 0.0)
+            continue;   // a zero NoiseFactor would poison the raise-param arithmetic
+        if (!seen.insert(std::make_tuple(s.slots_arg, s.presc, s.level, s.noise, s.ct_slots)).second)
+            continue;
+        shapes.push_back(std::move(s));
+    }
+    if (shapes.empty())
+        return 0;
+    // ⚠️ The journaled keyID is STALE BY CONSTRUCTION — keys are regenerated every process, so
+    // a previous run's hash makes every keyed lookup throw map::at. Use the key the context
+    // just loaded (exactly one after LoadContext); the journal field is diagnostic only.
+    if (cc->precom.keys.empty())
+        return 0;
+    const std::string live_key = cc->precom.keys.begin()->first;
+    FIDESlib::CKKS::SetCurrentContext(cc);
+    auto synth_bts = [&cc, &live_key](const Shape& s) {
+        Ciphertext ct(cc);
+        ct.growToLevel(s.level);
+        ct.slots = s.ct_slots;
+        ct.NoiseLevel = s.noise;
+        ct.NoiseFactor = s.nf;
+        ct.keyID = live_key;
+        FIDESlib::CKKS::Bootstrap(ct, s.slots_arg, s.presc != 0);
+    };
+    // Burn BootstrapCached's 3-call warm gate (lazy capture-hostile statics) on the first
+    // shape — those calls run eagerly on the junk ct and are discarded.
+    for (int i = 0; i < 3; ++i)
+        synth_bts(shapes.front());
+    int done = 0;
+    for (const auto& s : shapes) {
+        synth_bts(s);
+        ++done;
+    }
+    std::fprintf(stderr, "[bts_cache] precapture: %d shape(s) from %s\n", done, jp);
+    return done;
 }

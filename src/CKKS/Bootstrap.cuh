@@ -24,6 +24,11 @@ void BootstrapCPUraise(
     lbcrypto::KeyPair<lbcrypto::DCRTPoly> keys, const bool prescaled);
 // void Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled = false);
 void Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled = false);
+// FIDESLIB_BTS_GRAPH=4 + FIDESLIB_BTS_GRAPH_JOURNAL: replay the journal of previously-captured
+// bootstrap shapes on SYNTHESIZED ciphertexts (garbage contents, correct shape metadata), so
+// every graph capture happens at setup instead of on token 0's critical path. No-op unless
+// mode 4 is on, the journal exists, and shapes parse. Returns the number of shapes captured.
+int BootstrapPrecapture(Context& cc);
 double GetPreScaleFactor(Context& cc, int slots);
 void ModRaise(Ciphertext& ctxt, const int slots, const uint32_t correction, const bool prescaled = false,
               bool sparse_encaps = false);
