@@ -617,6 +617,18 @@ static bool gpufreeSized() {
 }
 
 void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
+    // ⚠️ WHILE CAPTURING, DO NOT RECYCLE (add.166 add.70). Host code RUNS during capture, so the
+    // bootstrap's temporaries (aux, the Chebyshev scratch) are destructed and would return their
+    // buffers to the pool — but the recorded graph still writes to those exact addresses, so by
+    // replay time the pool may have handed them to someone else. That is the pool-aliasing hazard
+    // the add.61 design review rated Critical, and it is what made the first replay attempt die
+    // with 'an illegal memory access was encountered' at Stream::wait.
+    // Leaking for the duration of a capture is the minimal correct answer for the bring-up proof.
+    // ⚠️ It IS a leak: every captured bootstrap keeps its temporaries forever. Acceptable while
+    // proving correctness on a handful of bootstraps; a per-graph arena released with the exec is
+    // the real fix before this is ever cached or shipped.
+    if (captureActive())
+        return;
 
     uint64_t MBs = 1024;
     if (!gpufreeSized())

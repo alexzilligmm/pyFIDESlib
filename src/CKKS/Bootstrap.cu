@@ -308,7 +308,7 @@ namespace FIDESlib::CKKS { static void BootstrapEager(Ciphertext& ctxt, int slot
 using FIDESlib::CKKS::BootstrapEager;
 
 void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool prescaled) {
-    if (btsGraphMode() >= 2) {
+    if (btsGraphMode() == 2) {   // == not >=: mode 3 must reach its own branch below
         // WARM UP FIRST. Several allocations in this library are lazily initialised on first use
         // and are capture-hostile: `modup_ksk_moddown_mgpu`'s static `signals` does
         // cudaFreeHost + cudaHostAlloc + cudaDeviceSynchronize (RNSPoly.cpp:1474-1510), all of
@@ -359,6 +359,94 @@ void FIDESlib::CKKS::Bootstrap(Ciphertext& ctxt, const int slots, const bool pre
         }
         cudaGetLastError();   // the probe's failures are DIAGNOSTIC; never leak into the real run
         BootstrapEager(ctxt, slots, prescaled);
+        return;
+    }
+    if (btsGraphMode() == 3) {
+        // ── REPLAY, minimal proof (add.166 add.70) ──────────────────────────────────────────
+        // Capture on a clone, instantiate, launch ONCE on that same clone, copy the result back.
+        // Why capture-then-replay on the SAME object is self-consistent, and why it sidesteps
+        // both of the hard problems for this first step:
+        //   * BAKED POINTERS: the graph is replayed on exactly the buffers it captured, so the
+        //     addresses are correct by construction. (A cache across DIFFERENT ciphertexts is
+        //     the next problem, not this one.)
+        //   * HOST METADATA: during capture the host code RUNS — only GPU work is deferred — so
+        //     the clone already carries the post-bootstrap level/NoiseFactor/slots, and its
+        //     buffers still hold the INPUT. Launching then fills them with the real result.
+        // Cost is deliberately terrible (capture + instantiate + destroy every call): this step
+        // answers "does a replayed bootstrap produce the right ANSWER", nothing else. The
+        // harness's own [bts_prof] err_max is the gate — a broken replay blows it up.
+        static std::atomic<int> calls3{0};
+        if (calls3.fetch_add(1) < 3) { BootstrapEager(ctxt, slots, prescaled); return; }
+        static std::atomic<int> shown{0};
+        static cudaEvent_t fev = [] {
+            cudaEvent_t e = nullptr;
+            cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+            return e;
+        }();
+        Ciphertext probe(ctxt.cc_);
+        probe.copy(ctxt);
+        cudaStream_t s = probe.c0.GPU[0].getS().ptr();
+        std::vector<cudaStream_t> forked;
+        cudaGraph_t g = nullptr;
+        cudaGraphExec_t exec = nullptr;
+        bool ok = false;
+        const bool trace = shown.load() < 2;
+        auto st = [&](const char* w) {
+            if (trace) { std::fprintf(stderr, "[bts_graph] stage=%s\n", w); std::fflush(stderr); }
+        };
+        cudaGetLastError();   // clear anything stale so what we see below is OURS
+        st("begin");
+        if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) == cudaSuccess) {
+            FIDESlib::captureForkAll(s, forked, fev);
+            st("body");
+            BootstrapEager(probe, slots, prescaled);
+            st("join");
+            FIDESlib::captureJoinAll(s, forked, fev);
+            cudaError_t ee = cudaStreamEndCapture(s, &g);
+            if (trace) std::fprintf(stderr, "[bts_graph] end=%s\n", cudaGetErrorName(ee));
+            if (ee == cudaSuccess && g) {
+                if (trace) {   // node-type census: names the population that must be fixed
+                    size_t n = 0;
+                    cudaGraphGetNodes(g, nullptr, &n);
+                    std::vector<cudaGraphNode_t> nodes(n);
+                    cudaGraphGetNodes(g, nodes.data(), &n);
+                    size_t k = 0, mc = 0, ml = 0, ev = 0, oth = 0;
+                    for (size_t i = 0; i < n; ++i) {
+                        cudaGraphNodeType t{};
+                        cudaGraphNodeGetType(nodes[i], &t);
+                        if (t == cudaGraphNodeTypeKernel) ++k;
+                        else if (t == cudaGraphNodeTypeMemcpy) ++mc;
+                        else if (t == cudaGraphNodeTypeMemAlloc || t == cudaGraphNodeTypeMemFree) ++ml;
+                        else if (t == cudaGraphNodeTypeEventRecord || t == cudaGraphNodeTypeWaitEvent) ++ev;
+                        else ++oth;
+                    }
+                    std::fprintf(stderr,
+                                 "[bts_graph] nodes=%zu kernel=%zu MEMCPY=%zu memalloc/free=%zu "
+                                 "event=%zu other=%zu\n", n, k, mc, ml, ev, oth);
+                }
+                cudaError_t ei = cudaGraphInstantiateWithFlags(&exec, g, 0);
+                if (trace) std::fprintf(stderr, "[bts_graph] inst=%s\n", cudaGetErrorName(ei));
+                if (ei == cudaSuccess && exec) {
+                    cudaError_t el = cudaGraphLaunch(exec, s);
+                    cudaError_t es = cudaStreamSynchronize(s);
+                    if (trace)
+                        std::fprintf(stderr, "[bts_graph] launch=%s sync=%s\n",
+                                     cudaGetErrorName(el), cudaGetErrorName(es));
+                    if (el == cudaSuccess && es == cudaSuccess) ok = true;
+                }
+            }
+        }
+        if (g) cudaGraphDestroy(g);
+        if (exec) cudaGraphExecDestroy(exec);
+        if (shown.fetch_add(1) < 6)
+            std::fprintf(stderr, "[bts_graph] replay %s slots=%d\n", ok ? "OK" : "FAILED", slots);
+        if (ok) {
+            ctxt.copy(probe);       // the replayed result becomes the answer -> err_max judges it
+            cudaGetLastError();
+            return;
+        }
+        cudaGetLastError();
+        BootstrapEager(ctxt, slots, prescaled);   // replay refused: fall back, never fail the run
         return;
     }
     BootstrapEager(ctxt, slots, prescaled);
