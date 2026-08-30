@@ -11,6 +11,8 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <shared_mutex>
+#include <thread>
 #include <unordered_set>
 #include "CudaUtils.cuh"
 
@@ -202,6 +204,7 @@ void Stream::record(bool external) {
     assert(ev != nullptr);
     cudaEventRecordWithFlags(ev, ptr_, external ? cudaEventRecordExternal : cudaEventRecordDefault);
     updated = true;
+    recorded_in_capture = captureActive();   // see Stream::recorded_in_capture (add.166 add.73)
 #endif
 }
 
@@ -229,11 +232,17 @@ void Stream::wait(Stream& s, bool external) {
     // waiting on it from a capturing stream is cudaErrorStreamCaptureIsolation — the 5th and
     // subtlest capture blocker, and invisible from the error site alone because the WAIT is what
     // fails while the offending RECORD happened earlier and elsewhere.
-    if (!s.updated || captureActive()) {
+    // Re-record when there is no event, when capturing (add.69 blocker #5: an event recorded
+    // BEFORE BeginCapture is uncaptured work), and ALSO when the last record was made during a
+    // capture and we are no longer capturing (add.73): that record became a graph node, so the
+    // event was never actually recorded on this stream and waiting on it is 'invalid argument'.
+    const bool stale_from_capture = s.recorded_in_capture && !captureActive();
+    if (!s.updated || captureActive() || stale_from_capture) {
         assert(!external);  // Has to be recorded in the origin graph
         CudaCheckErrorModNoSync;
         cudaEventRecordWithFlags(s.ev, s.ptr_, cudaEventRecordDefault);
         s.updated = true;
+        s.recorded_in_capture = captureActive();
         CudaCheckErrorModNoSync;
     }
     CudaCheckErrorModNoSync;
@@ -354,6 +363,13 @@ void unregisterL2WindowStream(cudaStream_t s) {
 // do create streams lazily mid-bootstrap, so Stream::init has to join the capture on the spot.
 std::atomic<cudaStream_t> g_capture_origin{nullptr};
 std::atomic<cudaEvent_t> g_capture_ev{nullptr};
+// ⭐ Capture is scoped to the CAPTURING THREAD (add.166 add.73). It is a property of the STREAM,
+// but every behavioural switch keyed on captureActive() — GPUmalloc's cudaMalloc branch, GPUfree's
+// no-op, CAP_SRC's arena staging, Stream::wait's forced re-record — must apply ONLY to the thread
+// building the graph. Under threaded inference the residency worker runs concurrently on its own
+// streams; a global flag silently changed ITS allocator and staging behaviour too, and let
+// captureAdoptStream drag worker-created streams into the graph.
+std::atomic<std::thread::id> g_capture_tid{};
 
 // Stage a small HOST buffer into a persistent PINNED arena and return the stable pointer
 // (add.166 add.71). Graph capture records a memcpy's SOURCE ADDRESS; this library sources many
@@ -369,6 +385,27 @@ std::mutex stage_mtx;
 uint8_t* stage_base = nullptr;
 size_t stage_off = 0, stage_cap = 0;
 }  // namespace
+
+// Graph-parameter tagging (add.166 add.73) - see CudaUtils.cuh for why this exists.
+namespace {
+thread_local int g_param_tag = -1;
+std::mutex param_mtx;
+std::map<int, std::vector<std::pair<void*, size_t> > > param_slots;
+}  // namespace
+
+void captureParamBegin(int tag) { g_param_tag = tag; }
+void captureParamEnd() { g_param_tag = -1; }
+
+std::vector<std::pair<void*, size_t> > captureParamSlots(int tag) {
+    std::lock_guard<std::mutex> lk(param_mtx);
+    auto it = param_slots.find(tag);
+    return it == param_slots.end() ? std::vector<std::pair<void*, size_t> >{} : it->second;
+}
+
+void captureParamReset() {
+    std::lock_guard<std::mutex> lk(param_mtx);
+    param_slots.clear();
+}
 
 const void* stageForCapture(const void* src, size_t bytes) {
     if (!src || bytes == 0) return src;
@@ -386,10 +423,29 @@ const void* stageForCapture(const void* src, size_t bytes) {
     uint8_t* dst = stage_base + stage_off;
     stage_off += need;
     std::memcpy(dst, src, bytes);
+    if (g_param_tag >= 0) {   // this stage belongs to a tagged graph parameter
+        std::lock_guard<std::mutex> pk(param_mtx);
+        param_slots[g_param_tag].emplace_back((void*)dst, bytes);
+    }
     return dst;
 }
 
 bool captureActive() {
+    return g_capture_origin.load(std::memory_order_relaxed) != nullptr &&
+           g_capture_tid.load(std::memory_order_relaxed) == std::this_thread::get_id();
+}
+
+/** True while ANY thread is capturing — for callers that must stand back rather than change
+ *  behaviour (the residency worker's quiesce barrier). */
+namespace {
+std::shared_mutex g_capture_gate;
+}  // namespace
+void captureGateLockShared() { g_capture_gate.lock_shared(); }
+void captureGateUnlockShared() { g_capture_gate.unlock_shared(); }
+void captureGateLockExclusive() { g_capture_gate.lock(); }
+void captureGateUnlockExclusive() { g_capture_gate.unlock(); }
+
+bool captureInFlight() {
     return g_capture_origin.load(std::memory_order_relaxed) != nullptr;
 }
 
@@ -449,6 +505,7 @@ void captureAdoptStream(cudaStream_t s) {
 }
 
 void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cudaEvent_t ev) {
+    g_capture_tid.store(std::this_thread::get_id(), std::memory_order_relaxed);
     g_capture_origin.store(origin, std::memory_order_relaxed);
     g_capture_ev.store(ev, std::memory_order_relaxed);
     forked.clear();
@@ -461,6 +518,7 @@ void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cuda
 }
 void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev) {
     g_capture_origin.store(nullptr, std::memory_order_relaxed);
+    g_capture_tid.store(std::thread::id{}, std::memory_order_relaxed);
     g_capture_ev.store(nullptr, std::memory_order_relaxed);
     for (cudaStream_t s : forked) {
         cudaEventRecord(ev, s);

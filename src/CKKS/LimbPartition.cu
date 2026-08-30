@@ -157,6 +157,29 @@ void* LimbPartition::scratchGet(const int slot, const size_t bytes) {
     return sc.p;
 }
 
+void LimbPartition::appendLimbPointers(std::vector<const void*>& out) const {
+    for (const auto& l : limb) {
+        void* v = nullptr;
+        SWITCH_RET(l, v.data, v);
+        out.push_back(v);
+    }
+    for (const auto& l : SPECIALlimb) {
+        void* v = nullptr;
+        SWITCH_RET(l, v.data, v);
+        out.push_back(v);
+    }
+}
+
+void LimbPartition::appendLiveLimbBuffers(std::vector<std::pair<void*, size_t>>& out) const {
+    const int limbsize = getLimbSize(*level);
+    for (int i = 0; i < limbsize && i < (int)limb.size(); ++i) {
+        void* v = nullptr;
+        SWITCH_RET(limb.at(i), v.data, v);
+        const size_t bytes = (size_t)cc.N * (limb.at(i).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
+        out.emplace_back(v, bytes);
+    }
+}
+
 void LimbPartition::scratchFreeAll() {
     for (void* q : scratch_retired_)
         cudaFree(q);
@@ -2269,7 +2292,7 @@ void LimbPartition::multModupDotKSK(LimbPartition& c1, const LimbPartition& c1ti
     ksk_b.getS().wait(s);
 }
 
-int LimbPartition::getLimbSize(int level) {
+int LimbPartition::getLimbSize(int level) const {
     int size = 0;
     while (size < meta.size() && meta[size].id <= level) {
         //assert(limb.size() > size);

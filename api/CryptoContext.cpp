@@ -967,6 +967,14 @@ extern "C" void AcqProbeReport(int tok) {
 }
 
 void CryptoContextImpl<DCRTPoly>::LoadPlaintext(Plaintext& pt, cudaStream_t stream_override) {
+	// Stand back while a bootstrap graph capture is in flight (add.166 add.73). This is the
+	// residency worker's main GPU entry point; its plaintext-ready events would otherwise cross
+	// the capture boundary and fail the first cross-stream wait with StreamCaptureIsolation.
+	// Uncontended in the common case - captures happen once per shape.
+	FIDESlib::captureGateLockShared();
+	struct GateRelease {
+		~GateRelease() { FIDESlib::captureGateUnlockShared(); }
+	} _gate;
 	if (pt->loaded || this->devices.empty())
 		return;
 	const bool _probe = acqProbeOn();

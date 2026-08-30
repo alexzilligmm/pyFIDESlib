@@ -92,6 +92,22 @@ class ContextData {
     std::array<std::unique_ptr<RNSPoly>, 2> key_switch_aux = {nullptr};
     std::array<std::unique_ptr<RNSPoly>, 2> key_switch_aux2 = {nullptr};
     std::array<std::unique_ptr<RNSPoly>, 4> moddown_aux = {nullptr};
+
+    /** A PRIVATE set of keyswitch workspaces (add.166 add.73).
+     *  The three arrays above are shared by every keyswitch in the process. That is fine for eager
+     *  work, which is serialised by streams, but fatal for a CACHED bootstrap graph: the graph
+     *  bakes their addresses and writes them on every replay, while unrelated eager keyswitches
+     *  write the same buffers — decode reported this as 'an illegal memory access was
+     *  encountered'. A cached exec installs its own set for the duration of its CAPTURE, then owns
+     *  those buffers for the exec's lifetime so nothing else can ever be handed them.
+     *  Replay itself needs no override: it runs no host code, it just writes the baked addresses. */
+    struct KsWorkspaceSet {
+        std::array<std::unique_ptr<RNSPoly>, 2> ks_aux = {nullptr};
+        std::array<std::unique_ptr<RNSPoly>, 2> ks_aux2 = {nullptr};
+        std::array<std::unique_ptr<RNSPoly>, 4> moddown = {nullptr};
+    };
+    KsWorkspaceSet* ks_ws_override = nullptr;
+    void setKsWorkspaceOverride(KsWorkspaceSet* ws) { ks_ws_override = ws; }
     int ks_aux_slot = 0;
     std::vector<Stream> top_limb_stream;
     std::vector<uint64_t*> top_limb_buffer;
@@ -217,6 +233,14 @@ class ContextData {
 
     bool hasAuxilarPoly() const;
     RNSPoly getAuxilarPoly();
+    /** Take the whole aux pool, leaving it empty, and put a set back (add.166 add.73).
+     *  Used to give a cached bootstrap graph EXCLUSIVE ownership of the aux polys its capture
+     *  baked addresses for: drain before capture so the bootstrap must build fresh ones, then
+     *  after capture the pool holds exactly those, and the cache keeps them forever. Without
+     *  this the pool hands the same buffers to the next ciphertext and replay writes over live
+     *  data — measured in decode as 'an illegal memory access was encountered'. */
+    std::vector<RNSPoly> takeAuxilarPool();
+    void restoreAuxilarPool(std::vector<RNSPoly>&& pool);
     void returnAuxilarPoly(RNSPoly&& c);
     void trimAuxilarPoly(size_t size);
     void clearAuxilarPoly();

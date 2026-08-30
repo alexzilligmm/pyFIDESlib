@@ -940,6 +940,16 @@ void RNSPoly::copyShallow(const RNSPoly& poly) {
     }
 }
 
+void RNSPoly::appendLimbPointers(std::vector<const void*>& out) const {
+    for (const auto& g : GPU)
+        g.appendLimbPointers(out);
+}
+
+void RNSPoly::appendLiveLimbBuffers(std::vector<std::pair<void*, size_t>>& out) const {
+    for (const auto& g : GPU)
+        g.appendLiveLimbBuffers(out);
+}
+
 void RNSPoly::dropToLevel(int level) {
 
     if (0 && GPU.at(0).bufferLIMB == nullptr) {

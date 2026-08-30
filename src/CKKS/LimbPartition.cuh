@@ -148,6 +148,17 @@ class LimbPartition {
     void* scratchGet(int slot, size_t bytes);
     void scratchFreeAll();
 
+    /** Append every limb's device data pointer (regular then SPECIAL) to `out` — the ADDRESS
+     *  fingerprint a cached CUDA graph depends on (add.166 add.73). A cached exec replays with the
+     *  pointers it recorded at capture, so if any of these moves, the graph silently reads or
+     *  writes the wrong buffer. Comparing the fingerprint before each replay turns that class of
+     *  silent wrong answer — the one that produced err_max 4.29e+132 in add.72 — into a loud
+     *  fallback to the eager path. Host-side only: it walks `limb`, it does not touch the GPU. */
+    void appendLimbPointers(std::vector<const void*>& out) const;
+    /** Same walk, but recording (device pointer, byte length) for the limbs live at the CURRENT
+     *  level — the buffers a cached graph's entry kernels read. `bytes` differs per limb width. */
+    void appendLiveLimbBuffers(std::vector<std::pair<void*, size_t>>& out) const;
+
     /*
     LimbPartition(LimbPartition && lp) :
         device(lp.device),
@@ -317,7 +328,7 @@ class LimbPartition {
     void multModupDotKSK(LimbPartition& c1, const LimbPartition& c1tilde, LimbPartition& c0,
                          const LimbPartition& c0tilde, const LimbPartition& ksk_a, const LimbPartition& ksk_b);
 
-    int getLimbSize(int level);
+    int getLimbSize(int level) const;
     void automorph(const int index, const int br, LimbPartition* src, bool ext);
 
     void modupInto(LimbPartition& partition, LimbPartition& partition1);

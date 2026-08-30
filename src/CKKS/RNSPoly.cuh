@@ -175,6 +175,11 @@ class RNSPoly {
     void gatherAllLimbs();
     void generateGatherLimbs();
     void copyShallow(const RNSPoly& poly);
+
+    /** Address fingerprint over every partition's limbs — see LimbPartition::appendLimbPointers.
+     *  Used by the cached-bootstrap-graph guard (add.166 add.73). */
+    void appendLimbPointers(std::vector<const void*>& out) const;
+    void appendLiveLimbBuffers(std::vector<std::pair<void*, size_t>>& out) const;
     RNSPoly& modup_ksk_moddown_mgpu(const KeySwitchingKey& key, bool moddown);
     void rescaleDouble(RNSPoly& poly);
 

@@ -401,7 +401,7 @@ static int tlsKsSlot(int pool) {
 
 RNSPoly& ContextData::getKeySwitchAux() {
     const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
-    auto& p = key_switch_aux[slot];
+    auto& p = ks_ws_override ? ks_ws_override->ks_aux[slot] : key_switch_aux[slot];
     if (p == nullptr) {
         std::lock_guard<std::mutex> g(ks_aux_init_mtx);
         if (p == nullptr)
@@ -415,7 +415,7 @@ RNSPoly& ContextData::getKeySwitchAux() {
 
 RNSPoly& ContextData::getKeySwitchAux2() {
     const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
-    auto& p = key_switch_aux2[slot];
+    auto& p = ks_ws_override ? ks_ws_override->ks_aux2[slot] : key_switch_aux2[slot];
     if (p == nullptr) {
         std::lock_guard<std::mutex> g(ks_aux_init_mtx);
         if (p == nullptr)
@@ -428,7 +428,8 @@ RNSPoly& ContextData::getKeySwitchAux2() {
 
 RNSPoly& ContextData::getModdownAux(const int num) {
     const int slot = ksAuxTls() ? tlsKsSlot(2) : ks_aux_slot;
-    auto& p = moddown_aux[slot * 2 + (num & 1)];
+    auto& p = ks_ws_override ? ks_ws_override->moddown[slot * 2 + (num & 1)]
+                             : moddown_aux[slot * 2 + (num & 1)];
     if (p == nullptr) {
         std::lock_guard<std::mutex> g(ks_aux_init_mtx);
         if (p == nullptr)
@@ -448,6 +449,14 @@ bool scalarDevMemoEnabled() {
 const uint64_t* ContextData::DevElemForEvalMult(int level, const double operand, int level_in) {
     if (!scalarDevMemoEnabled())
         return nullptr;
+    // ⚠️ Bypass the memo ENTIRELY while capturing (add.166 add.73), hits included. The memo hands
+    // out a DIFFERENT persistent buffer per (level, operand), so a graph that bakes one is locked
+    // to that exact operand — which is what forced the correction factor into the cache key. The
+    // per-call path stages through the fixed SC_SCALAR_MULT scratch instead, giving one stable
+    // address whose CONTENTS a replay can rewrite. (A miss would also do a blocking cudaMemcpy,
+    // which invalidates the capture outright.)
+    if (FIDESlib::captureActive())
+        return nullptr;
     uint64_t operand_bits;
     std::memcpy(&operand_bits, &operand, sizeof(operand_bits));
     const ElemMemoKey memo_key{level, (level_in == -1 ? level : level_in), operand_bits};
@@ -463,6 +472,18 @@ const uint64_t* ContextData::DevElemForEvalMult(int level, const double operand,
     // the caller wait on it (CudaUtils.cu:474-478), which is exactly the cross-stream handshake
     // this change exists to stop paying. The sync happens O(distinct scalars) times in the whole
     // run -- a few thousand at warmup -- and never again.
+    // ⚠️ NEVER BUILD A NEW ENTRY DURING A GRAPH CAPTURE (add.166 add.73). A miss allocates with
+    // plain cudaMalloc and copies with a BLOCKING cudaMemcpy — a host-synchronising call, which
+    // invalidates an in-flight capture. Neither call's return is checked, so the failure surfaces
+    // far downstream as 'operation failed due to a previous error during capture' at the next
+    // Stream::wait, which is exactly how it presented in decode.
+    // Why decode and not the bootstrap harness: decode's plan carries PER-SITE correction factors
+    // (cf3..cf14), so fresh (level, operand) pairs keep arriving and the memo keeps missing inside
+    // the bootstrap; the harness runs one shape and is warm after the first call.
+    // Returning nullptr falls back to the per-call operand path, which IS capture-safe since
+    // add.72 (captureSafeMallocAsync + CAP_SRC). Hits are still served: only MISSES bail.
+    if (FIDESlib::captureActive())
+        return nullptr;
     const std::vector<uint64_t> host = ElemForEvalMult(level, operand, level_in);
     uint64_t* d = nullptr;
     if (cudaMalloc(&d, host.size() * sizeof(uint64_t)) != cudaSuccess || d == nullptr)
@@ -490,6 +511,18 @@ const uint64_t* ContextData::DevElemForEvalAddOrSub(const int level, const doubl
     // Build the residues exactly as the eager path does, INCLUDING the sign flip, so the device
     // copy and the host vector can never disagree. Same allocation discipline as
     // DevElemForEvalMult: plain cudaMalloc + synchronous copy, O(distinct scalars) times per run.
+    // ⚠️ NEVER BUILD A NEW ENTRY DURING A GRAPH CAPTURE (add.166 add.73). A miss allocates with
+    // plain cudaMalloc and copies with a BLOCKING cudaMemcpy — a host-synchronising call, which
+    // invalidates an in-flight capture. Neither call's return is checked, so the failure surfaces
+    // far downstream as 'operation failed due to a previous error during capture' at the next
+    // Stream::wait, which is exactly how it presented in decode.
+    // Why decode and not the bootstrap harness: decode's plan carries PER-SITE correction factors
+    // (cf3..cf14), so fresh (level, operand) pairs keep arriving and the memo keeps missing inside
+    // the bootstrap; the harness runs one shape and is warm after the first call.
+    // Returning nullptr falls back to the per-call operand path, which IS capture-safe since
+    // add.72 (captureSafeMallocAsync + CAP_SRC). Hits are still served: only MISSES bail.
+    if (FIDESlib::captureActive())
+        return nullptr;
     std::vector<uint64_t> host = ElemForEvalAddOrSub(level, operand, noise_deg);
     if (negate)
         for (size_t i = 0; i < host.size(); ++i)
@@ -1210,6 +1243,19 @@ RNSPoly ContextData::getAuxilarPoly() {
         precom.auxPoly.pop_back();
         return res;
     }
+}
+
+std::vector<RNSPoly> ContextData::takeAuxilarPool() {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
+    std::vector<RNSPoly> out = std::move(precom.auxPoly);
+    precom.auxPoly.clear();
+    return out;
+}
+
+void ContextData::restoreAuxilarPool(std::vector<RNSPoly>&& pool) {
+    std::lock_guard<std::mutex> g(aux_poly_mtx);
+    for (auto& p : pool)
+        precom.auxPoly.emplace_back(std::move(p));
 }
 
 void ContextData::returnAuxilarPoly(RNSPoly&& c) {

@@ -56,10 +56,37 @@ void CudaHostSync();
 // CudaUtils.cu for why this is required and why it is single-threaded-only.
 void captureForkAll(cudaStream_t origin, std::vector<cudaStream_t>& forked, cudaEvent_t ev);
 void captureAdoptStream(cudaStream_t s);   // join a mid-capture-created stream to the capture
-bool captureActive();
+bool captureActive();     // true only on the thread building the graph
+bool captureInFlight();   // true while ANY thread is capturing
+
+/** Quiesce gate for graph capture under THREADED inference (add.166 add.73).
+ *  Capture follows STREAMS, not threads, so if the residency worker submits plaintext traffic
+ *  while the main thread is capturing, its ready-events cross the capture boundary and the first
+ *  cross-stream wait fails with cudaErrorStreamCaptureIsolation. Captures are rare (once per
+ *  shape) and each is already preceded by a warm eager bootstrap, so simply excluding the worker
+ *  for their duration is cheap. Worker-side GPU entry points take the SHARED side; the capture
+ *  takes the EXCLUSIVE side. */
+void captureGateLockShared();
+void captureGateUnlockShared();
+void captureGateLockExclusive();
+void captureGateUnlockExclusive();
 // Stage a host buffer into a persistent pinned arena so a captured memcpy's SOURCE outlives the
 // capture. Returns `src` unchanged when not needed or on failure. See CudaUtils.cu (add.166 add.71).
 const void* stageForCapture(const void* src, size_t bytes);
+
+/** GRAPH PARAMETERS: make a captured scalar a VALUE the replay reads, not part of the cache key
+ *  (add.166 add.73). The correction factor enters a bootstrap as exactly two scalar multiplies -
+ *  the 2^-c raise and the 2^c restore - and changes the NUMBERS a kernel multiplies by without
+ *  changing the instruction sequence. Keying the cache on it multiplied the shape count ~11x and
+ *  exhausted VRAM at 41 shapes. Instead the two sites are TAGGED at capture: stageForCapture then
+ *  remembers which pinned-arena slots they landed in, and since the graph's memcpy node copies
+ *  from that arena on every replay, rewriting the slot before launch changes the value the replay
+ *  uses. One graph serves every correction factor.
+ *  A tag maps to SEVERAL slots: a ciphertext scalar-multiply stages c0 and c1 separately. */
+void captureParamBegin(int tag);
+void captureParamEnd();
+std::vector<std::pair<void*, size_t> > captureParamSlots(int tag);
+void captureParamReset();
 void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev);
 
 /** Drop-in replacements for cudaMallocAsync / cudaFreeAsync at any site that can run inside a
@@ -106,7 +133,7 @@ inline void breakpoint() {}
         if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled &&                    \
             e != cudaErrorCudartUnloading) {                                                 \
                                                                                              \
-            printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+            fprintf(stderr, "Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
             _Exit(1); /* NOT exit(0): see note above */                                                                         \
         }                                                                                    \
@@ -118,7 +145,7 @@ inline void breakpoint() {}
         cudaError_t e = cudaGetLastError();                                                  \
         if (e != cudaSuccess && e != cudaErrorPeerAccessAlreadyEnabled &&                    \
             e != cudaErrorCudartUnloading) {                                                 \
-            printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
+            fprintf(stderr, "Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
             FIDESlib::breakpoint();                                                          \
             _Exit(1); /* NOT exit(0): see note above */                                                                         \
         }                                                                                    \
@@ -134,7 +161,7 @@ inline void breakpoint() {}
             size_t size;                                                                                          \
             size = backtrace(array, 10);                                                                          \
             backtrace_symbols_fd(array, size, STDERR_FILENO);                                                     \
-            printf("Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e));                      \
+            fprintf(stderr, "Cuda failure %s:%d: '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e));                      \
             FIDESlib::breakpoint();                                                                               \
             _Exit(1); /* NOT exit(0): see note above */                                                                                              \
         }                                                                                                         \
@@ -160,6 +187,12 @@ class Stream {
    public:
     cudaEvent_t ev = nullptr;
     bool updated = false;
+    /** True when `ev`'s most recent record happened INSIDE a graph capture (add.166 add.73).
+     *  Such a record is not a real recording — it became a graph NODE — so the event carries no
+     *  usable state on the live stream, and a later eager cudaStreamWaitEvent on it fails with
+     *  'invalid argument'. `updated` alone cannot express this: it says "there is an event",
+     *  not "the event was actually recorded on this stream". Cleared by the next real record. */
+    bool recorded_in_capture = false;
     //Event ev;
 
     void init(int priority = 0);
