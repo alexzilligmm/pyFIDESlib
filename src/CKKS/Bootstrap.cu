@@ -367,6 +367,20 @@ static int btsDrainMode() {
     return v;
 }
 
+// FIDESLIB_BTS_GRAPH_SLOTS — sub-slots (captured execs) per shape, default 1, clamped to [1,4].
+// >1 restores the cross-bootstrap overlap eager gets from multiple streams (user-directed
+// 2026-08-30): consecutive same-shape hits alternate execs instead of serialising on one
+// stream. Cost: one full private working set (slot ct + aux polys + ks workspaces) per extra
+// sub-slot — watch [tokstat] free.
+static int btsSlotRing() {
+    static const int v = [] {
+        const char* e = std::getenv("FIDESLIB_BTS_GRAPH_SLOTS");
+        int n = (e && *e) ? std::atoi(e) : 1;
+        return n < 1 ? 1 : (n > 4 ? 4 : n);
+    }();
+    return v;
+}
+
 // FIDESLIB_BTS_GRAPH_JOURNAL — path of the bootstrap-shape journal (unset = off). Mode 4
 // appends one line per successful capture; BootstrapPrecapture() replays the file at setup on
 // synthesized ciphertexts so the ~19 captures leave token 0's critical path. Append-only and
@@ -585,13 +599,15 @@ struct BtsShapeKey {
     }
 };
 
-struct BtsCacheEntry {
+// One captured exec + everything whose ADDRESSES it baked. FIDESLIB_BTS_GRAPH_SLOTS>1 gives a
+// shape a RING of these (user-directed 2026-08-30): one sub-slot serialises consecutive
+// bootstraps of the same shape on its single stream, where eager overlaps them across ~2.2
+// streams — alternating execs restores that overlap. Each sub-slot is fully private (slot ct,
+// aux polys, keyswitch workspaces, param arena slots, staging), so no cross-sub hazard exists;
+// cross-BOOTSTRAP data dependencies ride the caller streams exactly as before.
+struct BtsSubSlot {
     std::unique_ptr<Ciphertext> slot;
     cudaGraphExec_t exec = nullptr;
-    bool poisoned = false;              // capture failed once => never retry this shape
-    int in_level = 0, in_noise = 0, in_slots = 0;
-    int out_level = 0, out_noise = 0, out_slots = 0;
-    double out_nf = 0;
     // ⭐ The buffers the graph's ENTRY kernels read, captured BEFORE BeginCapture. The bootstrap
     // CHANGES the limb set (drop/grow), so the slot's structure after capture is not the structure
     // it had going in — fingerprinting the post-capture state and copying into that was this
@@ -624,7 +640,6 @@ struct BtsCacheEntry {
     // the shape, so the entry count is small enough for private sets to fit.
     std::vector<RNSPoly> owned_aux;
     std::unique_ptr<ContextData::KsWorkspaceSet> ks_ws;
-    uint64_t hits = 0;
     // ⭐ FIDESLIB_BTS_GRAPH_DRAIN=0: double-buffered pinned staging for the stream-ordered
     // parameter rewrite. Layout per buffer: [raise scalars][restore scalars]. The per-buffer
     // event guards the HOST-side repack (buffer i must not be rewritten until its previous
@@ -636,6 +651,17 @@ struct BtsCacheEntry {
     bool stage_ev_rec[2] = {false, false};
     size_t stage_bytes = 0;
     int stage_idx = 0;
+};
+
+struct BtsCacheEntry {
+    bool poisoned = false;       // FIRST capture failed => never retry this shape
+    bool ring_capped = false;    // a LATER capture failed => keep what works, stop growing
+    int in_level = 0, in_noise = 0, in_slots = 0;      // shape-level: identical across subs
+    int out_level = 0, out_noise = 0, out_slots = 0;
+    double out_nf = 0;
+    std::vector<std::unique_ptr<BtsSubSlot>> subs;
+    size_t next_sub = 0;         // round-robin cursor over subs
+    uint64_t hits = 0;
 };
 
 std::atomic<uint64_t> g_cache_hits{0};
@@ -669,29 +695,69 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
     ContextData& cc = ctxt.cc;
 
     const BtsShapeKey key = shapeOf(ctxt, slots, prescaled);
-    BtsCacheEntry& e = bts_cache[key];
-    if (e.poisoned)
+    BtsCacheEntry& ent = bts_cache[key];
+    if (ent.poisoned)
         return false;
 
     static std::atomic<int> warm{0};
     static std::atomic<int> reported{0};
 
-    if (e.exec == nullptr) {
+    if ((int)ent.subs.size() < btsSlotRing() && !ent.ring_capped) {
         // Lazy statics in this library are capture-hostile and fire once (RNSPoly.cpp's `signals`
         // does cudaHostAlloc + cudaDeviceSynchronize). Let a few bootstraps run eagerly first.
         if (warm.fetch_add(1) < 3)
             return false;
 
+        const bool first_sub = ent.subs.empty();
+        if (!first_sub) {
+            // Ring growth is VRAM-gated (FIDESLIB_BTS_GRAPH_RING_MINFREE_GB, default 38):
+            // every extra sub costs a full private working set, and ring=2 across all 19
+            // decode shapes cost ~28 GB and OOM'd mid-decode TWICE — first ungated, then at
+            // a 20 GB floor, because the floor is evaluated at PRECAPTURE time when the
+            // decode's weight/KV arenas (~28 GB) have not been allocated yet. 38 leaves them
+            // room: with free ~40-45 GB after key load, only the first few journal shapes
+            // get a second sub. Shapes earlier in the journal ring first.
+            static const double minfree_gb = [] {
+                const char* e = std::getenv("FIDESLIB_BTS_GRAPH_RING_MINFREE_GB");
+                return (e && *e) ? std::atof(e) : 38.0;
+            }();
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            if ((double)free_b / (1024.0 * 1024.0 * 1024.0) < minfree_gb) {
+                std::fprintf(stderr,
+                             "[bts_cache] ring capped at %zu sub(s) for shape lvl=%d slots=%d — free %.1f GB < %.1f\n",
+                             ent.subs.size(), key.level, slots, free_b / 1073741824.0, minfree_gb);
+                ent.ring_capped = true;
+                return false;
+            }
+        }
+        ent.subs.push_back(std::make_unique<BtsSubSlot>());
+        BtsSubSlot& e = *ent.subs.back();
+        // On a capture failure: first sub => poison the shape (old behavior); later sub => keep
+        // what already works and just stop growing the ring.
+        auto fail_capture = [&](const char* what, cudaError_t err) {
+            std::fprintf(stderr, "[bts_cache] %s (%s) shape lvl=%d slots=%d sub=%zu — %s\n", what,
+                         cudaGetErrorName(err), key.level, slots, ent.subs.size() - 1,
+                         first_sub ? "eager for this shape" : "ring capped");
+            if (e.exec) { cudaGraphExecDestroy(e.exec); e.exec = nullptr; }
+            ent.subs.pop_back();
+            if (first_sub)
+                ent.poisoned = true;
+            else
+                ent.ring_capped = true;
+            cudaGetLastError();
+        };
+
         // Swap the general aux pool out for the RESERVED one, and install the shared bootstrap
         // keyswitch workspaces. Both are restored on every exit path by the guard.
-        // Drain the pool so the warm+capture below build FRESH aux polys, install this entry's
+        // Drain the pool so the warm+capture below build FRESH aux polys, install this sub-slot's
         // private keyswitch workspaces, and on the way out keep both and put the general pool back.
         std::vector<RNSPoly> saved_pool = cc.takeAuxilarPool();
         e.ks_ws = std::make_unique<ContextData::KsWorkspaceSet>();
         cc.setKsWorkspaceOverride(e.ks_ws.get());
         struct WsGuard {
             ContextData& c;
-            BtsCacheEntry& ent;
+            BtsSubSlot& ent;
             std::vector<RNSPoly>& saved;
             ~WsGuard() {
                 c.setKsWorkspaceOverride(nullptr);
@@ -719,9 +785,9 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         const double entry_nf = ctxt.NoiseFactor;
         e.slot = std::make_unique<Ciphertext>(cc_);
         e.slot->copy(ctxt);                       // full copy: structure is built HERE, pre-capture
-        e.in_level = ctxt.getLevel();
-        e.in_noise = ctxt.NoiseLevel;
-        e.in_slots = ctxt.slots;
+        ent.in_level = ctxt.getLevel();
+        ent.in_noise = ctxt.NoiseLevel;
+        ent.in_slots = ctxt.slots;
         // Record the entry buffers while the slot still has its ENTRY structure.
         e.in_bufs.clear();
         e.slot->c0.appendLiveLimbBuffers(e.in_bufs);
@@ -744,9 +810,8 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         } _capture_gate;
         cudaDeviceSynchronize();
         cudaGetLastError();
-        if (cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed) != cudaSuccess) {
-            e.poisoned = true;
-            cudaGetLastError();
+        if (cudaError_t eb = cudaStreamBeginCapture(s, cudaStreamCaptureModeRelaxed); eb != cudaSuccess) {
+            fail_capture("begin-capture failed", eb);
             return false;
         }
         FIDESlib::captureParamReset();
@@ -757,31 +822,24 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         FIDESlib::captureJoinAll(s, forked, cev);
         const cudaError_t ee = cudaStreamEndCapture(s, &g);
         if (ee != cudaSuccess || g == nullptr) {
-            std::fprintf(stderr, "[bts_cache] capture failed (%s) shape lvl=%d slots=%d — eager for this shape\n",
-                         cudaGetErrorName(ee), key.level, slots);
             if (g) cudaGraphDestroy(g);
-            e.poisoned = true;
-            cudaGetLastError();
+            fail_capture("capture failed", ee);
             return false;
         }
         const cudaError_t ei = cudaGraphInstantiateWithFlags(&e.exec, g, 0);
         cudaGraphDestroy(g);
         if (ei != cudaSuccess || e.exec == nullptr) {
-            std::fprintf(stderr, "[bts_cache] instantiate failed (%s) — eager for this shape\n",
-                         cudaGetErrorName(ei));
-            e.exec = nullptr;
-            e.poisoned = true;
-            cudaGetLastError();
+            fail_capture("instantiate failed", ei);
             return false;
         }
 
         // The host code RAN during capture, so the slot now carries the post-bootstrap metadata and
         // the final limb structure. Both are the invariants every later replay restores/checks.
         // (The pool/workspace swap is undone by _ws_guard on every exit path.)
-        e.out_level = e.slot->getLevel();
-        e.out_noise = e.slot->NoiseLevel;
-        e.out_slots = e.slot->slots;
-        e.out_nf = e.slot->NoiseFactor;
+        ent.out_level = e.slot->getLevel();
+        ent.out_noise = e.slot->NoiseLevel;
+        ent.out_slots = e.slot->slots;
+        ent.out_nf = e.slot->NoiseFactor;
         e.fingerprint = fingerprintOf(*e.slot);
         // Harvest the tagged parameter slots. If either is missing the graph is NOT reusable
         // across correction factors, so pin this entry to the factor it was captured with.
@@ -796,26 +854,25 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         FIDESlib::captureParamReset();
 
         if (cudaGraphLaunch(e.exec, s) != cudaSuccess || cudaStreamSynchronize(s) != cudaSuccess) {
-            std::fprintf(stderr, "[bts_cache] first launch failed — eager for this shape\n");
-            cudaGraphExecDestroy(e.exec);
-            e.exec = nullptr;
-            e.poisoned = true;
-            cudaGetLastError();
+            fail_capture("first launch failed", cudaGetLastError());
             return false;
         }
         std::fprintf(stderr,
-                     "[bts_cache] captured shape #%zu: slots_arg=%d lvl=%d->%d noise=%d->%d ct_slots=%d->%d"
+                     "[bts_cache] captured shape #%zu sub=%zu: slots_arg=%d lvl=%d->%d noise=%d->%d ct_slots=%d->%d"
                      " nf=%.17g aux_owned=%zu raise_slots=%zu restore_slots=%zu raise_valid=%d\n",
-                     bts_cache.size(), slots, e.in_level, e.out_level, e.in_noise, e.out_noise, e.in_slots,
-                     e.out_slots, ctxt.NoiseFactor, e.owned_aux.size(), e.raise_slots.size(),
-                     e.restore_slots.size(), (int)e.raise_param.valid);
+                     bts_cache.size(), ent.subs.size() - 1, slots, ent.in_level, ent.out_level, ent.in_noise,
+                     ent.out_noise, ent.in_slots, ent.out_slots, ctxt.NoiseFactor, e.owned_aux.size(),
+                     e.raise_slots.size(), e.restore_slots.size(), (int)e.raise_param.valid);
         // Teach the shape journal (see btsJournalPath). cap_entry_nf is the PRE-drain entry
-        // NoiseFactor — exactly what a synthesized precapture ciphertext must carry.
-        if (const char* jp = btsJournalPath()) {
-            if (std::FILE* jf = std::fopen(jp, "a")) {
-                std::fprintf(jf, "%d %d %d %d %d %.17g %s\n", slots, prescaled ? 1 : 0, e.in_level,
-                             e.in_noise, e.in_slots, e.cap_entry_nf, ctxt.keyID.c_str());
-                std::fclose(jf);
+        // NoiseFactor — exactly what a synthesized precapture ciphertext must carry. First sub
+        // only: later ring members are the same shape and would only bloat the file.
+        if (first_sub) {
+            if (const char* jp = btsJournalPath()) {
+                if (std::FILE* jf = std::fopen(jp, "a")) {
+                    std::fprintf(jf, "%d %d %d %d %d %.17g %s\n", slots, prescaled ? 1 : 0, ent.in_level,
+                                 ent.in_noise, ent.in_slots, e.cap_entry_nf, ctxt.keyID.c_str());
+                    std::fclose(jf);
+                }
             }
         }
         ctxt.copy(*e.slot);
@@ -825,6 +882,11 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
 
     // ── HIT ────────────────────────────────────────────────────────────────────────────────
     CudaNvtxRange _hit_range("bts_cache.hit");
+    // Round-robin over the ring: consecutive same-shape hits land on different sub-slots (own
+    // stream, own exec, own buffers), so their replays can overlap like eager's multi-stream
+    // bootstraps do. Data dependencies still ride the caller streams (copy-in waits on them).
+    BtsSubSlot& e = *ent.subs[ent.next_sub];
+    ent.next_sub = (ent.next_sub + 1) % ent.subs.size();
     // ⚠️ THE GUARD THAT MAKES THIS SAFE TO SHIP. add.72's hardest lesson was that a graph can run
     // with sync=cudaSuccess and sanitizer-clean and still compute garbage (err_max 4.29e+132) when
     // an address it baked has moved. Anything that reallocates a slot limb makes every kernel node
@@ -834,7 +896,7 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
                      key.level, slots);
         cudaGraphExecDestroy(e.exec);
         e.exec = nullptr;
-        e.poisoned = true;
+        ent.poisoned = true;
         return false;
     }
 
@@ -849,7 +911,7 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
                      e.in_bufs.size());
         cudaGraphExecDestroy(e.exec);
         e.exec = nullptr;
-        e.poisoned = true;
+        ent.poisoned = true;
         return false;
     }
     // ⚠️ btsPreScale is NOT in the key and is NOT parameterised — deliberately.
@@ -979,7 +1041,7 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
                 std::fprintf(stderr, "[bts_cache] input limb %zu width changed — eager\n", i);
                 cudaGraphExecDestroy(e.exec);
                 e.exec = nullptr;
-                e.poisoned = true;
+                ent.poisoned = true;
                 return false;
             }
             cudaMemcpyAsync(e.in_bufs[i].first, src[i].first, src[i].second, cudaMemcpyDeviceToDevice, s);
@@ -995,15 +1057,15 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
         CudaNvtxRange _launch_range("bts_cache.hit.launch");
         if (cudaGraphLaunch(e.exec, s) != cudaSuccess) {
             std::fprintf(stderr, "[bts_cache] replay launch failed at hit %llu — dropping exec, going eager\n",
-                         (unsigned long long)e.hits);
+                         (unsigned long long)ent.hits);
             cudaGraphExecDestroy(e.exec);
             e.exec = nullptr;
-            e.poisoned = true;
+            ent.poisoned = true;
             cudaGetLastError();
             return false;
         }
     }
-    ++e.hits;
+    ++ent.hits;
 
     // ⚠️ ORDER THE COPY-OUT AGAINST THE GRAPH, WITHOUT A DEVICE SYNC.
     // A graph launched on stream `s` executes ALL its work as part of `s` — the streams that were
@@ -1029,9 +1091,9 @@ static bool BootstrapCached(Ciphertext& ctxt, const int slots, const bool presca
     // Replay ran no host code, but the slot was left carrying the post-bootstrap metadata by the
     // capture and nothing since has changed it, so the delta is already applied. Re-assert it
     // anyway: it is free, and it documents that the output shape is a property of the SHAPE KEY.
-    e.slot->NoiseLevel = e.out_noise;
-    e.slot->NoiseFactor = e.out_nf;
-    e.slot->slots = e.out_slots;
+    e.slot->NoiseLevel = ent.out_noise;
+    e.slot->NoiseFactor = ent.out_nf;
+    e.slot->slots = ent.out_slots;
 
     ctxt.copy(*e.slot);
     // ⚠️ Report a RUNNING TOTAL, not the first few events. The previous print was capped at 3
@@ -1791,9 +1853,12 @@ int FIDESlib::CKKS::BootstrapPrecapture(FIDESlib::CKKS::Context& cc) {
         synth_bts(shapes.front());
     int done = 0;
     for (const auto& s : shapes) {
-        synth_bts(s);
+        // One call per RING member: each miss captures the next sub-slot for the shape.
+        for (int r = 0; r < btsSlotRing(); ++r)
+            synth_bts(s);
         ++done;
     }
-    std::fprintf(stderr, "[bts_cache] precapture: %d shape(s) from %s\n", done, jp);
+    std::fprintf(stderr, "[bts_cache] precapture: %d shape(s) x %d sub-slot(s) from %s\n", done,
+                 btsSlotRing(), jp);
     return done;
 }
