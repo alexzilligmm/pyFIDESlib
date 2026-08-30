@@ -977,6 +977,19 @@ void Ciphertext::addScalar(const double c) {
 	CKKS::SetCurrentContext(cc_);
 	op_count[OPS::ADDSCALAR]++;
 
+	if (c == 0.0)
+		return;
+
+	// FIDESLIB_SCALAR_DEV_MEMO (add.166 add.72): when armed, the residues — sign flip included —
+	// come from a persistent device buffer, removing the per-call cudaMallocAsync + PAGEABLE
+	// cudaMemcpyAsync + cudaFreeAsync inside LimbPartition::addScalar. The negation is part of the
+	// memo KEY, not applied afterwards: the returned buffer is shared and must not be mutated.
+	// nullptr => knob off or allocation refused, so the eager path below stays the default.
+	if (const uint64_t* d_elem = cc.DevElemForEvalAddOrSub(c0.getLevel(), std::abs(c), this->NoiseLevel, c < 0.0)) {
+		c0.addScalar(d_elem);
+		return;
+	}
+
 	auto elem = cc.ElemForEvalAddOrSub(c0.getLevel(), std::abs(c), this->NoiseLevel);
 
 	if (c < 0.0) {
@@ -985,8 +998,7 @@ void Ciphertext::addScalar(const double c) {
 		}
 	}
 	// if (c >= 0.0) {
-	if (c != 0.0)
-		c0.addScalar(elem);
+	c0.addScalar(elem);
 	//} else {
 	//    c0.subScalar(elem);
 	//}

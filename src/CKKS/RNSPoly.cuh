@@ -109,6 +109,7 @@ class RNSPoly {
     void squareElement(const RNSPoly& poly);
     void binomialSquareFold(RNSPoly& c0_res, const RNSPoly& c2_key_switched_0, const RNSPoly& c2_key_switched_1);
     void addScalar(std::vector<uint64_t>& vector1);
+    void addScalar(const uint64_t* d_elems);   // FIDESLIB_SCALAR_DEV_MEMO (add.166 add.72)
     void subScalar(std::vector<uint64_t>& vector1);
     void copy(const RNSPoly& poly);
     void dropToLevel(int level);

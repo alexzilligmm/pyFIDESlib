@@ -491,7 +491,15 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
         int size;
     };
     vector_gpu digits{.size = cc.dnum * 6};
-    cudaMallocAsync(&digits.data, digits.size * sizeof(void**), s.ptr());
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72). THIS is the table compute-sanitizer named as
+    // graph-replay fault 2: fusedDotKSKRegen4_<28>(..., void*** digits, ...) reading an address
+    // "potentially made before memory is allocated". Per call it was a cudaMallocAsync graph
+    // memory node, so replay handed the kernel a different buffer than capture recorded. The size
+    // is 6*dnum — a per-context CONSTANT — so one persistent buffer serves every call.
+    digits.data = (void***)scratchGet(SC_MGPU_DOTKSK, (size_t)digits.size * sizeof(void**));
+    const bool digits_persist = digits.data != nullptr;
+    if (!digits_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&digits.data, (size_t)digits.size * sizeof(void**), s.ptr());
     //VectorGPU<void**> digits(s, cc.dnum * 6, device);
     std::vector<void**> h_digits(cc.dnum * 6, nullptr);
     LimbPartition& out1 = *this;
@@ -529,7 +537,8 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
             num_limbs++;
 
         if (num_special + num_limbs > 0) {
-            cudaMemcpyAsync(digits.data, h_digits.data(), cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
+            cudaMemcpyAsync(digits.data, CAP_SRC(h_digits.data(), cc.dnum * 6 * sizeof(void**)),
+                            cc.dnum * 6 * sizeof(void**), cudaMemcpyDefault, s.ptr());
             assert(ksk_a.key_pack_bits == ksk_b.key_pack_bits);
             int regen_shape;
             const uint32_t* regen_seed = kskRegenSeed(ksk_a, 128, &regen_shape);
@@ -539,7 +548,8 @@ void LimbPartition::dotKSKfusedMGPU(LimbPartition& out2, const LimbPartition& di
                                 regen_seed, (uint32_t)cc.N >> 4, regen_shape, cc.precom.constants[0].type);
         }
     }
-    cudaFreeAsync(digits.data, s.ptr());
+    if (!digits_persist)
+        FIDESlib::captureSafeFreeAsync(digits.data, s.ptr());
     //digits.free(s);
 
     src.getS().wait(s);
@@ -562,7 +572,13 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
     // same trick offset_indexes already uses for its ints — no extra allocation, no extra copy.
     const int seed_slots = 4 * n;
     vector_gpu digits{.size = n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n + seed_slots};
-    cudaMallocAsync(&digits.data, digits.size * sizeof(void**), s.ptr());
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72): same pointer-table-address problem as
+    // dotKSKfusedMGPU, but the size scales with `n` (the hoist fan-out), so the slot is grow-only
+    // and settles at the largest fan-out seen. hoistedRotateDotKSKRegen4_ reads this table.
+    digits.data = (void***)scratchGet(SC_MGPU_HOISTROT, (size_t)digits.size * sizeof(void**));
+    const bool digits_persist = digits.data != nullptr;
+    if (!digits_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&digits.data, (size_t)digits.size * sizeof(void**), s.ptr());
 
     //VectorGPU<void**> digits(s, n * cc.dnum * 6 + cc.dnum * 6 + 4 * n + n, device);
     std::vector<void**> h_digits(digits.size, nullptr);
@@ -664,7 +680,8 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
                 for (int t = 0; t < 8; ++t)
                     ((uint32_t*)&h_digits[offset_seeds])[k * 8 + t] = ksk_a[k]->ksk_seed[t];
 
-        cudaMemcpyAsync(digits.data, h_digits.data(), h_digits.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
+        cudaMemcpyAsync(digits.data, CAP_SRC(h_digits.data(), h_digits.size() * sizeof(void**)),
+                        h_digits.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
 
         const int kpb = ksk_a.empty() ? 0 : ksk_a[0]->key_pack_bits;
         // REGEN: 16 coefficients per thread => grid.x shrinks by 16 and the digit smem cache
@@ -724,7 +741,8 @@ void LimbPartition::fusedHoistRotate(int n, std::vector<int> indexes, std::vecto
         c0[i]->s.wait(s);
         c1[i]->s.wait(s);
     }
-    cudaFreeAsync(digits.data, s.ptr());
+    if (!digits_persist)
+        FIDESlib::captureSafeFreeAsync(digits.data, s.ptr());
     //digits.free(s);
 }
 
@@ -799,8 +817,15 @@ void LimbPartition::modup_ksk_moddown_mgpu(
     void*** digits;  //(s, cc.dnum * 5, device);
     if (exec_old != map_exec.end()) {
         digits = exec_old->second.digits;
+    } else if (void* sc = scratchGet(SC_MGPU_MODDOWN, digits_size * sizeof(void**))) {
+        // FIDESLIB_PERSIST_SCRATCH (add.166 add.72). The cache-HIT path was already persistent
+        // (cached_graph::digits, allocated once per (params, level, moddown) and never freed); the
+        // MISS path allocated per call — a graph memory node, and a leak whenever no exec is
+        // cached. One slot serves every key: the size is the constant 6*dnum and the table is
+        // refilled by the memcpy below on every call regardless.
+        digits = (void***)sc;
     } else {
-        cudaMallocAsync(&digits, 6 * cc.dnum * sizeof(void**), s.ptr());
+        FIDESlib::captureSafeMallocAsync((void**)&digits, 6 * cc.dnum * sizeof(void**), s.ptr());
         //digits = std::make_shared<VectorGPU<void**>>(s, 5 * cc.dnum, device);
     }
     CudaCheckErrorModNoSync;
@@ -812,7 +837,8 @@ void LimbPartition::modup_ksk_moddown_mgpu(
         h_digits[j + 4 * cc.dnum] = ksk_a.limbptr.data;
         h_digits[j + 5 * cc.dnum] = ksk_b.limbptr.data;
     }
-    cudaMemcpyAsync(digits, h_digits.data(), digits_size * sizeof(void**), cudaMemcpyDefault, s.ptr());
+    cudaMemcpyAsync(digits, CAP_SRC(h_digits.data(), digits_size * sizeof(void**)),
+                    digits_size * sizeof(void**), cudaMemcpyDefault, s.ptr());
 
     s.wait(auxLimbs1.s);
     s.wait(auxLimbs2.s);

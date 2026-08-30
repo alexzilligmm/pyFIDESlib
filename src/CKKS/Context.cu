@@ -474,6 +474,36 @@ const uint64_t* ContextData::DevElemForEvalMult(int level, const double operand,
     return it->second;
 }
 
+const uint64_t* ContextData::DevElemForEvalAddOrSub(const int level, const double operand, const int noise_deg,
+                                                    const bool negate) {
+    if (!scalarDevMemoEnabled())
+        return nullptr;
+    uint64_t operand_bits;
+    std::memcpy(&operand_bits, &operand, sizeof(operand_bits));
+    const AddMemoKey memo_key{level, noise_deg, operand_bits, negate};
+    {
+        std::lock_guard<std::mutex> g(elem_memo_mutex);
+        auto it = dev_add_memo.find(memo_key);
+        if (it != dev_add_memo.end())
+            return it->second;
+    }
+    // Build the residues exactly as the eager path does, INCLUDING the sign flip, so the device
+    // copy and the host vector can never disagree. Same allocation discipline as
+    // DevElemForEvalMult: plain cudaMalloc + synchronous copy, O(distinct scalars) times per run.
+    std::vector<uint64_t> host = ElemForEvalAddOrSub(level, operand, noise_deg);
+    if (negate)
+        for (size_t i = 0; i < host.size(); ++i)
+            host[i] = prime[i].p - host[i];
+    uint64_t* d = nullptr;
+    if (cudaMalloc(&d, host.size() * sizeof(uint64_t)) != cudaSuccess || d == nullptr)
+        return nullptr;   // fall back to the eager path; never fail the op over a cache
+    cudaMemcpy(d, host.data(), host.size() * sizeof(uint64_t), cudaMemcpyHostToDevice);
+    std::lock_guard<std::mutex> g(elem_memo_mutex);
+    auto [it, inserted] = dev_add_memo.emplace(memo_key, d);
+    if (!inserted) cudaFree(d);   // lost a race; keep the winner
+    return it->second;
+}
+
 std::vector<uint64_t> ContextData::ElemForEvalMult(int level, const double operand, int level_in) {
 
     // Memoized: the Chebyshev evaluator calls this once per weight per bootstrap with a

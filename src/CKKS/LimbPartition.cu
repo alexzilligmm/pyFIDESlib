@@ -2,6 +2,7 @@
 // Created by carlosad on 27/04/24.
 //
 #include <atomic>
+#include <cstdio>    // fprintf for the capture-time scratch-growth warning
 #include <cstdlib>   // getenv/atoi for FIDESLIB_COPY_BYTES
 #include <stdexcept>
 #include <string>
@@ -29,8 +30,7 @@ using sc = std::source_location;
 constexpr int PREFIX_SIZE = 23;
 #endif
 
-// add.166 add.71: while capturing, a memcpy's host SOURCE must outlive the capture.
-#define CAP_SRC(p, n) (FIDESlib::captureActive() ? FIDESlib::stageForCapture((p), (n)) : (const void*)(p))
+// CAP_SRC (add.166 add.71) now lives in CudaUtils.cuh — MGPU needs it too (add.72).
 
 namespace FIDESlib::CKKS {
 
@@ -86,6 +86,12 @@ LimbPartition::LimbPartition(LimbPartition&& l) noexcept
     l.bufferGATHER = nullptr;
     l.bufferDECOMPandDIGIT_handle = nullptr;
     l.bufferGATHER_handle = nullptr;
+    for (int i = 0; i < SC_N; ++i) {
+        scratch_[i] = l.scratch_[i];
+        l.scratch_[i] = DevScratch{};   // else both dtors cudaFree the same pointer
+    }
+    scratch_retired_ = std::move(l.scratch_retired_);
+    l.scratch_retired_.clear();
 }
 
 std::vector<VectorGPU<void*>> LimbPartition::generateDecompLimbptr(
@@ -96,6 +102,72 @@ std::vector<VectorGPU<void*>> LimbPartition::generateDecompLimbptr(
         offset += MAXP;
     }
     return result;
+}
+
+/** FIDESLIB_PERSIST_SCRATCH — see the LimbPartition::scratch_ doc block. Default ON; =0 restores
+ *  the per-call cudaMallocAsync/FreeAsync at every converted site, which is the A/B arm. */
+bool persistScratchEnabled() {
+    static const bool v = [] {
+        const char* e = std::getenv("FIDESLIB_PERSIST_SCRATCH");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return v;
+}
+
+void* LimbPartition::scratchGet(const int slot, const size_t bytes) {
+    if (!persistScratchEnabled() || bytes == 0)
+        return nullptr;
+    assert(slot >= 0 && slot < SC_N);
+    DevScratch& sc = scratch_[slot];
+    if (sc.p != nullptr && sc.bytes >= bytes)
+        return sc.p;
+    // GROWING DURING A CAPTURE IS SAFE; RECLAIMING IS NOT.
+    // cudaMalloc is a host call, not a stream operation, so it is legal while a stream is
+    // capturing and the address it returns is fixed before any node bakes it — the buffer then
+    // outlives the graph, which is exactly the property replay needs. What is NOT legal is the
+    // reclaim half: cudaStreamSynchronize on a CAPTURING stream fails, and freeing the old buffer
+    // could hand the pool memory a recorded node still writes (the add.70 hazard). So while
+    // capturing, retire the old buffer instead of freeing it and settle up afterwards.
+    // ⚠️ This matters because the mode-2/3 probes capture on a FRESH CLONE whose partitions have
+    // never run a bootstrap, so every slot is cold at capture no matter how long the warm-up was.
+    const bool capturing = FIDESlib::captureActive();
+    cudaSetDevice(device);
+    void* p = nullptr;
+    if (cudaMalloc(&p, bytes) != cudaSuccess || p == nullptr) {
+        cudaGetLastError();   // never fail the op over a scratch buffer
+        return nullptr;
+    }
+    if (sc.p != nullptr) {
+        if (capturing) {
+            scratch_retired_.push_back(sc.p);
+        } else {
+            // The old buffer may still be read by work already enqueued on this partition's stream.
+            cudaStreamSynchronize(s.ptr());
+            cudaFree(sc.p);
+        }
+    }
+    if (!capturing && !scratch_retired_.empty()) {
+        cudaStreamSynchronize(s.ptr());
+        for (void* q : scratch_retired_)
+            cudaFree(q);
+        scratch_retired_.clear();
+    }
+    sc.p = p;
+    sc.bytes = bytes;
+    return sc.p;
+}
+
+void LimbPartition::scratchFreeAll() {
+    for (void* q : scratch_retired_)
+        cudaFree(q);
+    scratch_retired_.clear();
+    for (auto& sc : scratch_) {
+        if (sc.p) {
+            cudaFree(sc.p);
+            sc.p = nullptr;
+            sc.bytes = 0;
+        }
+    }
 }
 
 void** CudaMallocAuxBuffer(Stream& stream, unsigned long size, int device) {
@@ -208,6 +280,7 @@ LimbPartition::~LimbPartition() {
         GPUfree(bufferLIMB, id, (int)bufferLIMBbytes, s.ptr());  // FAILURE §7
         //cudaFreeAsync(bufferLIMB, s.ptr());
     }
+    scratchFreeAll();   // plain cudaMalloc'd, so plain cudaFree — never GPUfree/cudaFreeAsync
     if (bufferAUXptrs)
         GPUfree(bufferAUXptrs, id, MAXP * sizeof(void*) * (4ul + 4 * std::max(cc.dnum, 1)), s.ptr(), false);
     // cudaFreeAsync(bufferAUXptrs, s.ptr());
@@ -2860,9 +2933,13 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
      */
     const int limbsize = getLimbSize(*level);
 
-    uint64_t* elems;
-    cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
-    //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72): persistent operand buffer, so no memory
+    // node with an unstable replay address. The memo path above skips the copy entirely.
+    const size_t elems_bytes = vector.size() * sizeof(uint64_t);
+    uint64_t* elems = (uint64_t*)scratchGet(SC_SCALAR_MULT, elems_bytes);
+    const bool elems_persist = elems != nullptr;
+    if (!elems_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&elems, elems_bytes, s.ptr());
     cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
 
     for (int i = 0; i < limbsize; i += cc.batch) {
@@ -2880,7 +2957,8 @@ void LimbPartition::multScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
     }
-    cudaFreeAsync(elems, s.ptr());
+    if (!elems_persist)
+        FIDESlib::captureSafeFreeAsync(elems, s.ptr());
 }
 
 // FIDESLIB_SCALAR_DEV_MEMO (add.166 add.62): same launches, byte for byte, but the operand
@@ -2912,9 +2990,13 @@ void LimbPartition::multScalar(const uint64_t* d_elems) {
 void LimbPartition::addScalar(std::vector<uint64_t>& vector) {
     const int limbsize = getLimbSize(*level);
     cudaSetDevice(device);
-    uint64_t* elems;
-    cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
-    //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72): persistent operand buffer, so no memory
+    // node with an unstable replay address. The memo path above skips the copy entirely.
+    const size_t elems_bytes = vector.size() * sizeof(uint64_t);
+    uint64_t* elems = (uint64_t*)scratchGet(SC_SCALAR_ADD, elems_bytes);
+    const bool elems_persist = elems != nullptr;
+    if (!elems_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&elems, elems_bytes, s.ptr());
     cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
@@ -2932,15 +3014,46 @@ void LimbPartition::addScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
     }
-    cudaFreeAsync(elems, s.ptr());
+    if (!elems_persist)
+        FIDESlib::captureSafeFreeAsync(elems, s.ptr());
+}
+
+// FIDESLIB_SCALAR_DEV_MEMO (add.166 add.72): the addScalar twin of multScalar(const uint64_t*) —
+// same launches byte for byte, but the residues come from ContextData::DevElemForEvalAddOrSub's
+// persistent device buffer, so this path has NO allocation and NO host->device copy at all. Under
+// graph capture that removes both an unstable-address memory node and a dead-host-source memcpy.
+void LimbPartition::addScalar(const uint64_t* d_elems) {
+    const int limbsize = getLimbSize(*level);
+    cudaSetDevice(device);
+    for (int i = 0; i < limbsize; i += cc.batch) {
+        STREAM(limb[i]).wait(s);
+        uint32_t num_limbs = std::min((int)limbsize - i, cc.batch);
+        int primeid_init = PARTITION(id, i);
+        const int scalar_add_bpt = fideslibAddBytes();
+        const size_t scalar_add_bpl = FIDESLIB_ADD_VEC ? uniform_limb_bytes(meta, (size_t)i, (size_t)num_limbs, cc.N) : 0;
+        if (scalar_add_bpl && (scalar_add_bpl % (size_t)(scalar_add_bpt * 128)) == 0)
+            launchScalarAddSubBytes(dim3{(uint32_t)(scalar_add_bpl / (scalar_add_bpt * 128)), num_limbs}, dim3{128},
+                                    STREAM(limb[i]).ptr(), limbptr.data + i, (uint64_t*)d_elems, PARTITION(id, i),
+                                    scalar_add_bpt, false);
+        else
+            scalar_add_<<<dim3{(uint32_t)cc.N / 128, num_limbs}, 128, 0, STREAM(limb[i]).ptr()>>>(
+                limbptr.data + i, (uint64_t*)d_elems, primeid_init);
+    }
+    for (int i = 0; i < limbsize; i += cc.batch) {
+        s.wait(STREAM(limb[i]));
+    }
 }
 
 void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
     const int limbsize = getLimbSize(*level);
     cudaSetDevice(device);
-    uint64_t* elems;
-    cudaMallocAsync(&elems, vector.size() * sizeof(uint64_t), s.ptr());
-    //cudaMalloc(&elems, vector.size() * sizeof(uint64_t));
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72): persistent operand buffer, so no memory
+    // node with an unstable replay address. The memo path above skips the copy entirely.
+    const size_t elems_bytes = vector.size() * sizeof(uint64_t);
+    uint64_t* elems = (uint64_t*)scratchGet(SC_SCALAR_SUB, elems_bytes);
+    const bool elems_persist = elems != nullptr;
+    if (!elems_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&elems, elems_bytes, s.ptr());
     cudaMemcpyAsync(elems, CAP_SRC(vector.data(), vector.size() * sizeof(uint64_t)), vector.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
     for (int i = 0; i < limbsize; i += cc.batch) {
         STREAM(limb[i]).wait(s);
@@ -2957,7 +3070,8 @@ void LimbPartition::subScalar(std::vector<uint64_t>& vector) {
     for (int i = 0; i < limbsize; i += cc.batch) {
         s.wait(STREAM(limb[i]));
     }
-    cudaFreeAsync(elems, s.ptr());
+    if (!elems_persist)
+        FIDESlib::captureSafeFreeAsync(elems, s.ptr());
 }
 
 void LimbPartition::add(const LimbPartition& a, const LimbPartition& b, const bool ext_a, const bool ext_b) {
@@ -3101,8 +3215,12 @@ void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& 
     // re-reads them at prime k's width via ISU64).
     const size_t slot = (size_t)cc.N * sizeof(uint64_t);
     uint8_t* snap;
-    cudaMallocAsync(&snap, (size_t)d * slot + d * sizeof(void*) + (qhatinv.size() + qhat.size()) * sizeof(uint64_t),
-                    s.ptr());
+    // add.166 add.72: capture-safe. `snap` also HOLDS device pointers into ITSELF (srcptrs below),
+    // so an address that moves between capture and replay is not just a dangling buffer — the
+    // baked pointer table would aim at the previous instance.
+    FIDESlib::captureSafeMallocAsync(
+        (void**)&snap, (size_t)d * slot + d * sizeof(void*) + (qhatinv.size() + qhat.size()) * sizeof(uint64_t),
+        s.ptr());
     void** srcptrs = (void**)(snap + (size_t)d * slot);
     uint64_t* dev_qhatinv = (uint64_t*)(srcptrs + d);
     uint64_t* dev_qhat = dev_qhatinv + qhatinv.size();
@@ -3115,13 +3233,16 @@ void LimbPartition::compositeModRaise(const int d, const std::vector<uint64_t>& 
         const size_t bytes = (size_t)cc.N * (limb.at(k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
         cudaMemcpyAsync(hostptrs[k], v, bytes, cudaMemcpyDeviceToDevice, s.ptr());
     }
-    cudaMemcpyAsync(srcptrs, hostptrs.data(), d * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    cudaMemcpyAsync(dev_qhatinv, qhatinv.data(), qhatinv.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
-    cudaMemcpyAsync(dev_qhat, qhat.data(), qhat.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(srcptrs, CAP_SRC(hostptrs.data(), d * sizeof(void*)), d * sizeof(void*),
+                    cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_qhatinv, CAP_SRC(qhatinv.data(), qhatinv.size() * sizeof(uint64_t)),
+                    qhatinv.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_qhat, CAP_SRC(qhat.data(), qhat.size() * sizeof(uint64_t)),
+                    qhat.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
 
     compositeModRaise_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(limbptr.data, srcptrs, d,
                                                                                            dev_qhatinv, dev_qhat);
-    cudaFreeAsync(snap, s.ptr());
+    FIDESlib::captureSafeFreeAsync(snap, s.ptr());
 }
 void LimbPartition::coeffLiftCentered(const uint64_t q0, const uint64_t q1,
                                       const uint64_t q0inv_mod_q1, const uint64_t Qhalf,
@@ -3135,7 +3256,8 @@ void LimbPartition::coeffLiftCentered(const uint64_t q0, const uint64_t q1,
     // the two sources, so copy them aside first. Slots are 8*N bytes regardless of limb width.
     const size_t slot = (size_t)cc.N * sizeof(uint64_t);
     uint8_t* snap;
-    cudaMallocAsync(&snap, 2 * slot + 2 * sizeof(void*) + Q0_mod_qi.size() * sizeof(uint64_t), s.ptr());
+    FIDESlib::captureSafeMallocAsync((void**)&snap,
+                                     2 * slot + 2 * sizeof(void*) + Q0_mod_qi.size() * sizeof(uint64_t), s.ptr());
     void** srcptrs = (void**)(snap + 2 * slot);
     uint64_t* dev_Q0mod = (uint64_t*)(srcptrs + 2);
 
@@ -3147,13 +3269,14 @@ void LimbPartition::coeffLiftCentered(const uint64_t q0, const uint64_t q1,
         const size_t bytes = (size_t)cc.N * (limb.at(k).index() == U64 ? sizeof(uint64_t) : sizeof(uint32_t));
         cudaMemcpyAsync(hostptrs[k], v, bytes, cudaMemcpyDeviceToDevice, s.ptr());
     }
-    cudaMemcpyAsync(srcptrs, hostptrs.data(), 2 * sizeof(void*), cudaMemcpyHostToDevice, s.ptr());
-    cudaMemcpyAsync(dev_Q0mod, Q0_mod_qi.data(), Q0_mod_qi.size() * sizeof(uint64_t),
+    cudaMemcpyAsync(srcptrs, CAP_SRC(hostptrs.data(), 2 * sizeof(void*)), 2 * sizeof(void*),
                     cudaMemcpyHostToDevice, s.ptr());
+    cudaMemcpyAsync(dev_Q0mod, CAP_SRC(Q0_mod_qi.data(), Q0_mod_qi.size() * sizeof(uint64_t)),
+                    Q0_mod_qi.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, s.ptr());
 
     coeffLiftCentered2_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
         limbptr.data, srcptrs, q0, q1, q0inv_mod_q1, Qhalf, dev_Q0mod);
-    cudaFreeAsync(snap, s.ptr());
+    FIDESlib::captureSafeFreeAsync(snap, s.ptr());
 }
 void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*> ps, std::vector<uint64_t>& weights) {
     const int limbsize = getLimbSize(*level);
@@ -3162,19 +3285,25 @@ void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*>
         s.wait(ps[i]->getS());
     }
 
-    uint64_t* elems;
-    cudaMallocAsync(&elems, weights.size() * sizeof(uint64_t), s.ptr());
-    //cudaMalloc(&elems, weights.size() * sizeof(uint64_t));
-    cudaMemcpyAsync(elems, weights.data(), weights.size() * sizeof(uint64_t), cudaMemcpyDefault, s.ptr());
+    // FIDESLIB_PERSIST_SCRATCH (add.166 add.72): persistent operand buffer, so no memory
+    // node with an unstable replay address. The memo path above skips the copy entirely.
+    const size_t elems_bytes = weights.size() * sizeof(uint64_t);
+    uint64_t* elems = (uint64_t*)scratchGet(SC_LINWSUM_W, elems_bytes);
+    const bool elems_persist = elems != nullptr;
+    if (!elems_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&elems, elems_bytes, s.ptr());
+    cudaMemcpyAsync(elems, CAP_SRC(weights.data(), elems_bytes), elems_bytes, cudaMemcpyDefault, s.ptr());
     std::vector<void**> psptr(n, nullptr);
     for (int i = 0; i < n; ++i) {
         psptr[i] = ps[i]->limbptr.data;
         assert(ps[i]->limb.size() >= limbsize);
     }
-    void*** d_psptr;
-    cudaMallocAsync(&d_psptr, psptr.size() * sizeof(void**), s.ptr());
-    //cudaMalloc(&d_psptr, psptr.size() * sizeof(void**));
-    cudaMemcpyAsync(d_psptr, psptr.data(), psptr.size() * sizeof(void**), cudaMemcpyDefault, s.ptr());
+    const size_t psptr_bytes = psptr.size() * sizeof(void**);
+    void*** d_psptr = (void***)scratchGet(SC_LINWSUM_PS, psptr_bytes);
+    const bool psptr_persist = d_psptr != nullptr;
+    if (!psptr_persist)
+        FIDESlib::captureSafeMallocAsync((void**)&d_psptr, psptr_bytes, s.ptr());
+    cudaMemcpyAsync(d_psptr, CAP_SRC(psptr.data(), psptr_bytes), psptr_bytes, cudaMemcpyDefault, s.ptr());
 
     {
         const int elws_bpt = fideslibAddBytes();
@@ -3186,8 +3315,10 @@ void LimbPartition::evalLinearWSum(uint32_t n, std::vector<const LimbPartition*>
             eval_linear_w_sum_<<<dim3{(uint32_t)cc.N / 128, (uint32_t)limbsize}, 128, 0, s.ptr()>>>(
                 n, limbptr.data, d_psptr, elems, PARTITION(id, 0));
     }
-    cudaFreeAsync(elems, s.ptr());
-    cudaFreeAsync(d_psptr, s.ptr());
+    if (!elems_persist)
+        FIDESlib::captureSafeFreeAsync(elems, s.ptr());
+    if (!psptr_persist)
+        FIDESlib::captureSafeFreeAsync(d_psptr, s.ptr());
     for (uint32_t i = 0; i < n; ++i) {
         ps[i]->getS().wait(s);
     }

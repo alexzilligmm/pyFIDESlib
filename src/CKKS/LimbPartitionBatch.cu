@@ -19,6 +19,39 @@
 
 namespace FIDESlib::CKKS {
 
+namespace {
+/** The seven batch helpers in this file all build one device POINTER TABLE per call, from a
+ *  function-local std::vector, and used to wrap it in cudaMallocAsync / cudaFreeAsync. Under CUDA
+ *  graph capture that pair becomes a memory node whose address differs at replay while the kernel
+ *  nodes keep the capture-time one — the add.71 fault class. This holds the persistent-vs-per-call
+ *  decision in one place (FIDESLIB_PERSIST_SCRATCH, add.166 add.72).
+ *
+ *  The slot is hung on the object whose stream drives the op (element [0] / acc0), which is the
+ *  object these static helpers already borrow `s` from, so reuse across calls is serialised by
+ *  that stream exactly as the malloc/free pair was. The per-call memcpy stays — only the ADDRESS
+ *  becomes stable — and its host source now goes through CAP_SRC so it outlives a capture. */
+struct BatchPtrTable {
+    void*** d = nullptr;
+    bool persist = false;
+    Stream& s;
+
+    BatchPtrTable(LimbPartition& owner, int slot, const std::vector<void**>& h, Stream& stream) : s(stream) {
+        const size_t bytes = sizeof(void**) * h.size();
+        d = (void***)owner.scratchGet(slot, bytes);
+        persist = d != nullptr;
+        if (!persist)
+            FIDESlib::captureSafeMallocAsync((void**)&d, bytes, s.ptr());
+        cudaMemcpyAsync(d, CAP_SRC(h.data(), bytes), bytes, cudaMemcpyHostToDevice, s.ptr());
+    }
+    ~BatchPtrTable() {
+        if (!persist && d)
+            FIDESlib::captureSafeFreeAsync(d, s.ptr());   // stream-ordered: end-of-scope == the old free point
+    }
+    BatchPtrTable(const BatchPtrTable&) = delete;
+    BatchPtrTable& operator=(const BatchPtrTable&) = delete;
+};
+}  // namespace
+
 void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const std::vector<LimbPartition*>& partb,
                                       int stride, double usage, bool sub, bool exta, bool extb) {
     ContextData& cc = parta[0]->cc;
@@ -71,10 +104,8 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
 
     Stream& s = parta[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*parta[0], LimbPartition::SC_BATCH_ADD, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
     s.wait(partb[0]->s);
     if (!sub) {
         if (!exta && !extb) {
@@ -133,7 +164,6 @@ void LimbPartition::addBatchManyToOne(std::vector<LimbPartition*>& parta, const 
         }
     }
     partb[0]->s.wait(s);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::multPtBatchManyToOne(std::vector<LimbPartition*>& parta, const std::vector<LimbPartition*>& partb,
@@ -173,16 +203,13 @@ void LimbPartition::multPtBatchManyToOne(std::vector<LimbPartition*>& parta, con
 
     Stream& s = parta[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*parta[0], LimbPartition::SC_BATCH_MULTPT, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
     s.wait(partb[0]->s);
     if (limbsize > 0)
         mult_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + its * split * partb.size(),
                                                      PARTITION(parta[0]->id, 0), n, its);
     partb[0]->s.wait(s);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::addScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
@@ -225,15 +252,12 @@ void LimbPartition::addScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
 
     Stream& s = parta[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*parta[0], LimbPartition::SC_BATCH_ADDSCALAR, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
 
     if (limbsize > 0)
         add_scalar_reuse_b___<<<grid, block, 0, s.ptr()>>>(data_ptrs_d, data_ptrs_d + its * split * vector.size(),
                                                            PARTITION(parta[0]->id, 0), n, its);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::multScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
@@ -280,17 +304,14 @@ void LimbPartition::multScalarBatchManyToOne(std::vector<LimbPartition*>& parta,
 
     Stream& s = parta[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*parta[0], LimbPartition::SC_BATCH_MULTSCALAR, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
 
     if (limbsize > 0)
         mult_scalar_reuse_b___<<<grid, block, 0, s.ptr()>>>(
             data_ptrs_d, data_ptrs_d + its * split * vector.size(),
             data_ptrs_d + its * split * vector.size() + split * vector.size() * MAXP, PARTITION(parta[0]->id, 0), n,
             its);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::binomialMultAccumBatch(LimbPartition& acc0, LimbPartition& acc1, LimbPartition& acc2,
@@ -316,10 +337,8 @@ void LimbPartition::binomialMultAccumBatch(LimbPartition& acc0, LimbPartition& a
     }
 
     Stream& s = acc0.s;
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * data_ptrs.size(), s.ptr());
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * data_ptrs.size(), cudaMemcpyHostToDevice,
-                    s.ptr());
+    BatchPtrTable tbl(acc0, LimbPartition::SC_BATCH_BINOMIAL, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
 
     s.wait(acc1.s);
     s.wait(acc2.s);
@@ -344,7 +363,6 @@ void LimbPartition::binomialMultAccumBatch(LimbPartition& acc0, LimbPartition& a
         b0[j]->getS().wait(s);
         b1[j]->getS().wait(s);
     }
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const std::vector<LimbPartition*>& in,
@@ -494,10 +512,8 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const 
 
     Stream& s = in[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*in[0], LimbPartition::SC_BATCH_LTDOT, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
     s.wait(out[0]->s);
     s.wait(pt[0]->s);
 
@@ -544,7 +560,6 @@ void LimbPartition::LTdotProductPtBatch(std::vector<LimbPartition*>& out, const 
     }
     out[0]->s.wait(s);
     pt[0]->s.wait(s);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 void LimbPartition::fusedHoistedRotateBatch(std::vector<LimbPartition*>& out, const std::vector<LimbPartition*>& in,
@@ -643,10 +658,8 @@ void LimbPartition::fusedHoistedRotateBatch(std::vector<LimbPartition*>& out, co
 
     Stream& s = in[0]->s;
 
-    void*** data_ptrs_d;
-    cudaMallocAsync(&data_ptrs_d, sizeof(void**) * size, s.ptr());
-    //cudaMalloc(&data_ptrs_d, sizeof(void**) * size);
-    cudaMemcpyAsync(data_ptrs_d, data_ptrs.data(), sizeof(void**) * size, cudaMemcpyHostToDevice, s.ptr());
+    BatchPtrTable tbl(*in[0], LimbPartition::SC_BATCH_HOISTROT, data_ptrs, s);
+    void*** const data_ptrs_d = tbl.d;
     s.wait(out[0]->s);
     s.wait(ksk_a[0] ? ksk_a[0]->s : ksk_a[1]->s);
 
@@ -659,7 +672,6 @@ void LimbPartition::fusedHoistedRotateBatch(std::vector<LimbPartition*>& out, co
 
     out[0]->s.wait(s);
     (ksk_a[0] ? ksk_a[0]->s : ksk_a[1]->s).wait(s);
-    cudaFreeAsync(data_ptrs_d, s.ptr());
 }
 
 }  // namespace FIDESlib::CKKS

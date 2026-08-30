@@ -181,12 +181,13 @@ void Limb<T>::load_async_ptr_u64src(const void* src, size_t coeffs, cudaStream_t
         // u32 limb: upload the wide payload to scratch, then narrow on device. Keeps the H2D
         // async; the scratch is stream-ordered so it frees behind the kernel.
         uint64_t* scratch = nullptr;
-        cudaMallocAsync(&scratch, coeffs * sizeof(uint64_t), stream);
-        cudaMemcpyAsync(scratch, src, coeffs * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+        FIDESlib::captureSafeMallocAsync((void**)&scratch, coeffs * sizeof(uint64_t), stream);
+        cudaMemcpyAsync(scratch, CAP_SRC(src, coeffs * sizeof(uint64_t)), coeffs * sizeof(uint64_t),
+                        cudaMemcpyHostToDevice, stream);
         constexpr int kThreads = 256;
         narrow_u64_to_u32_<<<(unsigned)((coeffs + kThreads - 1) / kThreads), kThreads, 0, stream>>>(
             reinterpret_cast<uint32_t*>(v.data), scratch, coeffs);
-        cudaFreeAsync(scratch, stream);
+        FIDESlib::captureSafeFreeAsync(scratch, stream);
     }
 }
 

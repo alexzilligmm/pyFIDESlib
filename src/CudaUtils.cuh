@@ -61,6 +61,21 @@ bool captureActive();
 // capture. Returns `src` unchanged when not needed or on failure. See CudaUtils.cu (add.166 add.71).
 const void* stageForCapture(const void* src, size_t bytes);
 void captureJoinAll(cudaStream_t origin, const std::vector<cudaStream_t>& forked, cudaEvent_t ev);
+
+/** Drop-in replacements for cudaMallocAsync / cudaFreeAsync at any site that can run inside a
+ *  graph capture (add.166 add.72). Outside a capture they ARE those calls. Inside one they use
+ *  plain cudaMalloc — a host call, so the buffer is not a graph MEMORY NODE and stays valid when
+ *  the graph is replayed — and remember the route so the block is later reclaimed with cudaFree
+ *  rather than handed to the async pool a replayable graph may still be writing. */
+void captureSafeMallocAsync(void** ptr, size_t bytes, cudaStream_t stream);
+void captureSafeFreeAsync(void* ptr, cudaStream_t stream);
+
+/** Wrap the HOST SOURCE of any cudaMemcpyAsync that can run inside a graph capture. Capture
+ *  records the source ADDRESS, and this library sources most of them from function-local
+ *  std::vectors that are dead by replay time. Was a local macro in LimbPartition.cu (add.71);
+ *  hoisted here because LimbPartitionMGPU.cu's three pointer-table copies were never staged at
+ *  all (add.72). No-op unless a capture is in flight. */
+#define CAP_SRC(p, n) (FIDESlib::captureActive() ? FIDESlib::stageForCapture((p), (n)) : (const void*)(p))
 inline void breakpoint() {}
 
 /* FATAL CUDA ERROR EXIT (2026-08-04). These three macros used `exit(0)`, which was wrong twice

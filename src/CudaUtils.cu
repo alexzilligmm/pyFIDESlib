@@ -11,6 +11,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include "CudaUtils.cuh"
 
 #include <iostream>
@@ -392,6 +393,53 @@ bool captureActive() {
     return g_capture_origin.load(std::memory_order_relaxed) != nullptr;
 }
 
+// Blocks GPUmalloc handed out via plain cudaMalloc because a capture was in flight (add.72). The
+// route has to be remembered: cudaFreeAsync on a cudaMalloc'd pointer is undefined, the same trap
+// `bufferSPECIALcudaMalloc` already records for generateSpecialLimb's communication arm. Empty on
+// every run that never captures, so the lookup in GPUfree is one uncontended empty-set check.
+std::mutex capture_raw_mtx;
+std::unordered_set<void*> capture_raw;
+// Fast-path gate. The free paths must not touch the SET without the lock — reading
+// unordered_set::empty() while another thread inserts is a data race — and on every run that never
+// captures the answer is always "empty", so a relaxed atomic makes the common case one load.
+std::atomic<size_t> capture_raw_count{0};
+
+void captureSafeMallocAsync(void** ptr, size_t bytes, cudaStream_t stream) {
+    if (!captureActive()) {
+        cudaMallocAsync(ptr, bytes, stream);
+        return;
+    }
+    *ptr = nullptr;
+    if (cudaMalloc(ptr, bytes) != cudaSuccess || *ptr == nullptr) {
+        cudaGetLastError();
+        return;
+    }
+    std::lock_guard<std::mutex> g(capture_raw_mtx);
+    if (capture_raw.insert(*ptr).second)
+        capture_raw_count.store(capture_raw.size(), std::memory_order_relaxed);
+}
+
+void captureSafeFreeAsync(void* ptr, cudaStream_t stream) {
+    if (!ptr)
+        return;
+    if (capture_raw_count.load(std::memory_order_relaxed) != 0) {
+        std::lock_guard<std::mutex> g(capture_raw_mtx);
+        auto it = capture_raw.find(ptr);
+        if (it != capture_raw.end()) {
+            // Do NOT free while the capture that recorded uses of this buffer is still in flight —
+            // that is the add.70 pool-aliasing hazard. Leave it registered; GPUfree/teardown will
+            // reclaim it once no capture is active.
+            if (captureActive())
+                return;
+            capture_raw.erase(it);
+            capture_raw_count.store(capture_raw.size(), std::memory_order_relaxed);
+            cudaFree(ptr);
+            return;
+        }
+    }
+    cudaFreeAsync(ptr, stream);
+}
+
 void captureAdoptStream(cudaStream_t s) {
     cudaStream_t origin = g_capture_origin.load(std::memory_order_relaxed);
     cudaEvent_t ev = g_capture_ev.load(std::memory_order_relaxed);
@@ -556,7 +604,13 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
         CudaCheckErrorModNoSync;
         if (free_limb.empty()) {
             uint64_t* base;
-            cudaMallocAsync(&base, MBs * 1024 * 1024, s[id].ptr());
+            // Same rule as the unpooled fallback below (add.72): a slab refilled DURING a capture
+            // must not be a graph memory node. Slab bases are never freed (only the carved chunks
+            // are recycled), so plain cudaMalloc needs no route bookkeeping here.
+            if (captureActive())
+                cudaMalloc(&base, MBs * 1024 * 1024);
+            else
+                cudaMallocAsync(&base, MBs * 1024 * 1024, s[id].ptr());
 
             for (int i = 0; i < MBs * 1024 * 1024; i += bytes) {
                 free_limb.emplace_back(((char*)base) + i);
@@ -598,6 +652,24 @@ void* GPUmalloc(int id, int bytes, cudaStream_t stream, bool cache) {
     }();
     if (0) {
         cudaMalloc(&ptr, bytes);
+    } else if (captureActive()) {
+        // ⚠️ WHILE CAPTURING, ALLOCATE OUTSIDE THE GRAPH (add.166 add.72). A cudaMallocAsync on a
+        // capturing stream becomes a graph MEMORY NODE, whose buffer is owned by the graph and is
+        // not valid at the moment replay's kernels write it — compute-sanitizer says exactly that:
+        //   Invalid __global__ write ... dotProductLtBatchedPt3___
+        //   Access to 0x… is potentially made before memory is allocated
+        //   and is inside the nearest allocation at 0x… of size 9,437,184 bytes
+        // 9,437,184 = N * |SPECIALmeta| * 2 * 8 = bufferSPECIAL (LimbPartition.cu:583), which
+        // reaches this fallback because that size is not a power of two.
+        // cudaMalloc is a HOST call, so it is not recorded, and the buffer simply outlives the
+        // graph — the same trick LimbPartition::scratchGet uses. Remember the pointer so GPUfree
+        // routes it to cudaFree: a cudaMalloc'd block must never reach cudaFreeAsync.
+        cudaMalloc(&ptr, bytes);
+        if (ptr) {
+            std::lock_guard<std::mutex> g(capture_raw_mtx);
+            if (capture_raw.insert(ptr).second)
+                capture_raw_count.store(capture_raw.size(), std::memory_order_relaxed);
+        }
     } else if (graph_bringup) {
         cudaMallocAsync(&ptr, bytes, stream);
     } else if (1) {
@@ -664,6 +736,19 @@ void GPUfree(void* ptr, int id, int bytes, cudaStream_t stream, bool cache) {
     // the real fix before this is ever cached or shipped.
     if (captureActive())
         return;
+
+    // A block GPUmalloc took from plain cudaMalloc during a capture (add.72) must go back the same
+    // way, and must NOT enter the async pool — the graph that recorded it may still be replayed.
+    if (capture_raw_count.load(std::memory_order_relaxed) != 0) {
+        std::lock_guard<std::mutex> g(capture_raw_mtx);
+        auto it = capture_raw.find(ptr);
+        if (it != capture_raw.end()) {
+            capture_raw.erase(it);
+            capture_raw_count.store(capture_raw.size(), std::memory_order_relaxed);
+            cudaFree(ptr);
+            return;
+        }
+    }
 
     uint64_t MBs = 1024;
     if (!gpufreeSized())

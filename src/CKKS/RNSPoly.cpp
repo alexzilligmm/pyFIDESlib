@@ -808,6 +808,13 @@ void RNSPoly::addScalar(std::vector<uint64_t>& vector1) {
         GPU[i].addScalar(vector1);
     }
 }
+void RNSPoly::addScalar(const uint64_t* d_elems) {
+#pragma omp parallel for num_threads(cc.GPUid.size())
+    for (size_t i = 0; i < cc.GPUid.size(); ++i) {
+        assert(omp_get_num_threads() == (int)cc.GPUid.size());
+        GPU[i].addScalar(d_elems);
+    }
+}
 void RNSPoly::subScalar(std::vector<uint64_t>& vector1) {
 #pragma omp parallel for num_threads(cc.GPUid.size())
     for (size_t i = 0; i < cc.GPUid.size(); ++i) {

@@ -274,8 +274,38 @@ class ContextData {
      *  kernel, same order => BIT-IDENTICAL by construction. That is the gate. */
     const uint64_t* DevElemForEvalMult(int level, double operand, int level_in = -1);
 
+    /** FIDESLIB_SCALAR_DEV_MEMO — the same write-once device memo for the ADD side (add.166
+     *  add.72). `LimbPartition::addScalar` had the identical per-call cudaMallocAsync + PAGEABLE
+     *  cudaMemcpyAsync + cudaFreeAsync triple, and under graph capture that is BOTH a memory node
+     *  with an unstable address AND a memcpy node with a dead host source.
+     *
+     *  ⚠️ `negate` is part of the KEY, not a post-processing step. Ciphertext::addScalar
+     *  (Ciphertext.cpp:974-993) computes the residues for |c| and then, for c < 0, rewrites the
+     *  vector in place as `p - elem[i]`. A memo returning a shared device buffer cannot be mutated
+     *  by its caller, so the flip has to happen inside the builder, which makes the two signs two
+     *  distinct entries. Keying on the un-negated operand and flipping afterwards would hand every
+     *  caller whichever sign happened to be built first — a silent wrong-answer bug. */
+    const uint64_t* DevElemForEvalAddOrSub(int level, double operand, int noise_deg, bool negate);
+
    private:
     std::unordered_map<ElemMemoKey, uint64_t*, ElemMemoKeyHash> dev_elem_memo;
+
+    struct AddMemoKey {
+        int level;
+        int noise_deg;
+        uint64_t operand_bits;
+        bool negate;
+        bool operator==(const AddMemoKey&) const = default;
+    };
+    struct AddMemoKeyHash {
+        size_t operator()(const AddMemoKey& k) const {
+            uint64_t h = k.operand_bits ^ ((uint64_t(uint32_t(k.level)) << 32) | uint32_t(k.noise_deg));
+            h ^= k.negate ? 0x1ull : 0x0ull;
+            h *= 0x9E3779B97F4A7C15ull;
+            return size_t(h ^ (h >> 32));
+        }
+    };
+    std::unordered_map<AddMemoKey, uint64_t*, AddMemoKeyHash> dev_add_memo;
 };
 
 Context GenCryptoContextGPU(const Parameters& param, const std::vector<int>& devs);

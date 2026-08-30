@@ -92,6 +92,62 @@ class LimbPartition {
     void* bufferDECOMPandDIGIT_handle = nullptr;
     void* bufferGATHER_handle = nullptr;
 
+    /** FIDESLIB_PERSIST_SCRATCH (default ON, add.166 add.72) — PERSISTENT working memory for the
+     *  short-lived device POINTER TABLES that a dozen call sites used to build with a per-call
+     *  cudaMallocAsync / cudaMemcpyAsync / cudaFreeAsync triple.
+     *
+     *  WHY. A captured CUDA graph bakes the addresses its kernel nodes were recorded with. A table
+     *  allocated per call gets a DIFFERENT address at replay, and the kernel reads the old one:
+     *  that is `fusedDotKSKRegen4_<28>(..., void***, ...)` faulting with "potentially made before
+     *  memory is allocated" (add.71, compute-sanitizer). Making the ADDRESS persistent is what
+     *  unblocks replay; the per-call memcpy that fills the table stays.
+     *
+     *  ONE SLOT PER PURPOSE, never shared between purposes — two live tables must not alias.
+     *  Grow-only: a bigger request frees the old buffer and allocates a new one, so `bytes` is the
+     *  high-water mark, not the current request. Shapes stabilise after a couple of bootstraps.
+     *
+     *  OWNERSHIP / CONCURRENCY. The slot lives on the object whose stream `s` drives the op — for
+     *  the static batch helpers that is element [0] (`parta[0]`, `in[0]`, `out[0]`, `acc0`), the
+     *  same object they already borrow the stream from. Reuse across calls is then serialised by
+     *  stream ordering, exactly the guarantee the cudaMallocAsync/FreeAsync pair gave. Multi-GPU
+     *  runs one partition per omp thread, so partitions never share a slot across threads.
+     *
+     *  ⚠️ Plain cudaMalloc/cudaFree, NOT GPUmalloc: the pool is gated on power-of-two sizes
+     *  (CudaUtils.cu:545) and these sizes are not, so pooling would fall through to the unpooled
+     *  path anyway — and the pool's record/wait handshake is the cross-stream cost this removes. */
+    enum ScratchSlot {
+        SC_BATCH_ADD,
+        SC_BATCH_MULTPT,
+        SC_BATCH_ADDSCALAR,
+        SC_BATCH_MULTSCALAR,
+        SC_BATCH_BINOMIAL,
+        SC_BATCH_LTDOT,
+        SC_BATCH_HOISTROT,
+        SC_MGPU_DOTKSK,
+        SC_MGPU_HOISTROT,
+        SC_MGPU_MODDOWN,
+        SC_SCALAR_MULT,
+        SC_SCALAR_ADD,
+        SC_SCALAR_SUB,
+        SC_LINWSUM_W,
+        SC_LINWSUM_PS,
+        SC_N
+    };
+    struct DevScratch {
+        void* p = nullptr;
+        size_t bytes = 0;
+    };
+    DevScratch scratch_[SC_N];
+    /** Buffers superseded by a grow that happened WHILE CAPTURING, where neither the stream sync
+     *  nor the free is legal. Drained on the next non-capturing grow and in the destructor. */
+    std::vector<void*> scratch_retired_;
+
+    /** Persistent scratch for `slot`, at least `bytes` big. Returns nullptr when the knob is off,
+     *  when the allocation fails, or when a GROW would be needed while a graph capture is in
+     *  flight — in every case the caller must fall back to its per-call allocation. */
+    void* scratchGet(int slot, size_t bytes);
+    void scratchFreeAll();
+
     /*
     LimbPartition(LimbPartition && lp) :
         device(lp.device),
@@ -273,6 +329,9 @@ class LimbPartition {
     void binomialSquareFold(LimbPartition& c0_res, const LimbPartition& c2_key_switched_0,
                             const LimbPartition& c2_key_switched_1);
     void addScalar(std::vector<uint64_t>& vector);
+    /** FIDESLIB_SCALAR_DEV_MEMO (add.166 add.72) — operand already on device, residues INCLUDING
+     *  the sign flip. Buffer is owned by ContextData::DevElemForEvalAddOrSub and outlives the call. */
+    void addScalar(const uint64_t* d_elems);
     void subScalar(std::vector<uint64_t>& vector);
     void dropLimb();
     void addMult(const LimbPartition& partition, const LimbPartition& partition1);
